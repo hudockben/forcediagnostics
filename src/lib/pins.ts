@@ -17,6 +17,11 @@ export const SHORT_LOCK_AFTER = 5; // wrong PINs in a row
 export const SHORT_LOCK_MS = 15 * 60 * 1000;
 export const HARD_LOCK_AFTER = 10; // wrong PINs in 24 hours
 
+// Wrong tries on one tablet this close together are one run of typos.
+const OWN_TYPOS_WINDOW = "2 minutes";
+const continuesRun = (deviceId: string) =>
+  sql`(${staffPins.lastFailedDeviceId} = ${deviceId} and ${staffPins.lastFailedAt} > now() - ${OWN_TYPOS_WINDOW}::interval)`;
+
 export type PinStatus = {
   hasPin: boolean;
   setAt: Date | null;
@@ -144,6 +149,9 @@ export async function setPin(actor: CurrentUser, userId: string, pin: string): P
       failuresSinceSignIn: 0,
       lastFailedAt: null,
       lastFailedDeviceId: null,
+      earlierFailures: 0,
+      earlierFailedAt: null,
+      earlierFailedDeviceId: null,
     };
     await tx
       .insert(staffPins)
@@ -199,10 +207,11 @@ export async function unlockPin(actor: CurrentUser, userId: string): Promise<Res
 }
 
 // Signing in with the password proves who you are, so it clears PIN locks.
+// Wrong tries stay counted, so the next PIN sign-in still reports them.
 export async function clearPinLocks(userId: string) {
   await systemDb
     .update(staffPins)
-    .set({ consecutiveFailures: 0, dailyFailures: 0, lockedUntil: null, lockedAt: null, failuresSinceSignIn: 0 })
+    .set({ consecutiveFailures: 0, dailyFailures: 0, lockedUntil: null, lockedAt: null })
     .where(eq(staffPins.userId, userId));
 }
 
@@ -239,7 +248,7 @@ export async function checkPinForSignIn(
   verify: (hash: string, pin: string) => Promise<boolean>,
 ): Promise<PinCheck> {
   const [person] = await systemDb
-    .select({ id: users.id })
+    .select({ id: users.id, username: users.displayUsername })
     .from(users)
     .where(and(eq(users.id, userId), eq(users.shopId, device.shopId), isNull(users.disabledAt)));
   if (!person) return { kind: "unknown" };
@@ -254,9 +263,11 @@ export async function checkPinForSignIn(
                             else daily_failures + 1 end,
       daily_window_started_at = case when daily_window_started_at <= now() - interval '24 hours' then now()
                                      else daily_window_started_at end,
-      consecutive_failures = consecutive_failures + 1,
-      locked_until = case when consecutive_failures + 1 >= ${SHORT_LOCK_AFTER}
+      consecutive_failures = case when locked_until <= now() then 1 else consecutive_failures + 1 end,
+      locked_until = case when (case when locked_until <= now() then 1 else consecutive_failures + 1 end)
+                                 >= ${SHORT_LOCK_AFTER}
                           then now() + ${`${SHORT_LOCK_MS / 1000} seconds`}::interval
+                          when locked_until <= now() then null
                           else locked_until end,
       locked_at = case when (case when daily_window_started_at <= now() - interval '24 hours' then 1
                                   else daily_failures + 1 end) >= ${HARD_LOCK_AFTER}
@@ -277,33 +288,49 @@ export async function checkPinForSignIn(
 
   if (await verify(row.pin_hash, pin)) {
     // Right PIN: this try doesn't count, and nothing stays locked. Wrong tries
-    // earlier today still count toward the daily limit.
-    const [before] = await systemDb
-      .select({
-        failuresSinceSignIn: staffPins.failuresSinceSignIn,
-        lastFailedAt: staffPins.lastFailedAt,
-        deviceName: bayDevices.name,
-      })
-      .from(staffPins)
-      .leftJoin(bayDevices, eq(bayDevices.id, staffPins.lastFailedDeviceId))
-      .where(eq(staffPins.userId, userId));
-    await systemDb
-      .update(staffPins)
-      .set({
-        consecutiveFailures: 0,
-        dailyFailures: sql`greatest(${staffPins.dailyFailures} - 1, 0)`,
-        lockedUntil: null,
-        lockedAt: null,
-        failuresSinceSignIn: 0,
-      })
-      .where(eq(staffPins.userId, userId));
-    // Typos just now on this tablet are the person's own; only warn about
-    // wrong tries that look like someone else's.
-    const recentTypos =
-      before?.lastFailedAt && Date.now() - before.lastFailedAt.getTime() < 2 * 60 * 1000;
+    // earlier today still count toward the daily limit. The wrong tries since
+    // the last PIN sign-in are reported, except a run of them on this tablet
+    // in the last couple of minutes: those are the person's own typos.
+    const reset = await systemDb.execute<{
+      own_run: boolean | null;
+      failures_since_sign_in: number;
+      last_failed_at: Date | string | null;
+      last_device_name: string | null;
+      earlier_failures: number;
+      earlier_failed_at: Date | string | null;
+      earlier_device_name: string | null;
+    }>(sql`
+      with before as (
+        select p.user_id, p.failures_since_sign_in, p.last_failed_at, p.earlier_failures, p.earlier_failed_at,
+               (p.last_failed_device_id = ${device.id} and p.last_failed_at > now() - ${OWN_TYPOS_WINDOW}::interval)
+                 as own_run,
+               last_device.name as last_device_name,
+               earlier_device.name as earlier_device_name
+        from ${staffPins} p
+        left join ${bayDevices} last_device on last_device.id = p.last_failed_device_id
+        left join ${bayDevices} earlier_device on earlier_device.id = p.earlier_failed_device_id
+        where p.user_id = ${userId}
+        for update of p
+      )
+      update ${staffPins} set
+        consecutive_failures = 0,
+        daily_failures = greatest(${staffPins.dailyFailures} - 1, 0),
+        locked_until = null,
+        locked_at = null,
+        failures_since_sign_in = 0,
+        earlier_failures = 0
+      from before
+      where ${staffPins.userId} = before.user_id
+      returning before.own_run, before.failures_since_sign_in, before.last_failed_at, before.last_device_name,
+                before.earlier_failures, before.earlier_failed_at, before.earlier_device_name
+    `);
+    const before = reset.rows[0];
+    const report = before?.own_run
+      ? { count: before.earlier_failures, at: before.earlier_failed_at, deviceName: before.earlier_device_name }
+      : before && { count: before.failures_since_sign_in, at: before.last_failed_at, deviceName: before.last_device_name };
     const warning =
-      before && before.failuresSinceSignIn > 0 && before.lastFailedAt && !recentTypos
-        ? { count: before.failuresSinceSignIn, lastAt: before.lastFailedAt, deviceName: before.deviceName }
+      report && report.count > 0 && report.at
+        ? { count: report.count, lastAt: new Date(report.at), deviceName: report.deviceName }
         : null;
     return { kind: "ok", userId, warning };
   }
@@ -312,8 +339,16 @@ export async function checkPinForSignIn(
     await tx
       .update(staffPins)
       .set({
+        // Each try either continues the run on this tablet or starts a new
+        // one, which moves the tries before it into earlier_*.
+        earlierFailures: sql`case when ${continuesRun(device.id)} then ${staffPins.earlierFailures}
+                                  else ${staffPins.failuresSinceSignIn} end`,
+        earlierFailedAt: sql`case when ${continuesRun(device.id)} then ${staffPins.earlierFailedAt}
+                                  else ${staffPins.lastFailedAt} end`,
+        earlierFailedDeviceId: sql`case when ${continuesRun(device.id)} then ${staffPins.earlierFailedDeviceId}
+                                        else ${staffPins.lastFailedDeviceId} end`,
         failuresSinceSignIn: sql`${staffPins.failuresSinceSignIn} + 1`,
-        lastFailedAt: new Date(),
+        lastFailedAt: sql`now()`,
         lastFailedDeviceId: device.id,
       })
       .where(eq(staffPins.userId, userId));
@@ -325,7 +360,11 @@ export async function checkPinForSignIn(
           : null;
     if (lockedNow) {
       await enterShop(tx, device.shopId);
-      await audit(tx, device.shopId, null, "pin.locked", userId, { kind: lockedNow, deviceId: device.id });
+      await audit(tx, device.shopId, null, "pin.locked", userId, {
+        kind: lockedNow,
+        deviceId: device.id,
+        username: person.username,
+      });
     }
   });
   if (row.daily_failures >= HARD_LOCK_AFTER) return { kind: "locked", until: null, checked: true };

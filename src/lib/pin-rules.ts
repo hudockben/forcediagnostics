@@ -29,10 +29,12 @@ export function checkPin(pin: string): string | null {
   const steps = digits.slice(1).map((d, i) => d - digits[i]);
   // Repeats and evenly stepped runs: 1111, 1234, 4321, 1357, 2468, 9630.
   if (steps.every((s) => s === steps[0])) return tooCommon;
-  // Keypad lines such as 2580 or 1590, forwards or backwards.
+  // Keypad lines such as 2580, 1590 or 0951, forwards or backwards, with at
+  // most one digit before or after.
   for (const line of KEYPAD_LINES) {
-    if (pin === line || pin === reversed(line) || pin.startsWith(line) || reversed(pin).startsWith(line)) {
-      if (pin.length <= line.length + 1) return tooCommon;
+    if (pin.length > line.length + 1) continue;
+    for (const run of [line, reversed(line)]) {
+      if (pin.startsWith(run) || pin.endsWith(run)) return tooCommon;
     }
   }
   // Years people use: 1940–2039.

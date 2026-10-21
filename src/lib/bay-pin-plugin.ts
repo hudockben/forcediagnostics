@@ -112,6 +112,9 @@ export const bayPinSignIn = () =>
 
         return ctx.json({
           ok: true,
+          // The page needs it to end this session (and only this one) when
+          // the tablet locks.
+          sessionId: session.id,
           warning: check.warning && {
             count: check.warning.count,
             lastAt: check.warning.lastAt.toISOString(),

@@ -22,7 +22,7 @@ test("rejects repeats, runs and evenly stepped PINs", () => {
 });
 
 test("rejects keypad lines, years and common PINs", () => {
-  for (const pin of ["2580", "0852", "1590", "3570", "1985", "2024", "1212", "1004", "6969", "121212", "123123", "112233", "147258", "159753"]) {
+  for (const pin of ["2580", "0852", "8520", "1590", "9510", "3570", "7410", "0789", "0147", "1985", "2024", "1212", "1004", "6969", "121212", "123123", "112233", "147258", "159753"]) {
     assert.notEqual(checkPin(pin), null, pin);
   }
 });

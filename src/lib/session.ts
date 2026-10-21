@@ -13,9 +13,11 @@ import { PIN_SESSION_MAX_MS } from "@/lib/bay-pin-plugin";
 import { can, needsPasswordSession, type Capability } from "@/lib/permissions";
 
 // The tablet locks itself after 5 idle minutes; the server ends the session
-// a little later in case the tablet couldn't (asleep, offline, closed).
+// a minute later in case the tablet couldn't (asleep, offline, closed). The
+// tablet reports activity at least every BAY_HEARTBEAT_MS while in use.
 export const BAY_IDLE_MS = 5 * 60 * 1000;
-const BAY_SERVER_IDLE_MS = BAY_IDLE_MS + 2 * 60 * 1000;
+export const BAY_HEARTBEAT_MS = 30 * 1000;
+const BAY_SERVER_IDLE_MS = BAY_IDLE_MS + 60 * 1000;
 const LAST_SEEN_WRITE_EVERY_MS = 60 * 1000;
 
 export type CurrentUser = {
@@ -25,7 +27,7 @@ export type CurrentUser = {
   role: Role;
   shop: { id: string; code: string; name: string };
   // Set for PIN sessions on a bay tablet.
-  bay: { deviceId: string; deviceName: string } | null;
+  bay: { deviceId: string; deviceName: string; sessionId: string } | null;
 };
 
 export type SessionLookup = { user: CurrentUser } | { redirectTo: "/" | "/bay" };
@@ -76,7 +78,7 @@ export const lookupCurrentUser = cache(async (): Promise<SessionLookup> => {
         .set({ lastSeenAt: sql`now()` })
         .where(eq(sessions.id, session.session.id));
     }
-    bay = { deviceId, deviceName: row.deviceName };
+    bay = { deviceId, deviceName: row.deviceName, sessionId: session.session.id };
   } else if (bayToken && (await findDeviceByToken(bayToken))) {
     // Bay tablets only allow PIN sessions; anything else left over ends.
     await endSession(session.session.token);
@@ -114,6 +116,11 @@ export const lookupCurrentUser = cache(async (): Promise<SessionLookup> => {
     },
   };
 });
+
+// Records that someone is using a bay tablet right now (its heartbeat).
+export async function recordBayActivity(sessionId: string) {
+  await systemDb.update(sessions).set({ lastSeenAt: sql`now()` }).where(eq(sessions.id, sessionId));
+}
 
 // The signed-in user and their shop. Redirects to sign-in (or the tablet's
 // PIN screen) when there is no valid session, so pages and server actions can

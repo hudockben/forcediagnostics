@@ -1,11 +1,13 @@
 "use client";
 
+import { startedSession } from "@/lib/bay-client";
+
 // Browser side of PIN sign-in on a bay tablet (POST /api/auth/sign-in/pin).
 
 export type PinWarning = { count: number; lastAt: string; deviceName: string | null };
 
 export type PinSignInResult =
-  | { ok: true; warning: PinWarning | null }
+  | { ok: true; sessionId: string; warning: PinWarning | null }
   | { ok: false; message: string; notATablet?: boolean };
 
 const minutes = (ms: number) => Math.max(1, Math.ceil(ms / 60000));
@@ -22,7 +24,11 @@ export async function signInWithPin(userId: string, pin: string): Promise<PinSig
     return { ok: false, message: "Couldn't reach the server. Check the Wi-Fi and try again." };
   }
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  if (response.ok) return { ok: true, warning: (body.warning as PinWarning | null) ?? null };
+  if (response.ok) {
+    const sessionId = String(body.sessionId ?? "");
+    startedSession(sessionId, userId);
+    return { ok: true, sessionId, warning: (body.warning as PinWarning | null) ?? null };
+  }
 
   switch (body.code) {
     case "INVALID_PIN": {
@@ -59,10 +65,13 @@ export async function signInWithPin(userId: string, pin: string): Promise<PinSig
 }
 
 export function describeWarning(warning: PinWarning) {
-  const when = new Date(warning.lastAt).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  const last = new Date(warning.lastAt);
+  const time = last.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  // The tries can go back days, so say which day unless it was today.
+  const when =
+    last.toDateString() === new Date().toDateString()
+      ? `today at ${time}`
+      : `${last.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} at ${time}`;
   const where = warning.deviceName ? ` on ${warning.deviceName}` : "";
-  return `${warning.count} wrong PIN ${warning.count === 1 ? "try" : "tries"} on your name since you last signed in (last${where} at ${when}). If that wasn't you, tell your manager.`;
+  return `${warning.count} wrong PIN ${warning.count === 1 ? "try" : "tries"} on your name since you last used your PIN (the last${where}, ${when}). If that wasn't you, tell your manager.`;
 }

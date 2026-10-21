@@ -9,9 +9,9 @@ import { after, before, describe, test } from "node:test";
 import { and, eq, sql } from "drizzle-orm";
 
 import { systemDb, withShop } from "../src/db";
-import { bayPairings, sessions, shops, staffPins, users } from "../src/db/schema";
+import { auditLog, bayPairings, sessions, shops, staffPins, users } from "../src/db/schema";
 import { getAuth } from "../src/lib/auth";
-import { BAY_COOKIE, createPairingCode, redeemPairingCode, removeDevice } from "../src/lib/bay";
+import { BAY_COOKIE, createPairingCode, endDeviceSession, redeemPairingCode, removeDevice } from "../src/lib/bay";
 import { removePin, setPin, unlockPin } from "../src/lib/pins";
 import type { CurrentUser } from "../src/lib/session";
 import { createStaffMember } from "../src/lib/staff";
@@ -80,6 +80,22 @@ async function pairTablet(admin: CurrentUser, name: string) {
 }
 
 const pinSignIn = (cookie: string, userId: string, pin: string) => call("/sign-in/pin", { userId, pin }, { cookie });
+
+// Stand-ins for time passing: a 15-minute lock running out, and wrong tries
+// long enough ago that they aren't the person's own typos.
+const lockRunsOut = (userId: string) =>
+  systemDb
+    .update(staffPins)
+    .set({ lockedUntil: sql`case when locked_until is null then null else now() - interval '1 second' end` })
+    .where(eq(staffPins.userId, userId));
+const movePinFailuresBack = (userId: string) =>
+  systemDb
+    .update(staffPins)
+    .set({
+      lastFailedAt: sql`last_failed_at - interval '1 hour'`,
+      earlierFailedAt: sql`earlier_failed_at - interval '1 hour'`,
+    })
+    .where(eq(staffPins.userId, userId));
 
 let adminA: CurrentUser;
 let adminB: CurrentUser;
@@ -152,6 +168,7 @@ describe("PIN sign-in", () => {
     const rows = await systemDb.select().from(sessions).where(eq(sessions.userId, techA));
     assert.equal(rows.length, 1);
     assert.equal(rows[0].deviceId, tablet.id);
+    assert.equal(reply.body.sessionId, rows[0].id, "tells the page its session");
     const hours = (rows[0].expiresAt.getTime() - Date.now()) / 3_600_000;
     assert.ok(hours > 11.9 && hours <= 12, `expires in ${hours}h`);
   });
@@ -213,25 +230,47 @@ describe("wrong PINs", () => {
     assert.equal((await pinSignIn(tablet.cookie, id, "3071")).body.code, "PIN_LOCKED");
   });
 
+  test("after a 15-minute lock runs out, the count starts again", async () => {
+    const id = await addStaff(adminA, "relock");
+    await setPin(adminA, id, "3071");
+    const tablet = await pairTablet(adminA, "Relock tablet");
+    for (let i = 0; i < 5; i++) await pinSignIn(tablet.cookie, id, "9999");
+    await lockRunsOut(id);
+    const next = await pinSignIn(tablet.cookie, id, "9999");
+    assert.equal(next.body.code, "INVALID_PIN");
+    assert.equal(next.body.triesLeft, 4);
+  });
+
   test("ten in a day lock it until someone unlocks it, even across right PINs", async () => {
     const id = await addStaff(adminA, "wrong10");
     await setPin(adminA, id, "3071");
     // Its own tablet: each tablet has its own wrong-PIN limit.
     const tablet = await pairTablet(adminA, "Wrong10 tablet");
-    const pause = () =>
-      systemDb.update(staffPins).set({ lockedUntil: null, consecutiveFailures: 0 }).where(eq(staffPins.userId, id));
     for (let i = 0; i < 4; i++) await pinSignIn(tablet.cookie, id, "9999");
     assert.equal((await pinSignIn(tablet.cookie, id, "3071")).status, 200);
-    for (let i = 0; i < 4; i++) await pinSignIn(tablet.cookie, id, "9999");
-    await pause();
-    await pinSignIn(tablet.cookie, id, "9999");
+    // Five more in a row (nine today) lock it for 15 minutes...
+    for (let i = 0; i < 5; i++) await pinSignIn(tablet.cookie, id, "9999");
+    await lockRunsOut(id);
+    // ...and the tenth locks it until someone unlocks it.
     const tenth = await pinSignIn(tablet.cookie, id, "9999");
     assert.equal(tenth.body.code, "PIN_LOCKED");
     assert.equal(tenth.body.until, null);
-    await pause();
+    await lockRunsOut(id);
     assert.equal((await pinSignIn(tablet.cookie, id, "3071")).body.code, "PIN_LOCKED");
     assert.ok("ok" in (await unlockPin(adminA, id)));
     assert.equal((await pinSignIn(tablet.cookie, id, "3071")).status, 200);
+  });
+
+  test("a PIN lock in the activity log names the person", async () => {
+    const id = await addStaff(adminA, "lognamed");
+    await setPin(adminA, id, "3071");
+    const tablet = await pairTablet(adminA, "Lognamed tablet");
+    for (let i = 0; i < 5; i++) await pinSignIn(tablet.cookie, id, "9999");
+    const [entry] = await systemDb
+      .select({ details: auditLog.details })
+      .from(auditLog)
+      .where(and(eq(auditLog.action, "pin.locked"), eq(auditLog.targetId, id)));
+    assert.equal(entry?.details.username, "lognamed");
   });
 
   test("many guesses at once get no more than five checks", async () => {
@@ -273,6 +312,48 @@ describe("wrong PINs", () => {
     assert.equal(reply.status, 200);
     assert.equal((reply.body.warning as { count: number }).count, 2);
     assert.equal((await pinSignIn(tablet.cookie, id, "3071")).body.warning, null);
+  });
+
+  test("your own typo just before signing in doesn't hide earlier wrong tries", async () => {
+    const other = await pairTablet(adminA, "Typo other tablet");
+    const here = await pairTablet(adminA, "Typo tablet");
+    // Someone tried two PINs a while ago, on another tablet or on this one.
+    for (const [n, earlier] of [other, here].entries()) {
+      const id = await addStaff(adminA, `typo${n}`);
+      await setPin(adminA, id, "3071");
+      await pinSignIn(earlier.cookie, id, "9999");
+      await pinSignIn(earlier.cookie, id, "9998");
+      await movePinFailuresBack(id);
+      // Now the person mistypes here, then gets it right.
+      assert.equal((await pinSignIn(here.cookie, id, "9997")).body.code, "INVALID_PIN");
+      const reply = await pinSignIn(here.cookie, id, "3071");
+      const warning = reply.body.warning as { count: number; deviceName: string } | null;
+      assert.equal(warning?.count, 2, "the earlier tries, not the typo");
+      assert.equal(warning?.deviceName, earlier === other ? "Typo other tablet" : "Typo tablet");
+    }
+  });
+
+  test("a wrong try on another tablet just before is still reported", async () => {
+    const id = await addStaff(adminA, "nearby");
+    await setPin(adminA, id, "3071");
+    const other = await pairTablet(adminA, "Nearby other tablet");
+    const here = await pairTablet(adminA, "Nearby tablet");
+    await pinSignIn(other.cookie, id, "9999");
+    const reply = await pinSignIn(here.cookie, id, "3071");
+    assert.equal((reply.body.warning as { count: number })?.count, 1);
+  });
+
+  test("a password sign-in doesn't erase the wrong-try report", async () => {
+    const id = await addStaff(adminA, "reported");
+    await setPin(adminA, id, "3071");
+    const tablet = await pairTablet(adminA, "Reported tablet");
+    await pinSignIn(tablet.cookie, id, "9999");
+    await pinSignIn(tablet.cookie, id, "9998");
+    await movePinFailuresBack(id);
+    const signIn = await call("/sign-in/username", { username: `${adminA.shop.code}.reported`, password: "starting-pass-1" });
+    assert.equal(signIn.status, 200, JSON.stringify(signIn.body));
+    const reply = await pinSignIn(tablet.cookie, id, "3071");
+    assert.equal((reply.body.warning as { count: number })?.count, 2);
   });
 
   test("a password sign-in elsewhere unlocks the PIN", async () => {
@@ -325,6 +406,17 @@ describe("keeping shops and secrets apart", () => {
     );
     assert.ok(statuses.length > 0);
     assert.ok(statuses.every((s) => s.shopId === adminA.shop.id));
+  });
+
+  test("ending a session by id only ends that session, on its own tablet", async () => {
+    const mine = await pairTablet(adminA, "End mine tablet");
+    const other = await pairTablet(adminA, "End other tablet");
+    const first = await pinSignIn(mine.cookie, techA, "4829");
+    const sessionId = String(first.body.sessionId);
+    await endDeviceSession(other.id, sessionId);
+    assert.equal((await systemDb.select().from(sessions).where(eq(sessions.id, sessionId))).length, 1);
+    await endDeviceSession(mine.id, sessionId);
+    assert.equal((await systemDb.select().from(sessions).where(eq(sessions.id, sessionId))).length, 0);
   });
 
   test("removing a tablet signs everyone out of it and stops its cookie", async () => {

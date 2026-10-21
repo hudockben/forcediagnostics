@@ -302,6 +302,13 @@ export const staffPins = pgTable(
     lastFailedDeviceId: uuid("last_failed_device_id").references(() => bayDevices.id, {
       onDelete: "set null",
     }),
+    // The wrong tries before the latest run of them on one tablet, so the
+    // person's own typos just before a right PIN can't hide someone else's.
+    earlierFailures: integer("earlier_failures").notNull().default(0),
+    earlierFailedAt: timestamp("earlier_failed_at", { withTimezone: true }),
+    earlierFailedDeviceId: uuid("earlier_failed_device_id").references(() => bayDevices.id, {
+      onDelete: "set null",
+    }),
   },
   (t) => [
     // The PIN row can only ever belong to the user's own shop.

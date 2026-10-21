@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputClass, labelClass, secondaryButtonClass } from "@/components/hud";
@@ -63,7 +63,7 @@ export function SetPinForm({
   const { state, pending, formProps } = useFormAction<State>(action, {});
   const [pin, setPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
-  // Clear the PINs once one is saved.
+  // Clear the PINs once one is saved, and the password with them.
   const [shownState, setShownState] = useState(state);
   if (shownState !== state) {
     setShownState(state);
@@ -72,10 +72,14 @@ export function SetPinForm({
       setConfirmPin("");
     }
   }
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (state.success) form.current?.reset();
+  }, [state]);
   const hint = pin.length >= 4 ? checkPin(pin) : null;
 
   return (
-    <form {...formProps} className="space-y-4">
+    <form ref={form} {...formProps} className="space-y-4">
       {Object.entries(hiddenFields ?? {}).map(([name, value]) => (
         <input key={name} type="hidden" name={name} value={value} />
       ))}

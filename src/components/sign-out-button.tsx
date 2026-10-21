@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { secondaryButtonClass } from "@/components/hud";
 import { authClient } from "@/lib/auth-client";
+import { endedSession } from "@/lib/bay-client";
 
 // On a bay tablet it reads "Switch user" and goes back to the PIN screen.
 export function SignOutButton({
@@ -22,6 +23,8 @@ export function SignOutButton({
     try {
       const { error } = await authClient.signOut();
       if (!error) {
+        // Other tabs on the tablet reload too.
+        if (switchUser) endedSession();
         // A full page load, not a client navigation, so nothing from the
         // signed-in session (cached pages, filled-in forms) survives.
         window.location.replace(switchUser ? "/bay" : "/");

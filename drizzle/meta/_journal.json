@@ -50,6 +50,13 @@
       "when": 1792612171946,
       "tag": "0006_bay_tablet_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792615362438,
+      "tag": "0007_pin_warning_runs",
+      "breakpoints": true
     }
   ]
 }

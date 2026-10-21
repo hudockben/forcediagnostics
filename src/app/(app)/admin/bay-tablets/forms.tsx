@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
@@ -33,7 +33,8 @@ function PairingCode({ pairing }: { pairing: NonNullable<TabletState["pairing"]>
       <p className="mt-2 font-mono text-4xl font-semibold tracking-[0.2em] text-glow">{pairing.code}</p>
       <p className="mt-3 text-sm leading-6 text-ink-muted">
         On the tablet, open <span className="font-mono text-ink">www.forcediagnostics.ai/bay</span> and
-        type this code. It works once, until {expires}.
+        type this code. It works once, until {expires}. If it runs out, use New pairing code next to the
+        tablet in the list.
       </p>
     </div>
   );
@@ -41,10 +42,16 @@ function PairingCode({ pairing }: { pairing: NonNullable<TabletState["pairing"]>
 
 export function AddTabletForm() {
   const { state, pending, formProps } = useFormAction<TabletState>(addTablet, {});
+  // Empty the name once the tablet is added, so pressing again doesn't add
+  // a second one.
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (state.pairing) form.current?.reset();
+  }, [state]);
   return (
     <div className="space-y-4">
       {state.pairing && <PairingCode pairing={state.pairing} />}
-      <form {...formProps} className="space-y-4">
+      <form ref={form} {...formProps} className="space-y-4">
         <div>
           <label htmlFor="tablet-name" className={labelClass}>
             Tablet name

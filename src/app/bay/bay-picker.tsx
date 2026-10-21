@@ -1,72 +1,105 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { HudCard, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
 import { PinPad } from "@/components/pin-pad";
-import { authClient } from "@/lib/auth-client";
+import { endBaySession, endedSession } from "@/lib/bay-client";
 import { PIN_MIN_LENGTH } from "@/lib/pin-rules";
 import { describeWarning, signInWithPin } from "@/lib/pin-sign-in";
 
 type Person = { id: string; name: string; username: string; locked: boolean };
 
 // A half-typed PIN is cleared, and the name list comes back, after this long.
+// The same goes for the heads-up screen after a sign-in, which also signs
+// that person out again.
 const PIN_IDLE_MS = 60 * 1000;
+// The name list is fetched again this often while it's showing, so new PINs
+// and locks show up.
+const LIST_REFRESH_MS = 60 * 1000;
 
 const goHome = () => window.location.replace("/home");
 
 export function BayPicker({
   deviceName,
   people,
-  endLeftoverSession,
+  leftoverSessionId,
 }: {
   deviceName: string;
   people: Person[];
-  endLeftoverSession: boolean;
+  leftoverSessionId: string | null;
 }) {
+  const router = useRouter();
   const [person, setPerson] = useState<Person | null>(null);
   const [pin, setPin] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [warning, setWarning] = useState<string | null>(null);
+  // Signed in, showing a warning about wrong tries before going on.
+  const [signedIn, setSignedIn] = useState<{ sessionId: string; warning: string } | null>(null);
+  const [leaving, setLeaving] = useState(false);
   const lastTouch = useRef(0);
   const touch = useCallback(() => {
     lastTouch.current = Date.now();
   }, []);
   const [signOutFailed, setSignOutFailed] = useState(false);
+  const stopLeftover = useRef(false);
 
-  // If someone is still signed in on this browser (an idle lock that
-  // couldn't reach the server, say), end that session first.
+  // If someone is still signed in on this tablet (an idle lock that couldn't
+  // reach the server, say), end that session. Only that one, so it can't end
+  // a sign-in made here meanwhile.
   useEffect(() => {
-    if (!endLeftoverSession) return;
-    let cancelled = false;
+    if (!leftoverSessionId) return;
+    stopLeftover.current = false;
     (async () => {
-      for (let attempt = 0; attempt < 5 && !cancelled; attempt++) {
-        const ok = await authClient
-          .signOut()
-          .then(({ error }) => !error)
-          .catch(() => false);
-        if (ok) return;
+      for (let attempt = 0; attempt < 5 && !stopLeftover.current; attempt++) {
+        if (await endBaySession(leftoverSessionId)) return;
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
-      if (!cancelled) setSignOutFailed(true);
+      if (!stopLeftover.current) setSignOutFailed(true);
     })();
     return () => {
-      cancelled = true;
+      stopLeftover.current = true;
     };
-  }, [endLeftoverSession]);
+  }, [leftoverSessionId]);
+
+  // Back to the name list, signing out whoever just signed in here.
+  const leave = useCallback(async (sessionId: string) => {
+    setLeaving(true);
+    await endBaySession(sessionId);
+    endedSession();
+    window.location.replace("/bay");
+  }, []);
 
   useEffect(() => {
-    if (!person) return;
+    if (!person && !signedIn) return;
     const timer = window.setInterval(() => {
-      if (Date.now() - lastTouch.current > PIN_IDLE_MS) {
-        setPerson(null);
-        setPin("");
-        setMessage(null);
+      if (Date.now() - lastTouch.current <= PIN_IDLE_MS) return;
+      if (signedIn) {
+        window.clearInterval(timer);
+        void leave(signedIn.sessionId);
+        return;
       }
+      setPerson(null);
+      setPin("");
+      setMessage(null);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [person]);
+  }, [person, signedIn, leave]);
+
+  // Keep the names fresh while nobody is using the screen.
+  useEffect(() => {
+    if (person || signedIn) return;
+    const refresh = () => {
+      if (document.visibilityState === "visible") router.refresh();
+    };
+    const timer = window.setInterval(refresh, LIST_REFRESH_MS);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [person, signedIn, router]);
 
   function choose(next: Person) {
     setPerson(next);
@@ -79,11 +112,13 @@ export function BayPicker({
     if (!person) return;
     setPending(true);
     setMessage(null);
+    stopLeftover.current = true;
     const result = await signInWithPin(person.id, pin);
     setPin("");
     if (result.ok) {
       if (result.warning) {
-        setWarning(describeWarning(result.warning));
+        touch();
+        setSignedIn({ sessionId: result.sessionId, warning: describeWarning(result.warning) });
         setPending(false);
       } else {
         goHome();
@@ -95,15 +130,25 @@ export function BayPicker({
     setMessage(result.message);
   }
 
-  if (warning) {
+  if (signedIn && person) {
     return (
-      <HudCard eyebrow={deviceName} title="Heads up" titleId="bay-heading">
-        <p role="alert" className="mt-4 text-base leading-7 text-trail">
-          {warning}
-        </p>
-        <button type="button" onClick={goHome} className={`${primaryButtonClass} mt-6`}>
-          Continue
-        </button>
+      <HudCard eyebrow={deviceName} title={`Heads up, ${person.name}`} titleId="bay-heading">
+        <div onPointerDown={touch}>
+          <p role="alert" className="mt-4 text-base leading-7 text-trail">
+            {signedIn.warning}
+          </p>
+          <button type="button" onClick={goHome} disabled={leaving} className={`${primaryButtonClass} mt-6`}>
+            Continue
+          </button>
+          <button
+            type="button"
+            onClick={() => leave(signedIn.sessionId)}
+            disabled={leaving}
+            className={`${secondaryButtonClass} mt-3`}
+          >
+            {leaving ? "Signing out…" : `Not ${person.name}? Sign out`}
+          </button>
+        </div>
       </HudCard>
     );
   }

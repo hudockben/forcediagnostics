@@ -247,6 +247,14 @@ export async function removeDevice(
   });
 }
 
+// Ends one session on this tablet, if it's still there. Unlike signing out,
+// it names the session, so it can't end whoever signed in after it.
+export async function endDeviceSession(deviceId: string, sessionId: string) {
+  await systemDb
+    .delete(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.deviceId, deviceId)));
+}
+
 // Records that a tablet was just used, and renews nothing else.
 export async function touchDevice(id: string) {
   await systemDb.update(bayDevices).set({ lastUsedAt: new Date() }).where(eq(bayDevices.id, id));
