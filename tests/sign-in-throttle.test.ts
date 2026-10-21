@@ -1,10 +1,8 @@
 // Checks the per-account sign-in limit. Needs DATABASE_URL pointing at a
-// disposable Postgres database; run with `npm test`.
+// disposable Postgres database; run with `npm test`, which migrates it first.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { after, before, test } from "node:test";
-
-import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { after, test } from "node:test";
 
 import { systemDb } from "../src/db";
 import {
@@ -15,7 +13,6 @@ import {
 
 const username = `test${randomUUID().slice(0, 8)}.mike`;
 
-before(() => migrate(systemDb, { migrationsFolder: "drizzle" }));
 after(async () => {
   await clearSignInAttempts(username);
   await systemDb.$client.end();

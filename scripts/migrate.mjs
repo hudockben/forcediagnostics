@@ -13,10 +13,14 @@ if (!url) {
   process.exit(0);
 }
 
-const pool = new pg.Pool({ connectionString: url, max: 1 });
+const client = new pg.Client({ connectionString: url });
+await client.connect();
 try {
-  await migrate(drizzle({ client: pool }), { migrationsFolder: "drizzle" });
+  // Two builds deploying at once take turns instead of racing to apply the
+  // same migration. The lock is released when the connection closes.
+  await client.query("select pg_advisory_lock(hashtext('forcediagnostics:migrate'))");
+  await migrate(drizzle({ client }), { migrationsFolder: "drizzle" });
   console.log("migrate: database is up to date");
 } finally {
-  await pool.end();
+  await client.end();
 }

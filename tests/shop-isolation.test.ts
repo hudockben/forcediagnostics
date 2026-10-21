@@ -1,12 +1,11 @@
 // Checks that row-level security keeps each shop's data private, even when a
 // query forgets to filter by shop. Needs DATABASE_URL pointing at a disposable
-// Postgres database; run with `npm test`.
+// Postgres database; run with `npm test`, which migrates it first.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 
 import { eq, sql } from "drizzle-orm";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 import { systemDb, withShop } from "../src/db";
 import { locations, shops, users } from "../src/db/schema";
@@ -33,7 +32,6 @@ async function createShop(code: string) {
 }
 
 before(async () => {
-  await migrate(systemDb, { migrationsFolder: "drizzle" });
   shopA = await createShop(`a${suffix}`);
   shopB = await createShop(`b${suffix}`);
 });
