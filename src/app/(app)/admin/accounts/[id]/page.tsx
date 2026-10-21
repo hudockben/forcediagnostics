@@ -3,11 +3,15 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
+import { LocalTime } from "@/components/app/local-time";
 import { Badge, Card, LoadingLine, PageHeading } from "@/components/app/ui";
+import { PinButtonForm, SetPinForm } from "@/components/pin-forms";
 import { ROLE_LABELS } from "@/lib/permissions";
 import { requireCapability } from "@/lib/session";
+import { getPinStatus, isLocked } from "@/lib/pins";
 import { getStaffMember } from "@/lib/staff";
 
+import { adminRemovePin, adminSetPin, adminUnlockPin } from "../actions";
 import { DetailsForm, DisableForm, ResetPasswordForm } from "../forms";
 
 export const metadata: Metadata = { title: "Staff member" };
@@ -27,6 +31,7 @@ async function StaffMember({ params }: { params: PageProps<"/admin/accounts/[id]
   const member = await getStaffMember(admin.shop.id, id);
   if (!member) notFound();
   const isSelf = member.id === admin.id;
+  const pin = await getPinStatus(admin.shop.id, member.id);
 
   return (
     <div className="max-w-xl space-y-6">
@@ -67,6 +72,67 @@ async function StaffMember({ params }: { params: PageProps<"/admin/accounts/[id]
           </p>
         ) : (
           <ResetPasswordForm member={member} />
+        )}
+      </Card>
+
+      <Card
+        title="Bay tablet PIN"
+        description={
+          isSelf ? undefined : "For switching in on bay tablets. Changing or removing it signs them out of any tablet."
+        }
+      >
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-ink-muted">
+          {pin.hasPin ? (
+            <>
+              <Badge tone="glow">PIN set</Badge>
+              {pin.setAt && (
+                <span>
+                  on <LocalTime value={pin.setAt.toISOString()} />
+                </span>
+              )}
+              {pin.hardLocked && <Badge tone="trail">Locked until unlocked</Badge>}
+              {!pin.hardLocked && pin.lockedUntil && (
+                <Badge tone="trail">
+                  Locked until <LocalTime value={pin.lockedUntil.toISOString()} />
+                </Badge>
+              )}
+            </>
+          ) : (
+            <Badge>No PIN</Badge>
+          )}
+        </div>
+        {isSelf ? (
+          <p className="text-sm leading-6 text-ink-muted">
+            Set your own PIN on the{" "}
+            <Link href="/home" className="text-glow hover:underline">
+              Home tab
+            </Link>
+            .
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {isLocked(pin) && (
+              <PinButtonForm
+                action={adminUnlockPin}
+                hiddenFields={{ id: member.id }}
+                label="Unlock PIN"
+                pendingLabel="Unlocking…"
+              />
+            )}
+            <SetPinForm
+              action={adminSetPin}
+              hiddenFields={{ id: member.id }}
+              submitLabel={pin.hasPin ? "Change PIN" : "Set PIN"}
+            />
+            {pin.hasPin && (
+              <PinButtonForm
+                action={adminRemovePin}
+                hiddenFields={{ id: member.id }}
+                label="Remove PIN"
+                pendingLabel="Removing…"
+              />
+            )}
+          </div>
         )}
       </Card>
 

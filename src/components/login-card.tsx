@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useState, type ComponentProps, type FormEvent } from "react";
 
 import {
@@ -26,7 +26,8 @@ const NOTICES = {
   failed: "Couldn't sign in right now. Try again in a moment.",
   disabled: "This account is disabled. Ask an admin to turn it back on.",
   forgot: "Your manager or an admin can reset your password.",
-  pin: "PIN switching for bay tablets is coming soon.",
+  bayTablet:
+    "This is a bay tablet: use Switch user with PIN. Passwords aren't used on shared tablets.",
 };
 
 function Field({
@@ -48,7 +49,9 @@ function KeypadIcon() {
   return (
     <svg aria-hidden viewBox="0 0 20 24" className="h-5 w-4 fill-current">
       {[3, 9, 15].flatMap((y) =>
-        [3, 10, 17].map((x) => <circle key={`${x}-${y}`} cx={x} cy={y} r={2} />),
+        [3, 10, 17].map((x) => (
+          <circle key={`${x}-${y}`} cx={x} cy={y} r={2} />
+        )),
       )}
       <circle cx={10} cy={21} r={2} />
     </svg>
@@ -56,7 +59,6 @@ function KeypadIcon() {
 }
 
 export function LoginCard() {
-  const router = useRouter();
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -69,7 +71,10 @@ export function LoginCard() {
     const password = String(form.get("password"));
 
     // Malformed codes or usernames can't match an account.
-    if (!COMPANY_CODE_PATTERN.test(company) || !USERNAME_PATTERN.test(username)) {
+    if (
+      !COMPANY_CODE_PATTERN.test(company) ||
+      !USERNAME_PATTERN.test(username)
+    ) {
       setNotice(NOTICES.invalid);
       return;
     }
@@ -81,22 +86,23 @@ export function LoginCard() {
       password,
     });
     if (!error) {
-      // Clear the form first: Next.js keeps this page alive in the background,
-      // and it shouldn't still hold this person's details when shown again.
+      // A full page load, so nothing from before this sign-in (cached pages,
+      // this form's contents) stays in memory.
       formElement.reset();
-      setPending(false);
-      router.push("/home");
+      window.location.replace("/home");
       return;
     }
     setPending(false);
     setNotice(
       error.code === "ACCOUNT_DISABLED"
         ? NOTICES.disabled
-        : error.status === 429
-          ? NOTICES.tooMany
-          : error.status === 401 || error.status === 422
-            ? NOTICES.invalid
-            : NOTICES.failed,
+        : error.code === "BAY_TABLET"
+          ? NOTICES.bayTablet
+          : error.status === 429
+            ? NOTICES.tooMany
+            : error.status === 401 || error.status === 422
+              ? NOTICES.invalid
+              : NOTICES.failed,
     );
   }
 
@@ -149,16 +155,15 @@ export function LoginCard() {
         <span className="h-px flex-1 bg-white/10" />
       </div>
 
-      <button
-        type="button"
-        onClick={() => setNotice(NOTICES.pin)}
-        className={secondaryButtonClass}
-      >
+      <Link href="/bay" className={secondaryButtonClass}>
         <KeypadIcon />
         Switch user with PIN
-      </button>
+      </Link>
 
-      <p role="status" className="mt-4 text-sm leading-5 text-trail empty:hidden">
+      <p
+        role="status"
+        className="mt-4 text-sm leading-5 text-trail empty:hidden"
+      >
         {notice}
       </p>
     </HudCard>

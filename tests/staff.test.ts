@@ -43,7 +43,7 @@ async function createShopWithAdmin(code: string): Promise<CurrentUser> {
     displayUsername: "boss",
     email: `${randomUUID()}@no-email.invalid`,
   });
-  return { id, name: "Admin", username: "boss", role: "admin", shop };
+  return { id, name: "Admin", username: "boss", role: "admin", shop, bay: null };
 }
 
 async function addSession(userId: string) {

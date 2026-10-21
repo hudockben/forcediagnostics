@@ -5,6 +5,7 @@ import { refresh } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 import { after } from "next/server";
 
+import { removePin, setPin, unlockPin } from "@/lib/pins";
 import { requireCapability } from "@/lib/session";
 import {
   SIGN_IN_GRACE_MS,
@@ -74,7 +75,9 @@ export async function resetPassword(_previous: FormState, form: FormData): Promi
       await new Promise((resolve) => setTimeout(resolve, SIGN_IN_GRACE_MS));
       await endSessionsStartedBefore(id, cutoff);
     });
-    return { success: "Password reset. They've been signed out everywhere." };
+    return {
+      success: "Password reset. They've been signed out everywhere. Their bay tablet PIN still works; remove it below if needed.",
+    };
   });
 }
 
@@ -86,5 +89,37 @@ export async function setDisabled(_previous: FormState, form: FormData): Promise
     if ("error" in result) return { error: result.error };
     refresh();
     return { success: disable ? "Account disabled and signed out." : "Account turned back on." };
+  });
+}
+
+export async function adminSetPin(_previous: FormState, form: FormData): Promise<FormState> {
+  return attempt("set a PIN", async () => {
+    const admin = await requireCapability("accounts.manage");
+    const pin = field(form, "pin");
+    if (pin !== field(form, "confirmPin")) return { error: "The PINs don't match." };
+    const result = await setPin(admin, field(form, "id"), pin);
+    if ("error" in result) return { error: result.error };
+    refresh();
+    return { success: "PIN saved. Tell them what it is; they can change it on their Home tab." };
+  });
+}
+
+export async function adminRemovePin(_previous: FormState, form: FormData): Promise<FormState> {
+  return attempt("remove a PIN", async () => {
+    const admin = await requireCapability("accounts.manage");
+    const result = await removePin(admin, field(form, "id"));
+    if ("error" in result) return { error: result.error };
+    refresh();
+    return { success: "PIN removed." };
+  });
+}
+
+export async function adminUnlockPin(_previous: FormState, form: FormData): Promise<FormState> {
+  return attempt("unlock a PIN", async () => {
+    const admin = await requireCapability("accounts.manage");
+    const result = await unlockPin(admin, field(form, "id"));
+    if ("error" in result) return { error: result.error };
+    refresh();
+    return { success: "PIN unlocked." };
   });
 }

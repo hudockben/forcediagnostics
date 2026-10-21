@@ -5,7 +5,14 @@ import { useState } from "react";
 import { secondaryButtonClass } from "@/components/hud";
 import { authClient } from "@/lib/auth-client";
 
-export function SignOutButton({ compact = false }: { compact?: boolean }) {
+// On a bay tablet it reads "Switch user" and goes back to the PIN screen.
+export function SignOutButton({
+  compact = false,
+  switchUser = false,
+}: {
+  compact?: boolean;
+  switchUser?: boolean;
+}) {
   const [pending, setPending] = useState(false);
   const [failed, setFailed] = useState(false);
 
@@ -17,7 +24,7 @@ export function SignOutButton({ compact = false }: { compact?: boolean }) {
       if (!error) {
         // A full page load, not a client navigation, so nothing from the
         // signed-in session (cached pages, filled-in forms) survives.
-        window.location.replace("/");
+        window.location.replace(switchUser ? "/bay" : "/");
         return;
       }
     } catch {
@@ -34,12 +41,14 @@ export function SignOutButton({ compact = false }: { compact?: boolean }) {
         onClick={signOut}
         disabled={pending}
         className={
-          compact
-            ? "h-10 rounded-lg border border-white/15 px-3 text-sm text-ink-muted transition hover:border-white/30 hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60"
-            : secondaryButtonClass
+          compact && switchUser
+            ? "h-12 rounded-lg border border-glow/40 px-4 text-base font-medium text-glow transition hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60"
+            : compact
+              ? "h-10 rounded-lg border border-white/15 px-3 text-sm text-ink-muted transition hover:border-white/30 hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60"
+              : secondaryButtonClass
         }
       >
-        {pending ? "Signing out…" : "Sign out"}
+        {pending ? (switchUser ? "Switching…" : "Signing out…") : switchUser ? "Switch user" : "Sign out"}
       </button>
       {failed && (
         <p

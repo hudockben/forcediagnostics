@@ -60,10 +60,11 @@ When you add a table: give it `shop_id`, add a `pgPolicy` for `appUser` like the
 
 ## Signed-in app
 
-After sign-in staff land on the **Home** tab (`src/app/(app)/home`). Admins also get **System Admin** (`src/app/(app)/admin`):
+After sign-in staff land on the **Home** tab (`src/app/(app)/home`), where they can change their password and set a bay tablet PIN. Admins and managers also get **System Admin** (`src/app/(app)/admin`), showing only the sections their role allows:
 
-- **Accounts:** add staff (no email needed), change names and roles, reset passwords, disable and re-enable accounts. Admins can't change their own role or disable themselves, and the shop always keeps at least one active admin. Every change is written to the `audit_log` table and shown under Recent account changes.
-- **Permissions:** what each role can do. The table is `src/lib/permissions.ts`; server code checks it with `can()` / `requireCapability()`, so the page and the rules can't drift apart.
+- **Accounts** (admins): add staff (no email needed), change names and roles, reset passwords and PINs, disable and re-enable accounts. Admins can't change their own role or disable themselves, and the shop always keeps at least one active admin. Every change is written to the `audit_log` table and shown under Recent account changes.
+- **Bay tablets** (managers and admins): pair and remove shared tablets, unlock locked PINs. See below.
+- **Permissions** (admins): what each role can do. The table is `src/lib/permissions.ts`; server code checks it with `allows()` / `requireCapability()`, so the page and the rules can't drift apart. Managing accounts, tablets and settings also needs a password sign-in, never a PIN one.
 
 ## Sign-in
 
@@ -72,6 +73,18 @@ Staff sign in with company code, username and password through [Better Auth](htt
 The first shop and its admin are created once at `/setup`, which needs the one-time setup code and stops working as soon as a shop exists.
 
 `BETTER_AUTH_SECRET` must be set in Vercel (Production and Preview). Changing it signs everyone out.
+
+Wrong passwords are limited to 10 per account per 15 minutes, counted in the app's own `attempt_counters` table (`src/lib/attempts.ts`), on top of Better Auth's per-address limits.
+
+## Bay tablets
+
+Shared tablets in the bays sign people in with a 4–6 digit PIN instead of a password (`src/lib/bay.ts`, `src/lib/pins.ts`, `src/lib/bay-pin-plugin.ts`).
+
+- **Pairing:** a manager adds the tablet under System Admin → Bay tablets on their own computer or phone, which shows a one-time code (8 characters, 10 minutes). Typing it at `/bay` on the tablet gives the tablet a random token in an HttpOnly cookie; the database only stores its SHA-256. Removing the tablet, or pairing it again, signs out everyone on it.
+- **PINs:** staff set their own on Home (needs their password), or an admin sets one on the account page. Easy PINs (`1234`, `2580`, years, repeats) are refused (`src/lib/pin-rules.ts`). PINs are hashed like passwords and the `app_user` role can't read the hashes.
+- **Signing in:** `/bay` shows the shop's people who have a PIN; pick a name, type the PIN. Tablets only take PINs, never passwords, and a PIN only works on a paired tablet.
+- **Lockouts:** 5 wrong PINs in a row lock that PIN for 15 minutes; 10 in a day lock it until a manager or admin unlocks it, a new PIN is set, or the person signs in with their password. A tablet pauses PIN sign-in after 15 wrong PINs in 15 minutes across everyone. After a right PIN, people are told about wrong tries on their PIN since their last sign-in.
+- **Sessions:** a PIN session is tied to its tablet, lasts at most 12 hours, and ends after 7 minutes without use. After 5 idle minutes the screen locks and signs them out; they type their PIN to carry on where they were, or anyone else taps Not you? to switch. PIN sessions can't change passwords or open account, tablet or settings pages.
 
 ## Domain
 

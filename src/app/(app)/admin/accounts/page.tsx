@@ -43,6 +43,16 @@ function describe(entry: AuditEntry) {
       return `turned ${who} back on`;
     case "account.password_reset":
       return `reset the password for ${who}`;
+    case "pin.set":
+      return entry.details.by === "self" ? `set a new bay tablet PIN` : `set the bay tablet PIN for ${who}`;
+    case "pin.removed":
+      return entry.details.by === "self" ? `removed their bay tablet PIN` : `removed the bay tablet PIN for ${who}`;
+    case "pin.unlocked":
+      return `unlocked the bay tablet PIN for ${who}`;
+    case "pin.locked":
+      return entry.details.kind === "hard"
+        ? `${who}'s PIN locked until unlocked (too many wrong PINs today)`
+        : `${who}'s PIN locked for 15 minutes (wrong PINs)`;
     default:
       return `${entry.action} on ${who}`;
   }
@@ -119,7 +129,9 @@ async function Accounts({
             {activity.map((entry) => (
               <li key={entry.id} className="flex flex-wrap justify-between gap-x-4">
                 <span className="text-ink">
-                  {entry.actorName ?? "Someone"} {describe(entry)}
+                  {entry.action === "pin.locked"
+                    ? describe(entry)
+                    : `${entry.actorName ?? "Someone"} ${describe(entry)}`}
                 </span>
                 <span className="text-ink-muted">
                   <LocalTime value={entry.createdAt.toISOString()} />

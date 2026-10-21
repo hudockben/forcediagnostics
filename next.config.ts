@@ -7,7 +7,6 @@ const nextConfig: NextConfig = {
     return [
       // The signed-in page moved to the Home tab.
       { source: "/shop", destination: "/home", permanent: false },
-      { source: "/admin", destination: "/admin/accounts", permanent: false },
     ];
   },
   turbopack: {

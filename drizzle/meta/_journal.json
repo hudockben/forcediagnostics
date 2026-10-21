@@ -36,6 +36,20 @@
       "when": 1792598005637,
       "tag": "0004_staff_admin_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792612153539,
+      "tag": "0005_bay_tablets",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792612171946,
+      "tag": "0006_bay_tablet_grants",
+      "breakpoints": true
     }
   ]
 }

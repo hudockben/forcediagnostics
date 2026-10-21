@@ -4,8 +4,9 @@ import type { ReactNode } from "react";
 import { NavTabs, type NavItem } from "@/components/app/nav-tabs";
 import { SignOutButton } from "@/components/sign-out-button";
 import { Wordmark } from "@/components/wordmark";
-import { ROLE_LABELS, can } from "@/lib/permissions";
-import { getCurrentUser } from "@/lib/session";
+import { ADMIN_SECTIONS, ROLE_LABELS } from "@/lib/permissions";
+import { allows, getCurrentUser } from "@/lib/session";
+
 
 function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
   return (
@@ -26,10 +27,11 @@ function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
 
 export async function AppHeader() {
   const user = await getCurrentUser();
+  const firstAdminSection = ADMIN_SECTIONS.find((section) => allows(user, section.capability));
   const tabs: NavItem[] = [
     { href: "/home", label: "Home", section: "/home" },
-    ...(can(user.role, "accounts.manage")
-      ? [{ href: "/admin/accounts", label: "System Admin", section: "/admin" }]
+    ...(firstAdminSection
+      ? [{ href: firstAdminSection.href, label: "System Admin", section: "/admin" }]
       : []),
   ];
 
@@ -40,10 +42,10 @@ export async function AppHeader() {
           <div className="text-right text-sm leading-5">
             <p className="font-medium text-ink">{user.name}</p>
             <p className="text-xs text-ink-muted">
-              {ROLE_LABELS[user.role]} · {user.shop.name}
+              {user.bay ? user.bay.deviceName : `${ROLE_LABELS[user.role]} · ${user.shop.name}`}
             </p>
           </div>
-          <SignOutButton compact />
+          <SignOutButton compact switchUser={user.bay !== null} />
         </div>
       }
       tabs={<NavTabs label="Main" items={tabs} />}

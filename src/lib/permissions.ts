@@ -58,6 +58,12 @@ export const CAPABILITIES = [
     roles: ["manager", "admin"],
   },
   {
+    key: "bay_tablets.manage",
+    label: "Bay tablets",
+    detail: "Pair and remove shared bay tablets, unlock locked PINs",
+    roles: ["manager", "admin"],
+  },
+  {
     key: "accounts.manage",
     label: "Staff accounts",
     detail: "Add staff, change roles, reset passwords, disable accounts",
@@ -82,3 +88,22 @@ export function can(role: Role, capability: Capability) {
   const entry = CAPABILITIES.find((c) => c.key === capability);
   return (entry?.roles as readonly Role[] | undefined)?.includes(role) ?? false;
 }
+
+// Admin areas need a password sign-in; a PIN on a bay tablet isn't enough.
+const PASSWORD_ONLY: ReadonlySet<Capability> = new Set<Capability>([
+  "accounts.manage",
+  "bay_tablets.manage",
+  "settings.manage",
+]);
+
+export function needsPasswordSession(capability: Capability) {
+  return PASSWORD_ONLY.has(capability);
+}
+
+// The System Admin sections, in menu order. The tab opens the first one the
+// user may use.
+export const ADMIN_SECTIONS: { href: string; label: string; capability: Capability }[] = [
+  { href: "/admin/accounts", label: "Accounts", capability: "accounts.manage" },
+  { href: "/admin/bay-tablets", label: "Bay tablets", capability: "bay_tablets.manage" },
+  { href: "/admin/permissions", label: "Permissions", capability: "accounts.manage" },
+];

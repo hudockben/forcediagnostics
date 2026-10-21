@@ -2,27 +2,33 @@ import "server-only";
 
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
+import { APIError, createAuthMiddleware, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { username } from "better-auth/plugins";
 import { eq } from "drizzle-orm";
 
 import { systemDb } from "@/db";
 import * as schema from "@/db/schema";
-import {
-  ACCOUNT_ATTEMPT_LIMIT,
-  clearSignInAttempts,
-  recordSignInAttempt,
-} from "@/lib/sign-in-throttle";
+import { BAY_COOKIE, findDeviceByToken } from "@/lib/bay";
+import { PIN_SIGN_IN_PATH, bayPinSignIn } from "@/lib/bay-pin-plugin";
+import { clearPinLocks } from "@/lib/pins";
+import { clearSignInAttempts, takeSignInAttempt } from "@/lib/sign-in-throttle";
 import { MAX_STORED_USERNAME_LENGTH } from "@/lib/usernames";
 
 const PRODUCTION_URL = "https://www.forcediagnostics.ai";
 
+const SIGN_IN_PATH = "/sign-in/username";
+const CHANGE_PASSWORD_PATH = "/change-password";
+
 // The only Better Auth endpoints the app uses. Everything else it ships
 // (email sign-in, sign-up, profile edits, password checks, social accounts…)
 // answers 404, including endpoints added by future Better Auth versions.
-const ALLOWED_PATHS = new Set(["/sign-in/username", "/sign-out", "/get-session", "/change-password"]);
-
-const SIGN_IN_PATH = "/sign-in/username";
+const ALLOWED_PATHS = new Set([
+  SIGN_IN_PATH,
+  PIN_SIGN_IN_PATH,
+  "/sign-out",
+  "/get-session",
+  CHANGE_PASSWORD_PATH,
+]);
 
 const vercelOrigins = [
   process.env.VERCEL_URL,
@@ -59,9 +65,29 @@ function createAuth() {
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
         if (!ALLOWED_PATHS.has(ctx.path)) throw new APIError("NOT_FOUND");
+
+        if (ctx.path === CHANGE_PASSWORD_PATH) {
+          // A PIN is weaker than a password, so it can't be used to change one.
+          const current = await getSessionFromCtx(ctx);
+          if (current?.session.deviceId) {
+            throw APIError.from("FORBIDDEN", {
+              code: "PIN_SESSION",
+              message: "Change your password from a computer or your phone.",
+            });
+          }
+        }
+
         if (ctx.path !== SIGN_IN_PATH || typeof ctx.body?.username !== "string") return;
-        const attempts = await recordSignInAttempt(ctx.body.username);
-        if (attempts > ACCOUNT_ATTEMPT_LIMIT) {
+        // Bay tablets are PIN only, so no password gets typed (or saved by
+        // the browser) on a shared tablet.
+        if (await findDeviceByToken(ctx.getCookie(BAY_COOKIE) ?? undefined)) {
+          throw APIError.from("FORBIDDEN", {
+            code: "BAY_TABLET",
+            message: "This is a bay tablet. Use Switch user with PIN.",
+          });
+        }
+        const attempt = await takeSignInAttempt(ctx.body.username);
+        if (!attempt.allowed) {
           throw new APIError("TOO_MANY_REQUESTS", {
             message: "Too many sign-in attempts for this account. Try again later.",
           });
@@ -69,7 +95,12 @@ function createAuth() {
       }),
       after: createAuthMiddleware(async (ctx) => {
         if (ctx.path !== SIGN_IN_PATH || typeof ctx.body?.username !== "string") return;
-        if (!isAPIError(ctx.context.returned)) await clearSignInAttempts(ctx.body.username);
+        if (isAPIError(ctx.context.returned)) return;
+        await clearSignInAttempts(ctx.body.username);
+        // Signing in with the password proves who you are, so a locked PIN
+        // unlocks too.
+        const userId = ctx.context.newSession?.user.id;
+        if (userId) await clearPinLocks(userId);
       }),
     },
     user: {
@@ -79,14 +110,20 @@ function createAuth() {
         homeLocationId: { type: "string", required: false, input: false },
       },
     },
-    // Per IP. Loose enough for a whole shop signing in from one connection at
-    // shift start; the per-account limit above stops password guessing.
-    // Disabled accounts can't start a session by any route. Checked after the
-    // password, so only someone who knows it learns the account is disabled.
+    session: {
+      additionalFields: {
+        // The bay tablet a PIN session belongs to. No default value: Better
+        // Auth would apply it over the one the PIN endpoint passes.
+        deviceId: { type: "string", required: false, input: false },
+      },
+    },
     databaseHooks: {
       session: {
         create: {
-          before: async (session) => {
+          before: async (session, context) => {
+            // Disabled accounts can't start a session by any route. Checked
+            // after the password, so only someone who knows it learns the
+            // account is disabled.
             const [user] = await systemDb
               .select({ disabledAt: schema.users.disabledAt })
               .from(schema.users)
@@ -97,16 +134,31 @@ function createAuth() {
                 message: "This account is disabled.",
               });
             }
+            // On a bay tablet, every session must be a PIN session for that
+            // tablet, whatever route created it.
+            const device = await findDeviceByToken(context?.getCookie(BAY_COOKIE) ?? undefined);
+            const deviceId = (session as { deviceId?: string | null }).deviceId ?? null;
+            if (device && deviceId !== device.id) {
+              throw APIError.from("FORBIDDEN", {
+                code: "BAY_TABLET",
+                message: "This is a bay tablet. Use Switch user with PIN.",
+              });
+            }
           },
         },
       },
     },
+    // Per IP. Loose enough for a whole shop signing in from one connection;
+    // the per-account and per-tablet limits stop guessing.
     rateLimit: {
       enabled: true,
       storage: "database",
-      customRules: { [SIGN_IN_PATH]: { window: 60, max: 30 } },
+      customRules: {
+        [SIGN_IN_PATH]: { window: 60, max: 30 },
+        [PIN_SIGN_IN_PATH]: { window: 60, max: 120 },
+      },
     },
-    plugins: [username({ maxUsernameLength: MAX_STORED_USERNAME_LENGTH })],
+    plugins: [username({ maxUsernameLength: MAX_STORED_USERNAME_LENGTH }), bayPinSignIn()],
   });
 }
 
