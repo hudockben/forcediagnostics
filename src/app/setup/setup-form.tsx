@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useActionState, type ComponentProps } from "react";
 
 import { HudCard, inputClass, labelClass, primaryButtonClass } from "@/components/hud";
+import { PasswordInput } from "@/components/password-input";
 
 import { setUpShop, type SetupState } from "./actions";
 
@@ -18,7 +19,11 @@ function Field({
       <label htmlFor={id} className={labelClass}>
         {label}
       </label>
-      <input id={id} name={id} required className={inputClass} {...props} />
+      {props.type === "password" ? (
+        <PasswordInput id={id} name={id} required {...props} />
+      ) : (
+        <input id={id} name={id} required className={inputClass} {...props} />
+      )}
       {hint && <p className="mt-1 text-xs text-ink-muted">{hint}</p>}
     </div>
   );

@@ -7,8 +7,10 @@ import { Wordmark } from "@/components/wordmark";
 
 const hudText = "font-mono text-[11px] tracking-[0.2em] uppercase";
 
-export const inputClass =
-  "mt-1.5 block h-12 w-full rounded-lg border border-white/10 bg-forest-950/70 px-3.5 text-base text-ink outline-none transition placeholder:text-ink-muted/50 focus:border-glow/60 focus:ring-2 focus:ring-glow/25";
+export const inputBaseClass =
+  "block h-12 w-full rounded-lg border border-white/10 bg-forest-950/70 px-3.5 text-base text-ink outline-none transition placeholder:text-ink-muted/50 focus:border-glow/60 focus:ring-2 focus:ring-glow/25";
+
+export const inputClass = `mt-1.5 ${inputBaseClass}`;
 
 export const labelClass = "text-sm font-medium text-ink/90";
 

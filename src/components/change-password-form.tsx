@@ -2,7 +2,8 @@
 
 import { useState, type FormEvent } from "react";
 
-import { inputClass, labelClass, secondaryButtonClass } from "@/components/hud";
+import { labelClass, secondaryButtonClass } from "@/components/hud";
+import { PasswordInput } from "@/components/password-input";
 import { authClient } from "@/lib/auth-client";
 
 const MESSAGES: Record<string, string> = {
@@ -72,14 +73,12 @@ export function ChangePasswordForm() {
           <label htmlFor={field.id} className={labelClass}>
             {field.label}
           </label>
-          <input
+          <PasswordInput
             id={field.id}
             name={field.id}
-            type="password"
             required
             minLength={field.id === "currentPassword" ? undefined : 8}
             autoComplete={field.autoComplete}
-            className={inputClass}
           />
         </div>
       ))}

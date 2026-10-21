@@ -10,6 +10,7 @@ import {
   primaryButtonClass,
   secondaryButtonClass,
 } from "@/components/hud";
+import { PasswordInput } from "@/components/password-input";
 import { authClient } from "@/lib/auth-client";
 import {
   COMPANY_CODE_PATTERN,
@@ -121,13 +122,11 @@ export function LoginCard() {
               Forgot password?
             </button>
           </div>
-          <input
+          <PasswordInput
             id="password"
             name="password"
-            type="password"
             required
             autoComplete="current-password"
-            className={inputClass}
           />
         </div>
 
