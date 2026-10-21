@@ -1,6 +1,6 @@
-# Force Diagnostics
+# forcediagnostics.ai
 
-Production rates and KPI diagnostics for construction crews.
+AI repair diagnosis for powersports service departments: fault codes, photos, video and tech notes in; a ranked diagnosis, parts and labor estimate, and after-action report out.
 
 Live at [forcediagnostics.ai](https://forcediagnostics.ai).
 
@@ -17,7 +17,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The home page is `src/app/page.tsx`.
+Open [http://localhost:3000](http://localhost:3000). The home page is the sign-in screen (`src/app/page.tsx`); its animated topo background lives in `src/components/topo/`.
 
 Before pushing, run:
 
