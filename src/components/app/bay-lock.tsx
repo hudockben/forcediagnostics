@@ -197,6 +197,13 @@ export function BayLock({
       }
       if (now - lastHeartbeat.current > heartbeatMs) void heartbeat();
     }
+    // Coming back to the tab: check the clock, and ask the server too, in
+    // case this tab missed a sign-out it wasn't told about.
+    function onShow() {
+      check();
+      if (lockedRef.current || document.visibilityState !== "visible") return;
+      if (Date.now() - lastHeartbeat.current > 5000) void heartbeat();
+    }
     function onStorage(event: StorageEvent) {
       if (event.key === SESSION_KEY) followSession(event.newValue);
       else if (event.key === LOCKED_KEY && readPair(event.newValue)?.[0] === session.current) lock();
@@ -205,16 +212,16 @@ export function BayLock({
     const events = ["pointerdown", "keydown", "touchstart"] as const;
     events.forEach((type) => window.addEventListener(type, onInput, { capture: true }));
     window.addEventListener("storage", onStorage);
-    window.addEventListener("focus", check);
-    window.addEventListener("pageshow", check);
-    document.addEventListener("visibilitychange", check);
+    window.addEventListener("focus", onShow);
+    window.addEventListener("pageshow", onShow);
+    document.addEventListener("visibilitychange", onShow);
     const timer = window.setInterval(check, 1000);
     return () => {
       events.forEach((type) => window.removeEventListener(type, onInput, { capture: true }));
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", check);
-      window.removeEventListener("pageshow", check);
-      document.removeEventListener("visibilitychange", check);
+      window.removeEventListener("focus", onShow);
+      window.removeEventListener("pageshow", onShow);
+      document.removeEventListener("visibilitychange", onShow);
       window.clearInterval(timer);
     };
   }, [check, followSession, heartbeat, heartbeatMs, idleMs, lock, userId]);

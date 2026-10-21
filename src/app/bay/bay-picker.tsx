@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { HudCard, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
 import { PinPad } from "@/components/pin-pad";
-import { endBaySession, endedSession } from "@/lib/bay-client";
+import { endBaySession, endedSession, readPair, readStore, SESSION_KEY } from "@/lib/bay-client";
 import { PIN_MIN_LENGTH } from "@/lib/pin-rules";
 import { describeWarning, signInWithPin } from "@/lib/pin-sign-in";
 
@@ -44,16 +44,22 @@ export function BayPicker({
   }, []);
   const [signOutFailed, setSignOutFailed] = useState(false);
   const stopLeftover = useRef(false);
+  // Coming to this screen means switching user, so whoever was signed in on
+  // the tablet when it loaded is signed out. A session that turns up later
+  // (the list refreshes) was started in another tab, and is followed instead.
+  const [leftover] = useState(leftoverSessionId);
 
-  // If someone is still signed in on this tablet (an idle lock that couldn't
-  // reach the server, say), end that session. Only that one, so it can't end
-  // a sign-in made here meanwhile.
+  // End only that session, so this can't end a sign-in made meanwhile, and
+  // send other tabs still showing that person to the name list.
   useEffect(() => {
-    if (!leftoverSessionId) return;
+    if (!leftover) return;
     stopLeftover.current = false;
     (async () => {
       for (let attempt = 0; attempt < 5 && !stopLeftover.current; attempt++) {
-        if (await endBaySession(leftoverSessionId)) return;
+        if (await endBaySession(leftover)) {
+          if (readPair(readStore(SESSION_KEY))?.[0] === leftover) endedSession();
+          return;
+        }
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
       if (!stopLeftover.current) setSignOutFailed(true);
@@ -61,7 +67,33 @@ export function BayPicker({
     return () => {
       stopLeftover.current = true;
     };
-  }, [leftoverSessionId]);
+  }, [leftover]);
+
+  // Someone signed in from another tab: this tab follows them, unless it's
+  // in use itself. A refresh that finds their session catches a missed
+  // storage event.
+  const idleOnList = !person && !signedIn && !pending;
+  useEffect(() => {
+    if (!idleOnList) return;
+    const follow = (sessionId: string | undefined) => {
+      if (!sessionId || sessionId === "none" || sessionId === leftover) return;
+      stopLeftover.current = true;
+      goHome();
+    };
+    if (leftoverSessionId !== leftover) follow(leftoverSessionId ?? undefined);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === SESSION_KEY) follow(readPair(event.newValue)?.[0]);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [idleOnList, leftover, leftoverSessionId]);
+
+  // A sign-in in another tab while this page was loading: ask the server
+  // whether it's still current (the refresh then follows it).
+  useEffect(() => {
+    const started = readPair(readStore(SESSION_KEY))?.[0];
+    if (started && started !== "none" && started !== leftover) router.refresh();
+  }, [leftover, router]);
 
   // Back to the name list, signing out whoever just signed in here.
   const leave = useCallback(async (sessionId: string) => {
