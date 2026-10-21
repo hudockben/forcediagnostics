@@ -8,6 +8,7 @@ Live at [forcediagnostics.ai](https://forcediagnostics.ai).
 
 - [Next.js](https://nextjs.org) (App Router) + TypeScript
 - Tailwind CSS
+- Neon Postgres + Drizzle ORM
 - Hosted on Vercel
 
 ## Development
@@ -34,6 +35,16 @@ Vercel deploys automatically:
 - Push to any other branch → preview deployment with its own URL
 
 Build features on a branch, check the preview, then merge into `main`.
+
+## Database
+
+Postgres on [Neon](https://neon.com) in AWS US East 2 (Ohio), connected through Vercel's Neon integration. The integration sets `DATABASE_URL` for Production and Preview, and each preview deployment gets its own Neon branch, so test links never touch production data.
+
+- Queries go through [Drizzle ORM](https://orm.drizzle.team) over `pg` (`src/db/`), the TCP connection pool Neon recommends for Vercel Fluid compute.
+- Functions run in Vercel's `cle1` region (Cleveland, the same AWS region as the database), set in `vercel.json`.
+- `GET /api/health` reports whether the app can reach the database.
+
+For local development, copy `.env.example` to `.env.local` and fill in `DATABASE_URL`.
 
 ## Domain
 
