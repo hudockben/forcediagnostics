@@ -32,6 +32,17 @@
     linear-gradient(to bottom, var(--color-forest-900), var(--color-forest-950) 75%);
 }
 
+/* Calm backdrop for the signed-in screens. */
+.app-backdrop {
+  background:
+    radial-gradient(
+      ellipse 80% 40% at 50% 0%,
+      color-mix(in oklab, var(--color-glow) 7%, transparent),
+      transparent 70%
+    ),
+    var(--color-forest-950);
+}
+
 .topo-vignette {
   background: radial-gradient(ellipse at center, transparent 55%, rgb(0 0 0 / 0.55));
 }

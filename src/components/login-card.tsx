@@ -24,6 +24,7 @@ const NOTICES = {
   invalid: "Company code, username or password is incorrect.",
   tooMany: "Too many sign-in attempts. Wait 15 minutes, then try again.",
   failed: "Couldn't sign in right now. Try again in a moment.",
+  disabled: "This account is disabled. Ask an admin to turn it back on.",
   forgot: "Your manager or an admin can reset your password.",
   pin: "PIN switching for bay tablets is coming soon.",
 };
@@ -84,16 +85,18 @@ export function LoginCard() {
       // and it shouldn't still hold this person's details when shown again.
       formElement.reset();
       setPending(false);
-      router.push("/shop");
+      router.push("/home");
       return;
     }
     setPending(false);
     setNotice(
-      error.status === 429
-        ? NOTICES.tooMany
-        : error.status === 401 || error.status === 422
-          ? NOTICES.invalid
-          : NOTICES.failed,
+      error.code === "ACCOUNT_DISABLED"
+        ? NOTICES.disabled
+        : error.status === 429
+          ? NOTICES.tooMany
+          : error.status === 401 || error.status === 422
+            ? NOTICES.invalid
+            : NOTICES.failed,
     );
   }
 

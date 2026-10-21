@@ -1,9 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
+  async redirects() {
+    return [
+      // The signed-in page moved to the Home tab.
+      { source: "/shop", destination: "/home", permanent: false },
+      { source: "/admin", destination: "/admin/accounts", permanent: false },
+    ];
+  },
   turbopack: {
     rules: {
       "*.css": {

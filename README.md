@@ -58,6 +58,13 @@ Every shop-owned table has a `shop_id` and a Postgres row-level security policy.
 
 When you add a table: give it `shop_id`, add a `pgPolicy` for `appUser` like the existing ones, and grant `app_user` access in a migration.
 
+## Signed-in app
+
+After sign-in staff land on the **Home** tab (`src/app/(app)/home`). Admins also get **System Admin** (`src/app/(app)/admin`):
+
+- **Accounts:** add staff (no email needed), change names and roles, reset passwords, disable and re-enable accounts. Admins can't change their own role or disable themselves, and the shop always keeps at least one active admin. Every change is written to the `audit_log` table and shown under Recent account changes.
+- **Permissions:** what each role can do. The table is `src/lib/permissions.ts`; server code checks it with `can()` / `requireCapability()`, so the page and the rules can't drift apart.
+
 ## Sign-in
 
 Staff sign in with company code, username and password through [Better Auth](https://better-auth.com) (`src/lib/auth.ts`); accounts, sessions and password hashes live in the Neon database. Usernames only have to be unique within a shop: they are stored as `<company code>.<username>`. There is no public sign-up.

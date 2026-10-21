@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useActionState, type ComponentProps } from "react";
+import { type ComponentProps } from "react";
 
 import { HudCard, inputClass, labelClass, primaryButtonClass } from "@/components/hud";
 import { PasswordInput } from "@/components/password-input";
+import { useFormAction } from "@/lib/use-form-action";
 
 import { setUpShop, type SetupState } from "./actions";
 
@@ -30,7 +31,7 @@ function Field({
 }
 
 export function SetupForm() {
-  const [state, action, pending] = useActionState<SetupState, FormData>(setUpShop, {});
+  const [state, submit, pending] = useFormAction<SetupState>(setUpShop, {});
 
   if (state.done) {
     return (
@@ -57,7 +58,7 @@ export function SetupForm() {
       <p className="mt-2 text-sm leading-6 text-ink-muted">
         This creates the shop and your admin account. It only works once.
       </p>
-      <form action={action} className="mt-6 space-y-4">
+      <form onSubmit={submit} className="mt-6 space-y-4">
         <Field
           id="setupCode"
           label="Setup code"

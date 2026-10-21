@@ -4,6 +4,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware, isAPIError } from "better-auth/api";
 import { username } from "better-auth/plugins";
+import { eq } from "drizzle-orm";
 
 import { systemDb } from "@/db";
 import * as schema from "@/db/schema";
@@ -80,6 +81,26 @@ function createAuth() {
     },
     // Per IP. Loose enough for a whole shop signing in from one connection at
     // shift start; the per-account limit above stops password guessing.
+    // Disabled accounts can't start a session by any route. Checked after the
+    // password, so only someone who knows it learns the account is disabled.
+    databaseHooks: {
+      session: {
+        create: {
+          before: async (session) => {
+            const [user] = await systemDb
+              .select({ disabledAt: schema.users.disabledAt })
+              .from(schema.users)
+              .where(eq(schema.users.id, session.userId));
+            if (!user || user.disabledAt) {
+              throw APIError.from("FORBIDDEN", {
+                code: "ACCOUNT_DISABLED",
+                message: "This account is disabled.",
+              });
+            }
+          },
+        },
+      },
+    },
     rateLimit: {
       enabled: true,
       storage: "database",

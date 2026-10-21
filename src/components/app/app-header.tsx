@@ -1,0 +1,57 @@
+import Link from "next/link";
+import type { ReactNode } from "react";
+
+import { NavTabs, type NavItem } from "@/components/app/nav-tabs";
+import { SignOutButton } from "@/components/sign-out-button";
+import { Wordmark } from "@/components/wordmark";
+import { ROLE_LABELS, can } from "@/lib/permissions";
+import { getCurrentUser } from "@/lib/session";
+
+function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
+  return (
+    <header className="border-b border-white/10 bg-charcoal-900/60 backdrop-blur-md">
+      <div className="mx-auto flex min-h-16 max-w-5xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 pt-4 sm:px-8">
+        <Link
+          href="/home"
+          className="rounded focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        >
+          <Wordmark className="text-xl" />
+        </Link>
+        {user}
+      </div>
+      <div className="mx-auto min-h-12 max-w-5xl px-4 sm:px-8">{tabs}</div>
+    </header>
+  );
+}
+
+export async function AppHeader() {
+  const user = await getCurrentUser();
+  const tabs: NavItem[] = [
+    { href: "/home", label: "Home", section: "/home" },
+    ...(can(user.role, "accounts.manage")
+      ? [{ href: "/admin/accounts", label: "System Admin", section: "/admin" }]
+      : []),
+  ];
+
+  return (
+    <HeaderFrame
+      user={
+        <div className="flex items-center gap-3">
+          <div className="text-right text-sm leading-5">
+            <p className="font-medium text-ink">{user.name}</p>
+            <p className="text-xs text-ink-muted">
+              {ROLE_LABELS[user.role]} · {user.shop.name}
+            </p>
+          </div>
+          <SignOutButton compact />
+        </div>
+      }
+      tabs={<NavTabs label="Main" items={tabs} />}
+    />
+  );
+}
+
+// Same size as the real header, shown while the session loads.
+export function AppHeaderFallback() {
+  return <HeaderFrame />;
+}

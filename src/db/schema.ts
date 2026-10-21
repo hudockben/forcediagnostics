@@ -5,6 +5,7 @@ import {
   check,
   index,
   integer,
+  jsonb,
   pgPolicy,
   pgRole,
   pgTable,
@@ -14,6 +15,8 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+import { ROLES, type Role } from "../lib/roles";
+
 // Row-level security: app code runs tenant queries as `app_user` with the
 // shop ID set for the transaction (see withShop in ./index.ts). Policies only
 // let that role see rows from its own shop, even if a query forgets a filter.
@@ -22,8 +25,7 @@ export const appUser = pgRole("app_user").existing();
 
 const currentShopId = sql`nullif(current_setting('app.shop_id', true), '')::uuid`;
 
-export const ROLES = ["tech", "service_writer", "parts", "manager", "admin"] as const;
-export type Role = (typeof ROLES)[number];
+export { ROLES, type Role } from "../lib/roles";
 
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -98,6 +100,8 @@ export const users = pgTable(
     email: text("email").notNull().unique(),
     emailVerified: boolean("email_verified").notNull().default(false),
     image: text("image"),
+    // Set when an admin disables the account; disabled accounts can't sign in.
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -111,6 +115,45 @@ export const users = pgTable(
       for: "select",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Admin screens edit names, roles and disabled state; a user can never be
+    // moved to another shop. Which columns are editable is set by the grant in
+    // drizzle/0004_staff_admin_grants.sql.
+    pgPolicy("users_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// Who did what to which record, per shop. Rows are only ever added.
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    actorUserId: text("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    action: text("action").notNull(),
+    targetType: text("target_type").notNull(),
+    targetId: text("target_id").notNull(),
+    details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("audit_log_shop_created").on(t.shopId, t.createdAt),
+    pgPolicy("audit_log_read_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("audit_log_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
     }),
   ],
 );

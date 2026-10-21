@@ -14,8 +14,13 @@ export const inputClass = `mt-1.5 ${inputBaseClass}`;
 
 export const labelClass = "text-sm font-medium text-ink/90";
 
-export const primaryButtonClass =
-  "h-12 w-full rounded-lg bg-trail text-base font-semibold text-charcoal-900 shadow-lg shadow-trail/15 transition hover:bg-trail-bright focus-visible:ring-2 focus-visible:ring-trail/60 focus-visible:ring-offset-2 focus-visible:ring-offset-charcoal-900 focus-visible:outline-none disabled:opacity-60";
+const primaryButtonBase =
+  "h-12 rounded-lg bg-trail text-base font-semibold text-charcoal-900 shadow-lg shadow-trail/15 transition hover:bg-trail-bright focus-visible:ring-2 focus-visible:ring-trail/60 focus-visible:ring-offset-2 focus-visible:ring-offset-charcoal-900 focus-visible:outline-none disabled:opacity-60";
+
+export const primaryButtonClass = `w-full ${primaryButtonBase}`;
+
+// For a primary action that sits beside other content instead of filling the row.
+export const primaryLinkClass = `inline-flex items-center justify-center px-5 ${primaryButtonBase}`;
 
 export const secondaryButtonClass =
   "flex h-12 w-full items-center justify-center gap-2.5 rounded-lg border border-glow/30 text-base font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60";
