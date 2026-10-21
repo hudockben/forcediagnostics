@@ -22,7 +22,7 @@ import {
 
 const NOTICES = {
   invalid: "Company code, username or password is incorrect.",
-  tooMany: "Too many sign-in attempts. Wait a minute, then try again.",
+  tooMany: "Too many sign-in attempts. Wait 15 minutes, then try again.",
   failed: "Couldn't sign in right now. Try again in a moment.",
   forgot: "Your manager or an admin can reset your password.",
   pin: "PIN switching for bay tablets is coming soon.",
@@ -61,7 +61,8 @@ export function LoginCard() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const company = normalizeCompanyCode(String(form.get("company")));
     const username = normalizeUsername(String(form.get("username")));
     const password = String(form.get("password"));
@@ -79,6 +80,10 @@ export function LoginCard() {
       password,
     });
     if (!error) {
+      // Clear the form first: Next.js keeps this page alive in the background,
+      // and it shouldn't still hold this person's details when shown again.
+      formElement.reset();
+      setPending(false);
       router.push("/shop");
       return;
     }

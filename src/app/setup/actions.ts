@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
-import { count, eq, sql } from "drizzle-orm";
+import { DrizzleQueryError, count, eq, sql } from "drizzle-orm";
 
 import { systemDb } from "@/db";
 import { shops } from "@/db/schema";
@@ -85,7 +85,12 @@ export async function setUpShop(_previous: SetupState, form: FormData): Promise<
       password: await auth.password.hash(password),
     });
   } catch (error) {
-    console.error("First-run setup couldn't create the admin account", error);
+    // A DrizzleQueryError's message lists the query parameters, which include
+    // the password hash, so only log the underlying database error.
+    console.error(
+      "First-run setup couldn't create the admin account",
+      error instanceof DrizzleQueryError ? error.cause : error,
+    );
     // Deleting the shop also removes a half-created user, so setup can be retried.
     await systemDb.delete(shops).where(eq(shops.id, shop.id));
     return { error: "Couldn't create your account. Try again." };
