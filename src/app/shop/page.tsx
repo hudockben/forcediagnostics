@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 
+import { ChangePasswordForm } from "@/components/change-password-form";
 import { HudCard, HudShell } from "@/components/hud";
 import { SignOutButton } from "@/components/sign-out-button";
 import type { Role } from "@/db/schema";
@@ -38,7 +39,8 @@ async function ShopHome() {
       <p className="mt-6 text-sm leading-6 text-ink-muted">
         You&apos;re signed in. Repair orders and the diagnostic workspace come next.
       </p>
-      <div className="mt-6">
+      <div className="mt-6 space-y-3">
+        <ChangePasswordForm />
         <SignOutButton />
       </div>
     </HudCard>
