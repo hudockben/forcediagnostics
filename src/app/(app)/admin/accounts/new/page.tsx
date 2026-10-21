@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 
@@ -5,6 +6,8 @@ import { Card, LoadingLine, PageHeading } from "@/components/app/ui";
 import { requireCapability } from "@/lib/session";
 
 import { AddStaffForm } from "../forms";
+
+export const metadata: Metadata = { title: "Add staff member" };
 
 export default function NewStaffPage() {
   return (

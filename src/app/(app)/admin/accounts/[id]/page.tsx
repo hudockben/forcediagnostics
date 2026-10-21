@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
@@ -8,6 +9,8 @@ import { requireCapability } from "@/lib/session";
 import { getStaffMember } from "@/lib/staff";
 
 import { DetailsForm, DisableForm, ResetPasswordForm } from "../forms";
+
+export const metadata: Metadata = { title: "Staff member" };
 
 export default function StaffMemberPage(props: PageProps<"/admin/accounts/[id]">) {
   return (

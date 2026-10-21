@@ -1,17 +1,19 @@
 "use client";
 
-import { useState, type ComponentProps } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
 import { PasswordInput } from "@/components/password-input";
+import { ROLE_LABELS, ROLE_SUMMARIES } from "@/lib/permissions";
 import { ROLES, type Role } from "@/lib/roles";
 import { useFormAction } from "@/lib/use-form-action";
-import { ROLE_LABELS, ROLE_SUMMARIES } from "@/lib/permissions";
 
 import { addStaff, resetPassword, saveDetails, setDisabled, type FormState } from "./actions";
 
 const MIN_PASSWORD_LENGTH = 8;
+
+const hintClass = "mt-1 text-xs leading-5 text-ink-muted";
 
 function Field({
   id,
@@ -24,8 +26,18 @@ function Field({
       <label htmlFor={id} className={labelClass}>
         {label}
       </label>
-      <input id={id} name={id} className={inputClass} {...props} />
-      {hint && <p className="mt-1 text-xs leading-5 text-ink-muted">{hint}</p>}
+      <input
+        id={id}
+        name={id}
+        className={inputClass}
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        {...props}
+      />
+      {hint && (
+        <p id={`${id}-hint`} className={hintClass}>
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
@@ -45,23 +57,38 @@ function RoleSelect({
       <label htmlFor="role" className={labelClass}>
         Role
       </label>
-      <select
-        id="role"
-        name="role"
-        value={role}
-        disabled={disabled}
-        onChange={(event) => setRole(event.target.value as Role)}
-        className={`${inputClass} appearance-none disabled:opacity-60`}
-      >
-        {ROLES.map((r) => (
-          <option key={r} value={r}>
-            {ROLE_LABELS[r]}
-          </option>
-        ))}
-      </select>
+      <div className="relative">
+        <select
+          id="role"
+          name="role"
+          value={role}
+          disabled={disabled}
+          aria-describedby="role-hint"
+          onChange={(event) => setRole(event.target.value as Role)}
+          className={`${inputClass} appearance-none pr-10 disabled:opacity-60`}
+        >
+          {ROLES.map((r) => (
+            <option key={r} value={r}>
+              {ROLE_LABELS[r]}
+            </option>
+          ))}
+        </select>
+        <svg
+          aria-hidden
+          viewBox="0 0 20 20"
+          className="pointer-events-none absolute top-1/2 right-3.5 mt-0.75 size-4 -translate-y-1/2 fill-none stroke-ink-muted"
+          strokeWidth={2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="m5 8 5 5 5-5" />
+        </svg>
+      </div>
       {/* A disabled select isn't submitted, so send the current role along. */}
       {disabled && <input type="hidden" name="role" value={role} />}
-      <p className="mt-1 text-xs leading-5 text-ink-muted">{hint ?? ROLE_SUMMARIES[role]}</p>
+      <p id="role-hint" className={hintClass}>
+        {hint ?? ROLE_SUMMARIES[role]}
+      </p>
     </div>
   );
 }
@@ -83,7 +110,7 @@ function generatePassword() {
   return chars.join("").match(/.{4}/g)!.join("-");
 }
 
-function NewPasswordField({ label }: { label: string }) {
+function NewPasswordField({ label, onEdit }: { label: string; onEdit?: () => void }) {
   const [password, setPassword] = useState("");
   const [generated, setGenerated] = useState<string | null>(null);
   return (
@@ -98,6 +125,7 @@ function NewPasswordField({ label }: { label: string }) {
             const value = generatePassword();
             setPassword(value);
             setGenerated(value);
+            onEdit?.();
           }}
           className="rounded text-sm text-glow/90 hover:text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
         >
@@ -110,17 +138,20 @@ function NewPasswordField({ label }: { label: string }) {
         required
         minLength={MIN_PASSWORD_LENGTH}
         autoComplete="new-password"
+        aria-describedby="password-hint"
         value={password}
         onChange={(event) => {
           setPassword(event.target.value);
           setGenerated(null);
+          onEdit?.();
         }}
       />
-      <p className="mt-1 text-xs leading-5 text-ink-muted">
+      {/* Always present and live, so a generated password is read out. */}
+      <p id="password-hint" aria-live="polite" className={hintClass}>
         {generated ? (
           <>
-            Give them <span className="font-mono text-ink">{generated}</span>. They can change it on
-            their Home tab.
+            Generated <span className="font-mono text-ink">{generated}</span>. Save it, then give it
+            to them; they can change it on their Home tab.
           </>
         ) : (
           `At least ${MIN_PASSWORD_LENGTH} characters.`
@@ -130,16 +161,26 @@ function NewPasswordField({ label }: { label: string }) {
   );
 }
 
+// The live region is always on the page and only its message changes, which
+// screen readers announce far more reliably than a region that appears.
 function Feedback({ state }: { state: FormState }) {
-  if (state.error) return <Notice tone="trail">{state.error}</Notice>;
-  if (state.success) return <Notice>{state.success}</Notice>;
-  return null;
+  return (
+    <div role="status" aria-live="polite" className="empty:my-0">
+      {state.error ? (
+        <Notice tone="trail" live={false}>
+          {state.error}
+        </Notice>
+      ) : state.success ? (
+        <Notice live={false}>{state.success}</Notice>
+      ) : null}
+    </div>
+  );
 }
 
 export function AddStaffForm({ companyCode }: { companyCode: string }) {
-  const [state, submit, pending] = useFormAction<FormState>(addStaff, {});
+  const { state, pending, formProps } = useFormAction<FormState>(addStaff, {});
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form {...formProps} className="space-y-4">
       <Field id="name" label="Name" required autoComplete="off" maxLength={80} />
       <Field
         id="username"
@@ -164,12 +205,23 @@ export function AddStaffForm({ companyCode }: { companyCode: string }) {
 type Member = { id: string; name: string; role: Role; disabled: boolean };
 
 export function DetailsForm({ member, isSelf }: { member: Member; isSelf: boolean }) {
-  const [state, submit, pending] = useFormAction<FormState>(saveDetails, {});
+  const { state, pending, formProps } = useFormAction<FormState>(saveDetails, {});
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form {...formProps} className="space-y-4">
       <input type="hidden" name="id" value={member.id} />
-      <Field id="name" label="Name" required defaultValue={member.name} maxLength={80} />
+      {/* Keyed on the saved values: Next.js keeps visited pages alive, so if
+          another admin changes this account, the fields reload instead of
+          posting old values back. */}
+      <Field
+        key={member.name}
+        id="name"
+        label="Name"
+        required
+        defaultValue={member.name}
+        maxLength={80}
+      />
       <RoleSelect
+        key={member.role}
         defaultValue={member.role}
         disabled={isSelf}
         hint={isSelf ? "You can't change your own role." : undefined}
@@ -183,12 +235,21 @@ export function DetailsForm({ member, isSelf }: { member: Member; isSelf: boolea
 }
 
 export function ResetPasswordForm({ member }: { member: Member }) {
-  const [state, submit, pending] = useFormAction<FormState>(resetPassword, {});
+  const { state, pending, formProps } = useFormAction<FormState>(resetPassword, {});
+  // Once the password field changes again, the last result no longer applies.
+  const [edited, setEdited] = useState(false);
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form
+      {...formProps}
+      onSubmit={(event) => {
+        setEdited(false);
+        formProps.onSubmit(event);
+      }}
+      className="space-y-4"
+    >
       <input type="hidden" name="id" value={member.id} />
-      <NewPasswordField label="New password" />
-      <Feedback state={state} />
+      <NewPasswordField label="New password" onEdit={() => setEdited(true)} />
+      <Feedback state={edited ? {} : state} />
       <button type="submit" disabled={pending} className={secondaryButtonClass}>
         {pending ? "Resetting…" : "Reset password"}
       </button>
@@ -196,25 +257,39 @@ export function ResetPasswordForm({ member }: { member: Member }) {
   );
 }
 
+const disableButtonClass =
+  "h-12 rounded-lg border border-trail/50 text-base font-medium text-trail transition hover:bg-trail/10 focus-visible:ring-2 focus-visible:ring-trail/40 focus-visible:outline-none disabled:opacity-60";
+
 export function DisableForm({ member }: { member: Member }) {
-  const [state, submit, pending] = useFormAction<FormState>(setDisabled, {});
+  const { state, pending, formProps } = useFormAction<FormState>(setDisabled, {});
   const [confirming, setConfirming] = useState(false);
+  // Set by Cancel, so focus goes back to the button that opened the step.
+  const returnFocus = useRef(false);
+  const disableButton = useRef<HTMLButtonElement>(null);
   const disabling = !member.disabled;
 
+  // Close the confirmation once the account's state has actually changed.
+  const [shownFor, setShownFor] = useState(member.disabled);
+  if (shownFor !== member.disabled) {
+    setShownFor(member.disabled);
+    setConfirming(false);
+  }
+
+  useEffect(() => {
+    if (!confirming && returnFocus.current) {
+      returnFocus.current = false;
+      disableButton.current?.focus();
+    }
+  }, [confirming]);
+
   return (
-    <form
-      className="space-y-4"
-      onSubmit={(event) => {
-        setConfirming(false);
-        submit(event);
-      }}
-    >
+    <form {...formProps} className="space-y-4">
       <input type="hidden" name="id" value={member.id} />
       <input type="hidden" name="disable" value={String(disabling)} />
       <Feedback state={state} />
       {disabling && confirming ? (
         <div className="space-y-3">
-          <p className="text-sm text-ink">
+          <p id="disable-question" className="text-sm text-ink">
             Disable {member.name}? They&apos;ll be signed out everywhere and can&apos;t sign in until
             an admin turns the account back on.
           </p>
@@ -222,31 +297,38 @@ export function DisableForm({ member }: { member: Member }) {
             <button
               type="submit"
               disabled={pending}
-              className="h-12 flex-1 rounded-lg border border-trail/50 text-base font-medium text-trail transition hover:bg-trail/10 focus-visible:ring-2 focus-visible:ring-trail/40 focus-visible:outline-none disabled:opacity-60"
+              // Focus moves into the step the user just opened.
+              autoFocus
+              aria-describedby="disable-question"
+              className={`${disableButtonClass} flex-1`}
             >
               {pending ? "Disabling…" : "Yes, disable"}
             </button>
             <button
               type="button"
-              onClick={() => setConfirming(false)}
+              disabled={pending}
+              onClick={() => {
+                returnFocus.current = true;
+                setConfirming(false);
+              }}
               className="h-12 rounded-lg px-4 text-sm text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
             >
               Cancel
             </button>
           </div>
         </div>
-      ) : (
+      ) : disabling ? (
         <button
-          type={disabling ? "button" : "submit"}
-          onClick={disabling ? () => setConfirming(true) : undefined}
-          disabled={pending}
-          className={
-            disabling
-              ? "h-12 w-full rounded-lg border border-trail/40 text-base font-medium text-trail transition hover:bg-trail/10 focus-visible:ring-2 focus-visible:ring-trail/40 focus-visible:outline-none disabled:opacity-60"
-              : secondaryButtonClass
-          }
+          ref={disableButton}
+          type="button"
+          onClick={() => setConfirming(true)}
+          className={`${disableButtonClass} w-full`}
         >
-          {disabling ? "Disable account" : pending ? "Turning on…" : "Turn account back on"}
+          Disable account
+        </button>
+      ) : (
+        <button type="submit" disabled={pending} className={secondaryButtonClass}>
+          {pending ? "Turning on…" : "Turn account back on"}
         </button>
       )}
     </form>

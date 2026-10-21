@@ -2,10 +2,11 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { DrizzleQueryError, and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { isAPIError } from "better-auth/api";
+import { DrizzleQueryError, and, asc, desc, eq, isNull, lte, sql } from "drizzle-orm";
 
-import { systemDb, withShop, type ShopTransaction } from "@/db";
-import { ROLES, auditLog, users, type Role } from "@/db/schema";
+import { enterShop, systemDb, withShop, type ShopTransaction } from "@/db";
+import { ROLES, accounts, auditLog, sessions, users, type Role } from "@/db/schema";
 import { getAuth } from "@/lib/auth";
 import type { CurrentUser } from "@/lib/session";
 import { USERNAME_PATTERN, normalizeUsername, storedUsername } from "@/lib/usernames";
@@ -136,9 +137,13 @@ export function listAccountActivity(shopId: string, limit = 15): Promise<AuditEn
   );
 }
 
-function isUniqueViolation(error: unknown) {
+function isUsernameTaken(error: unknown) {
+  // The database's unique index, or Better Auth's username check.
   const cause = error instanceof DrizzleQueryError ? error.cause : error;
-  return (cause as { code?: string } | undefined)?.code === "23505";
+  return (
+    (cause as { code?: string } | undefined)?.code === "23505" ||
+    (isAPIError(error) && error.body?.code === "USERNAME_IS_ALREADY_TAKEN")
+  );
 }
 
 export async function createStaffMember(
@@ -155,53 +160,46 @@ export async function createStaffMember(
     (isRole(input.role) ? null : "Pick a role.") ??
     checkPassword(input.password);
   if (problem) return { error: problem };
+  const taken = { error: `Someone at this shop already has the username ${username}.` };
 
   const stored = storedUsername(actor.shop.code, username);
-  const [taken] = await systemDb
+  const [existing] = await systemDb
     .select({ id: users.id })
     .from(users)
     .where(eq(users.username, stored));
-  if (taken) return { error: `Someone at this shop already has the username ${username}.` };
+  if (existing) return taken;
 
-  const auth = await getAuth().$context;
-  let userId: string;
+  // Better Auth's password hashing; the rows match what its sign-in expects.
+  const passwordHash = await (await getAuth().$context).password.hash(input.password);
+  const userId = randomUUID();
   try {
-    const user = await auth.internalAdapter.createUser(
-      {
+    // The account, its password and the audit entry are saved together or
+    // not at all.
+    await systemDb.transaction(async (tx) => {
+      await tx.insert(users).values({
+        id: userId,
         name,
         email: `${randomUUID()}@no-email.invalid`,
-        emailVerified: false,
         username: stored,
         displayUsername: username,
         // Always the admin's own shop, never anything from the form.
         shopId: actor.shop.id,
-        role: input.role,
-      },
-      { method: "admin" },
-    );
-    userId = user.id;
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      return { error: `Someone at this shop already has the username ${username}.` };
-    }
-    throw error;
-  }
-  try {
-    await auth.internalAdapter.linkAccount({
-      userId,
-      providerId: "credential",
-      accountId: userId,
-      password: await auth.password.hash(input.password),
+        role: input.role as Role,
+      });
+      await tx.insert(accounts).values({
+        id: randomUUID(),
+        userId,
+        providerId: "credential",
+        accountId: userId,
+        password: passwordHash,
+      });
+      await enterShop(tx, actor.shop.id);
+      await audit(tx, actor, "account.created", userId, { username, role: input.role });
     });
   } catch (error) {
-    // Don't leave an account behind that nobody can sign in to.
-    await systemDb.delete(users).where(eq(users.id, userId));
+    if (isUsernameTaken(error)) return taken;
     throw error;
   }
-
-  await withShop(actor.shop.id, (tx) =>
-    audit(tx, actor, "account.created", userId, { username, role: input.role }),
-  );
   return { ok: true, id: userId };
 }
 
@@ -295,11 +293,32 @@ export async function resetStaffPassword(
   if (!target) return { error: "That account doesn't exist." };
 
   const auth = await getAuth().$context;
-  await auth.internalAdapter.updatePassword(id, await auth.password.hash(password));
-  // Whoever knew the old password is signed out everywhere.
+  const passwordHash = await auth.password.hash(password);
+  // The new password and its audit entry are saved together.
+  await systemDb.transaction(async (tx) => {
+    await tx
+      .update(accounts)
+      .set({ password: passwordHash })
+      .where(and(eq(accounts.userId, id), eq(accounts.providerId, "credential")));
+    await enterShop(tx, actor.shop.id);
+    await audit(tx, actor, "account.password_reset", id, { username: target.username });
+  });
+  // Whoever knew the old password is signed out everywhere. A sign-in that
+  // was already checking the old password can still finish just after this,
+  // so callers should also run endSessionsStartedBefore shortly afterwards.
   await auth.internalAdapter.deleteUserSessions(id);
-  await withShop(actor.shop.id, (tx) =>
-    audit(tx, actor, "account.password_reset", id, { username: target.username }),
-  );
   return { ok: true };
+}
+
+// How long a sign-in can take between checking a password and creating its
+// session, with plenty of margin.
+export const SIGN_IN_GRACE_MS = 5000;
+
+// Ends this user's sessions that started before the cutoff. Used a few
+// seconds after a password reset to catch a sign-in with the old password
+// that was already in progress.
+export async function endSessionsStartedBefore(userId: string, cutoff: Date) {
+  await systemDb
+    .delete(sessions)
+    .where(and(eq(sessions.userId, userId), lte(sessions.createdAt, cutoff)));
 }

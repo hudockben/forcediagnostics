@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { Suspense } from "react";
 
 import { Card, LoadingLine, PageHeading } from "@/components/app/ui";
 import { ROLES } from "@/lib/roles";
 import { CAPABILITIES, ROLE_LABELS, ROLE_SUMMARIES } from "@/lib/permissions";
 import { requireCapability } from "@/lib/session";
+
+export const metadata: Metadata = { title: "Permissions" };
 
 export default function PermissionsPage() {
   return (
@@ -13,14 +16,16 @@ export default function PermissionsPage() {
   );
 }
 
-function Check({ allowed, label }: { allowed: boolean; label: string }) {
+function Check({ allowed }: { allowed: boolean }) {
   return allowed ? (
-    <span className="text-glow" aria-label={`${label}: yes`}>
-      ✓
+    <span className="text-glow">
+      <span aria-hidden>✓</span>
+      <span className="sr-only">Yes</span>
     </span>
   ) : (
-    <span className="text-ink-muted/40" aria-label={`${label}: no`}>
-      —
+    <span className="text-ink-muted/40">
+      <span aria-hidden>—</span>
+      <span className="sr-only">No</span>
     </span>
   );
 }
@@ -57,10 +62,7 @@ async function Permissions() {
                 </th>
                 {ROLES.map((role) => (
                   <td key={role} className="px-3 py-3 text-center text-base">
-                    <Check
-                      allowed={(capability.roles as readonly string[]).includes(role)}
-                      label={`${ROLE_LABELS[role]}, ${capability.label}`}
-                    />
+                    <Check allowed={(capability.roles as readonly string[]).includes(role)} />
                   </td>
                 ))}
               </tr>

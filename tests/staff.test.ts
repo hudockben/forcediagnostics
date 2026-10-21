@@ -13,6 +13,7 @@ import { accounts, sessions, shops, users } from "../src/db/schema";
 import type { CurrentUser } from "../src/lib/session";
 import {
   createStaffMember,
+  endSessionsStartedBefore,
   getStaffMember,
   listAccountActivity,
   listStaff,
@@ -107,6 +108,21 @@ describe("adding staff", () => {
     await addTech(adminB, "mike");
   });
 
+  test("two admins adding the same username at once get a clear message", async () => {
+    const results = await Promise.all(
+      [1, 2].map((n) =>
+        createStaffMember(adminA, {
+          name: `Racer ${n}`,
+          username: "racer",
+          role: "tech",
+          password: "starting-pass-1",
+        }),
+      ),
+    );
+    assert.equal(results.filter((r) => "ok" in r).length, 1);
+    assert.match(JSON.stringify(results), /already has the username racer/);
+  });
+
   test("rejects bad input", async () => {
     for (const input of [
       { name: "", username: "ok", role: "tech", password: "starting-pass-1" },
@@ -191,7 +207,7 @@ describe("changing accounts", () => {
     assert.equal((await getStaffMember(adminA.shop.id, id))?.disabled, false);
   });
 
-  test("resetting a password changes it and signs them out", async () => {
+  test("resetting a password changes it, signs them out and records it", async () => {
     const id = await addTech(adminA, "lee");
     const [before] = await systemDb.select().from(accounts).where(eq(accounts.userId, id));
     await addSession(id);
@@ -199,6 +215,19 @@ describe("changing accounts", () => {
     const [afterReset] = await systemDb.select().from(accounts).where(eq(accounts.userId, id));
     assert.notEqual(afterReset.password, before.password);
     assert.equal(await sessionCount(id), 0);
+    const activity = await listAccountActivity(adminA.shop.id, 50);
+    assert.ok(activity.some((e) => e.action === "account.password_reset" && e.targetId === id));
+  });
+
+  test("the follow-up sweep ends only sessions that started before the cutoff", async () => {
+    const id = await addTech(adminA, "sweep");
+    const cutoff = new Date();
+    await systemDb.insert(sessions).values([
+      { id: randomUUID(), userId: id, token: randomUUID(), expiresAt: new Date(Date.now() + 60_000), createdAt: new Date(cutoff.getTime() - 1000) },
+      { id: randomUUID(), userId: id, token: randomUUID(), expiresAt: new Date(Date.now() + 60_000), createdAt: new Date(cutoff.getTime() + 1000) },
+    ]);
+    await endSessionsStartedBefore(id, cutoff);
+    assert.equal(await sessionCount(id), 1);
   });
 });
 

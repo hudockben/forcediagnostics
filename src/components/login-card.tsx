@@ -102,7 +102,7 @@ export function LoginCard() {
 
   return (
     <HudCard eyebrow="Shop access" title="Sign in" titleId="sign-in-heading">
-      <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+      <form method="post" onSubmit={handleSubmit} className="mt-6 space-y-4">
         <Field
           id="company"
           label="Company code"

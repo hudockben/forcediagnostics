@@ -32,11 +32,13 @@ function TabList({ items, label, variant = "tabs", pathname }: Props & { pathnam
           const active =
             pathname !== null &&
             (pathname === item.section || pathname.startsWith(`${item.section}/`));
+          // "page" only for the exact page; otherwise it marks the current section.
+          const current = active ? (pathname === item.href ? "page" : "true") : undefined;
           return (
             <li key={item.href}>
               <Link
                 href={item.href}
-                aria-current={active ? "page" : undefined}
+                aria-current={current}
                 className={`${style.link} ${active ? style.active : style.idle}`}
               >
                 {item.label}

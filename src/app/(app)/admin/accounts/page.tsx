@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 
@@ -7,6 +8,8 @@ import { primaryLinkClass } from "@/components/hud";
 import { ROLE_LABELS } from "@/lib/permissions";
 import { isRole, listAccountActivity, listStaff, type AuditEntry } from "@/lib/staff";
 import { requireCapability } from "@/lib/session";
+
+export const metadata: Metadata = { title: "Accounts" };
 
 export default function AccountsPage(props: PageProps<"/admin/accounts">) {
   return (
@@ -88,7 +91,7 @@ async function Accounts({
             <li key={member.id}>
               <Link
                 href={`/admin/accounts/${member.id}`}
-                className="flex min-h-16 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:outline-none sm:px-6"
+                className="flex min-h-16 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset sm:px-6"
               >
                 <div className={member.disabled ? "opacity-60" : undefined}>
                   <p className="font-medium text-ink">{member.name}</p>

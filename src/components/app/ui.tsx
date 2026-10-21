@@ -62,10 +62,19 @@ export function Badge({ children, tone = "neutral" }: { children: ReactNode; ton
   );
 }
 
-export function Notice({ children, tone = "glow" }: { children: ReactNode; tone?: "glow" | "trail" }) {
+// Set live={false} when the notice sits inside a live region already.
+export function Notice({
+  children,
+  tone = "glow",
+  live = true,
+}: {
+  children: ReactNode;
+  tone?: "glow" | "trail";
+  live?: boolean;
+}) {
   return (
     <p
-      role="status"
+      role={live ? "status" : undefined}
       className={`rounded-lg border px-4 py-3 text-sm ${
         tone === "glow" ? "border-glow/30 bg-glow/10 text-glow" : "border-trail/30 bg-trail/10 text-trail"
       }`}

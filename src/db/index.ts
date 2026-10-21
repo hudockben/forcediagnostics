@@ -25,15 +25,21 @@ export const systemDb = drizzle({ client: pool, schema });
 
 export type ShopTransaction = Parameters<Parameters<typeof systemDb.transaction>[0]>[0];
 
-// Runs queries as app_user with the shop set for this transaction only, so
-// row-level security limits every read and write to that shop.
+// Switches an open transaction to app_user with the shop set, for the rest of
+// that transaction only. From then on row-level security limits every read
+// and write to that shop.
+export async function enterShop(tx: ShopTransaction, shopId: string) {
+  await tx.execute(sql`set local role app_user`);
+  await tx.execute(sql`select set_config('app.shop_id', ${shopId}, true)`);
+}
+
+// Runs queries as app_user for one shop (see enterShop).
 export function withShop<T>(
   shopId: string,
   run: (tx: ShopTransaction) => Promise<T>,
 ): Promise<T> {
   return systemDb.transaction(async (tx) => {
-    await tx.execute(sql`set local role app_user`);
-    await tx.execute(sql`select set_config('app.shop_id', ${shopId}, true)`);
+    await enterShop(tx, shopId);
     return run(tx);
   });
 }

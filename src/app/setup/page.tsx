@@ -11,7 +11,7 @@ import { shops } from "@/db/schema";
 import { SetupForm } from "./setup-form";
 
 export const metadata: Metadata = {
-  title: "Set up · forcediagnostics.ai",
+  title: "Set up",
   robots: { index: false },
 };
 

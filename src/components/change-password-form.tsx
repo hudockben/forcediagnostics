@@ -63,7 +63,7 @@ export function ChangePasswordForm() {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form method="post" onSubmit={handleSubmit} className="space-y-4">
       {[
         { id: "currentPassword", label: "Current password", autoComplete: "current-password" },
         { id: "newPassword", label: "New password", autoComplete: "new-password" },

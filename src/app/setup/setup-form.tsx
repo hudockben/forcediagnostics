@@ -31,7 +31,7 @@ function Field({
 }
 
 export function SetupForm() {
-  const [state, submit, pending] = useFormAction<SetupState>(setUpShop, {});
+  const { state, pending, formProps } = useFormAction<SetupState>(setUpShop, {});
 
   if (state.done) {
     return (
@@ -58,7 +58,7 @@ export function SetupForm() {
       <p className="mt-2 text-sm leading-6 text-ink-muted">
         This creates the shop and your admin account. It only works once.
       </p>
-      <form onSubmit={submit} className="mt-6 space-y-4">
+      <form {...formProps} className="mt-6 space-y-4">
         <Field
           id="setupCode"
           label="Setup code"

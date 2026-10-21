@@ -1,9 +1,12 @@
+import type { Metadata } from "next";
 import { Suspense } from "react";
 
 import { Badge, Card, LoadingLine, PageHeading } from "@/components/app/ui";
 import { ChangePasswordForm } from "@/components/change-password-form";
 import { ROLE_LABELS, ROLE_SUMMARIES } from "@/lib/permissions";
 import { getCurrentUser } from "@/lib/session";
+
+export const metadata: Metadata = { title: "Home" };
 
 export default function HomePage() {
   return (

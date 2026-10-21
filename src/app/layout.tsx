@@ -13,7 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "forcediagnostics.ai",
+  // Each page sets its own title, so browser tabs and screen readers can tell
+  // pages apart.
+  title: { default: "forcediagnostics.ai", template: "%s · forcediagnostics.ai" },
   description: "AI repair diagnosis for powersports service departments.",
 };
 
