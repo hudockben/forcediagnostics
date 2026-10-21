@@ -95,17 +95,34 @@ export function BayPicker({
     if (started && started !== "none" && started !== leftover) router.refresh();
   }, [leftover, router]);
 
-  // Back to the name list, signing out whoever just signed in here.
+  // Back to the name list, signing out whoever just signed in here. If
+  // someone else has signed in from another tab meanwhile, follow them
+  // instead of signing them out.
   const leave = useCallback(async (sessionId: string) => {
     setLeaving(true);
     await endBaySession(sessionId);
-    endedSession();
+    const current = readPair(readStore(SESSION_KEY))?.[0];
+    if (current && current !== sessionId && current !== "none") {
+      goHome();
+      return;
+    }
+    if (current === sessionId) endedSession();
     window.location.replace("/bay");
   }, []);
 
   useEffect(() => {
     if (!person && !signedIn) return;
     const timer = window.setInterval(() => {
+      if (signedIn) {
+        // Signed in or out from another tab since: this screen is stale.
+        const current = readPair(readStore(SESSION_KEY))?.[0];
+        if (current && current !== signedIn.sessionId) {
+          window.clearInterval(timer);
+          if (current === "none") window.location.replace("/bay");
+          else goHome();
+          return;
+        }
+      }
       if (Date.now() - lastTouch.current <= PIN_IDLE_MS) return;
       if (signedIn) {
         window.clearInterval(timer);
