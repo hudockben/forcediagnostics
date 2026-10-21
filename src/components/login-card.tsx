@@ -1,18 +1,31 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState, type ComponentProps, type FormEvent } from "react";
 
-// Shown until shop accounts exist. Sign-in is wired up with the database.
+import {
+  HudCard,
+  inputClass,
+  labelClass,
+  primaryButtonClass,
+  secondaryButtonClass,
+} from "@/components/hud";
+import { authClient } from "@/lib/auth-client";
+import {
+  COMPANY_CODE_PATTERN,
+  USERNAME_PATTERN,
+  normalizeCompanyCode,
+  normalizeUsername,
+  storedUsername,
+} from "@/lib/usernames";
+
 const NOTICES = {
-  signIn: "Sign-in isn't live yet. Shop accounts arrive with the database setup.",
+  invalid: "Company code, username or password is incorrect.",
+  tooMany: "Too many sign-in attempts. Wait a minute, then try again.",
+  failed: "Couldn't sign in right now. Try again in a moment.",
   forgot: "Your manager or an admin can reset your password.",
-  pin: "PIN switching for bay tablets arrives with shop accounts.",
+  pin: "PIN switching for bay tablets is coming soon.",
 };
-
-const inputClass =
-  "mt-1.5 block h-12 w-full rounded-lg border border-white/10 bg-forest-950/70 px-3.5 text-base text-ink outline-none transition placeholder:text-ink-muted/50 focus:border-glow/60 focus:ring-2 focus:ring-glow/25";
-
-const labelClass = "text-sm font-medium text-ink/90";
 
 function Field({
   id,
@@ -29,13 +42,6 @@ function Field({
   );
 }
 
-const corners = [
-  "-left-px -top-px rounded-tl-2xl border-l border-t",
-  "-right-px -top-px rounded-tr-2xl border-r border-t",
-  "-bottom-px -left-px rounded-bl-2xl border-b border-l",
-  "-bottom-px -right-px rounded-br-2xl border-b border-r",
-];
-
 function KeypadIcon() {
   return (
     <svg aria-hidden viewBox="0 0 20 24" className="h-5 w-4 fill-current">
@@ -48,36 +54,45 @@ function KeypadIcon() {
 }
 
 export function LoginCard() {
+  const router = useRouter();
   const [notice, setNotice] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setNotice(NOTICES.signIn);
+    const form = new FormData(event.currentTarget);
+    const company = normalizeCompanyCode(String(form.get("company")));
+    const username = normalizeUsername(String(form.get("username")));
+    const password = String(form.get("password"));
+
+    // Malformed codes or usernames can't match an account.
+    if (!COMPANY_CODE_PATTERN.test(company) || !USERNAME_PATTERN.test(username)) {
+      setNotice(NOTICES.invalid);
+      return;
+    }
+
+    setPending(true);
+    setNotice(null);
+    const { error } = await authClient.signIn.username({
+      username: storedUsername(company, username),
+      password,
+    });
+    if (!error) {
+      router.push("/shop");
+      return;
+    }
+    setPending(false);
+    setNotice(
+      error.status === 429
+        ? NOTICES.tooMany
+        : error.status === 401 || error.status === 422
+          ? NOTICES.invalid
+          : NOTICES.failed,
+    );
   }
 
   return (
-    <section
-      aria-labelledby="sign-in-heading"
-      className="relative w-full max-w-sm rounded-2xl border border-glow/15 bg-charcoal-900/75 p-6 shadow-2xl shadow-black/60 backdrop-blur-md sm:p-8"
-    >
-      {corners.map((corner) => (
-        <span
-          key={corner}
-          aria-hidden
-          className={`pointer-events-none absolute size-6 border-glow/70 ${corner}`}
-        />
-      ))}
-
-      <p className="font-mono text-[11px] tracking-[0.2em] text-glow/80 uppercase">
-        Shop access
-      </p>
-      <h1
-        id="sign-in-heading"
-        className="mt-2 text-2xl font-semibold tracking-tight text-ink"
-      >
-        Sign in
-      </h1>
-
+    <HudCard eyebrow="Shop access" title="Sign in" titleId="sign-in-heading">
       <form onSubmit={handleSubmit} className="mt-6 space-y-4">
         <Field
           id="company"
@@ -116,11 +131,8 @@ export function LoginCard() {
           />
         </div>
 
-        <button
-          type="submit"
-          className="h-12 w-full rounded-lg bg-trail text-base font-semibold text-charcoal-900 shadow-lg shadow-trail/15 transition hover:bg-trail-bright focus-visible:ring-2 focus-visible:ring-trail/60 focus-visible:ring-offset-2 focus-visible:ring-offset-charcoal-900 focus-visible:outline-none"
-        >
-          Sign in
+        <button type="submit" disabled={pending} className={primaryButtonClass}>
+          {pending ? "Signing in…" : "Sign in"}
         </button>
       </form>
 
@@ -133,15 +145,15 @@ export function LoginCard() {
       <button
         type="button"
         onClick={() => setNotice(NOTICES.pin)}
-        className="flex h-12 w-full items-center justify-center gap-2.5 rounded-lg border border-glow/30 text-base font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        className={secondaryButtonClass}
       >
         <KeypadIcon />
         Switch user with PIN
       </button>
 
-      <p role="status" className="mt-4 text-sm leading-5 text-ink-muted empty:hidden">
+      <p role="status" className="mt-4 text-sm leading-5 text-trail empty:hidden">
         {notice}
       </p>
-    </section>
+    </HudCard>
   );
 }

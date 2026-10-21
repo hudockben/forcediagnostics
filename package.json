@@ -6,10 +6,14 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --conditions=react-server --import tsx --test tests/*.test.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node scripts/migrate.mjs"
   },
   "dependencies": {
     "@vercel/functions": "3.9.11",
+    "better-auth": "1.7.7",
     "drizzle-orm": "0.45.3",
     "next": "16.4.2",
     "pg": "8.23.1",
@@ -23,9 +27,11 @@
     "@types/pg": "8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "0.31.11",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
     "tailwindcss": "^4",
+    "tsx": "4.23.15",
     "typescript": "^5"
   }
 }

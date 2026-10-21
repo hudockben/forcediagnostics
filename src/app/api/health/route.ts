@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { connection } from "next/server";
 
-import { db, isDatabaseConfigured } from "@/db";
+import { isDatabaseConfigured, systemDb } from "@/db";
 
 // Reports whether the app can reach the database. Used to confirm the Neon
 // hookup after deploys; it never exposes connection details or error text.
@@ -18,7 +18,7 @@ export async function GET() {
 
   const started = performance.now();
   try {
-    await db.execute(sql`select 1`);
+    await systemDb.execute(sql`select 1`);
   } catch (error) {
     console.error("Database health check failed", error);
     return Response.json({ ok: false, database: "unreachable", region }, { status: 503 });
