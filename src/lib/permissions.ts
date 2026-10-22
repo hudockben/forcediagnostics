@@ -28,6 +28,12 @@ export const CAPABILITIES = [
     roles: ["tech", "manager", "admin"],
   },
   {
+    key: "library.read",
+    label: "Manual library",
+    detail: "Search and read the shop's service and owner manuals",
+    roles: ["tech", "service_writer", "parts", "manager", "admin"],
+  },
+  {
     key: "repair_orders.intake",
     label: "Repair order intake",
     detail: "Customers, units, complaints and write-ups",
@@ -105,5 +111,6 @@ export function needsPasswordSession(capability: Capability) {
 export const ADMIN_SECTIONS: { href: string; label: string; capability: Capability }[] = [
   { href: "/admin/accounts", label: "Accounts", capability: "accounts.manage" },
   { href: "/admin/bay-tablets", label: "Bay tablets", capability: "bay_tablets.manage" },
+  { href: "/admin/manuals", label: "Manuals", capability: "settings.manage" },
   { href: "/admin/permissions", label: "Permissions", capability: "accounts.manage" },
 ];

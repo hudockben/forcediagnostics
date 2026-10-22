@@ -3,6 +3,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -10,12 +11,14 @@ import {
   pgPolicy,
   pgRole,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
 
+import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
 
 // Row-level security: app code runs tenant queries as `app_user` with the
@@ -27,6 +30,7 @@ export const appUser = pgRole("app_user").existing();
 const currentShopId = sql`nullif(current_setting('app.shop_id', true), '')::uuid`;
 
 export { ROLES, type Role } from "../lib/roles";
+export { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -335,3 +339,112 @@ export const attemptCounters = pgTable("attempt_counters", {
   windowStartedAt: bigint("window_started_at", { mode: "number" }).notNull(),
   lastAttemptAt: bigint("last_attempt_at", { mode: "number" }).notNull(),
 }).enableRLS();
+
+// Postgres full-text search document. Drizzle has no built-in type for it.
+const tsvector = customType<{ data: string }>({
+  dataType: () => "tsvector",
+});
+
+// A service or owner manual in the shop's library. The PDF itself lives in
+// private object storage under storage_key (see src/lib/storage.ts); its text
+// is in manual_pages. Manuals are licensed to the dealership, so each shop
+// has its own copy even of the same file.
+export const manuals = pgTable(
+  "manuals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    fileName: text("file_name").notNull(),
+    // SHA-256 of the file (hex), so adding the same file again is skipped.
+    sha256: text("sha256").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    storageKey: text("storage_key").notNull(),
+    // uploading: the row exists, the file may not have arrived yet.
+    // extracting: the file is stored and its text is being saved page by page.
+    // ready: every page is saved; it shows up in the library.
+    status: text("status").notNull().$type<ManualStatus>().default("uploading"),
+    pageCount: integer("page_count"),
+    // Pages with no text layer (usually scanned), which search can't find.
+    pagesWithoutText: integer("pages_without_text"),
+    uploadedByUserId: text("uploaded_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    readyAt: timestamp("ready_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("manuals_shop_sha256").on(t.shopId, t.sha256),
+    // Lets manual_pages tie a page to a manual *and* that manual's shop.
+    unique("manuals_id_shop").on(t.id, t.shopId),
+    check(
+      "manuals_status",
+      sql`${t.status} in (${sql.raw(MANUAL_STATUSES.map((s) => `'${s}'`).join(", "))})`,
+    ),
+    check("manuals_sha256_format", sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
+    check("manuals_size_bytes", sql`${t.sizeBytes} > 0`),
+    check("manuals_page_count", sql`${t.pageCount} >= 1`),
+    pgPolicy("manuals_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manuals_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Which columns can change is set by the grant in
+    // drizzle/0009_manual_library_grants.sql.
+    pgPolicy("manuals_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// The text of each page of a manual, for full-text search.
+export const manualPages = pgTable(
+  "manual_pages",
+  {
+    manualId: uuid("manual_id").notNull(),
+    shopId: uuid("shop_id").notNull(),
+    pageNumber: integer("page_number").notNull(),
+    text: text("text").notNull(),
+    searchVector: tsvector("search_vector").generatedAlwaysAs(
+      sql`to_tsvector('english', "text")`,
+    ),
+  },
+  (t) => [
+    primaryKey({ name: "manual_pages_pk", columns: [t.manualId, t.pageNumber] }),
+    // A page can only ever belong to a manual in its own shop.
+    foreignKey({
+      name: "manual_pages_manual_shop_fk",
+      columns: [t.manualId, t.shopId],
+      foreignColumns: [manuals.id, manuals.shopId],
+    }).onDelete("cascade"),
+    index("manual_pages_search").using("gin", t.searchVector),
+    check("manual_pages_page_number", sql`${t.pageNumber} >= 1`),
+    pgPolicy("manual_pages_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manual_pages_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manual_pages_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);

@@ -30,6 +30,7 @@ export async function AppHeader() {
   const firstAdminSection = ADMIN_SECTIONS.find((section) => allows(user, section.capability));
   const tabs: NavItem[] = [
     { href: "/home", label: "Home", section: "/home" },
+    ...(allows(user, "library.read") ? [{ href: "/library", label: "Library", section: "/library" }] : []),
     ...(firstAdminSection
       ? [{ href: firstAdminSection.href, label: "System Admin", section: "/admin" }]
       : []),
