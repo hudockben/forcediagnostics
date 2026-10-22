@@ -450,11 +450,63 @@ export const manualPages = pgTable(
   ],
 );
 
+// Every file name a manual is known by: its own, and the names of
+// byte-identical copies that were added after it (Polaris lists some PDFs
+// several times, as "9860049R01.pdf", "9860049R01-2.pdf", …). Each PDF is
+// stored once, so this is how the model list finds a manual under any of its
+// names. A name belongs to one manual at most.
+export const manualFileNames = pgTable(
+  "manual_file_names",
+  {
+    shopId: uuid("shop_id").notNull(),
+    manualId: uuid("manual_id").notNull(),
+    // As the file was called, only trimmed, e.g. "9860049R01-2.pdf".
+    fileName: text("file_name").notNull(),
+    // Worked out by Postgres, the same way as manual_catalog_documents.file_key.
+    fileKey: text("file_key")
+      .notNull()
+      .generatedAlwaysAs(sql`lower("file_name")`),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ name: "manual_file_names_pk", columns: [t.shopId, t.fileKey] }),
+    // A name can only ever belong to a manual in its own shop.
+    foreignKey({
+      name: "manual_file_names_manual_shop_fk",
+      columns: [t.manualId, t.shopId],
+      foreignColumns: [manuals.id, manuals.shopId],
+    }).onDelete("cascade"),
+    index("manual_file_names_manual").on(t.manualId, t.shopId),
+    check("manual_file_names_file_name", sql`length(${t.fileName}) between 1 and 255`),
+    pgPolicy("manual_file_names_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Names are added, and never removed; the grants are in
+    // drizzle/0014_manual_file_names_grants.sql.
+    pgPolicy("manual_file_names_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Only manual_id can change: a ready manual takes its name from one that
+    // never finished (see claimName in src/lib/manuals.ts).
+    pgPolicy("manual_file_names_move_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
 // The shop's model list: Polaris's spreadsheet of which models each manual
 // covers, imported under System Admin > Manuals (src/lib/manual-catalog.ts).
 // One row per file, kept apart from manuals so the list can come before or
-// after the PDFs, in any order. A manual finds its entry by file name:
-// file_key is the lower-cased name, matched against lower(manuals.file_name).
+// after the PDFs, in any order. A manual finds its entries by file name:
+// file_key is the lower-cased name, matched against manual_file_names.file_key
+// for each name the manual is known by.
 export const manualCatalogDocuments = pgTable(
   "manual_catalog_documents",
   {
@@ -463,7 +515,7 @@ export const manualCatalogDocuments = pgTable(
       .references(() => shops.id, { onDelete: "cascade" }),
     // As listed, e.g. "9942508.pdf".
     fileName: text("file_name").notNull(),
-    // Worked out by Postgres, so it always matches lower(manuals.file_name).
+    // Worked out by Postgres, so it always matches manual_file_names.file_key.
     fileKey: text("file_key")
       .notNull()
       .generatedAlwaysAs(sql`lower("file_name")`),

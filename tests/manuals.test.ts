@@ -9,7 +9,7 @@ import { after, before, describe, test } from "node:test";
 import { TransactionRollbackError, and, eq, sql } from "drizzle-orm";
 
 import { enterShop, systemDb, withShop } from "../src/db";
-import { auditLog, manualCatalogDocuments, manualPages, manuals, shops, users } from "../src/db/schema";
+import { auditLog, manualCatalogDocuments, manualFileNames, manualPages, manuals, shops, users } from "../src/db/schema";
 import { SEARCH_LIMIT, cleanSearchQuery, listReadyManuals, searchManuals, searchQuery } from "../src/lib/library";
 import {
   MAX_PAGES_PER_BATCH,
@@ -194,12 +194,24 @@ describe("starting an upload", () => {
     const id = await addManual(adminA, "Skip me.pdf", ["page one"]);
     const [row] = await systemDb.select().from(manuals).where(eq(manuals.id, id));
     const { storage } = fakeStorage();
-    const start = await startManualUpload(
+    const again = await startManualUpload(
+      adminA,
+      { fileName: "SKIP ME.pdf", sizeBytes: row.sizeBytes, sha256: row.sha256 },
+      storage,
+    );
+    assert.deepEqual(again, { next: "skip", manualId: id, title: "Skip me", message: "Already in the library as Skip me" });
+    // Under another name, the name is linked to it (see the model list tests).
+    const copy = await startManualUpload(
       adminA,
       { fileName: "Copy of skip me.pdf", sizeBytes: row.sizeBytes, sha256: row.sha256 },
       storage,
     );
-    assert.deepEqual(start, { next: "skip", manualId: id, title: "Skip me" });
+    assert.deepEqual(copy, {
+      next: "skip",
+      manualId: id,
+      title: "Skip me",
+      message: "Same file as Skip me.pdf, already in the library. Linked this name to it.",
+    });
   });
 
   test("two tabs starting the same file share one row", async () => {
@@ -357,8 +369,18 @@ describe("saving page text", () => {
     assert.deepEqual(await finishManual(adminB, { manualId }), {
       error: "That manual isn't in the library. Add the file again.",
     });
-    assert.deepEqual(await finishManual(adminA, { manualId }), { added: true, pageCount: 3, pagesWithoutText: 1 });
-    assert.deepEqual(await finishManual(adminA, { manualId }), { added: false, pageCount: 3, pagesWithoutText: 1 });
+    assert.deepEqual(await finishManual(adminA, { manualId }), {
+      added: true,
+      pageCount: 3,
+      pagesWithoutText: 1,
+      nameTaken: false,
+    });
+    assert.deepEqual(await finishManual(adminA, { manualId }), {
+      added: false,
+      pageCount: 3,
+      pagesWithoutText: 1,
+      nameTaken: false,
+    });
 
     const [row] = await systemDb.select().from(manuals).where(eq(manuals.id, manualId));
     assert.equal(row.status, "ready");
@@ -435,12 +457,13 @@ describe("searching the library", () => {
 
   test("uses the page text index under row-level security, with filters too", async () => {
     // Test tables are small enough to read straight through, so this adds a
-    // big manual with a big model list entry (in a transaction that's rolled
-    // back) and rules out reading whole tables, leaving the index unless
-    // row-level security or the filters stop it.
+    // big manual known by two names, each with a big model list entry (in a
+    // transaction that's rolled back), and rules out reading whole tables,
+    // leaving the index unless row-level security or the filters stop it.
     let plan = "";
     let filteredPlan = "";
     let yearPlan = "";
+    let vehiclePlans: string[] = [];
     await systemDb
       .transaction(async (tx) => {
         const [big] = await tx
@@ -461,15 +484,30 @@ describe("searching the library", () => {
           select ${big.id}::uuid, ${adminA.shop.id}::uuid, n, 'Torque the bracket bolts to spec, page ' || n
           from generate_series(1, 3000) n
         `);
-        await tx
-          .insert(manualCatalogDocuments)
-          .values({ shopId: adminA.shop.id, fileName: "Big.pdf", brand: "ATV", importId: randomUUID() });
+        // Known by three names, each in the model list, one with no brand.
+        await tx.insert(manualFileNames).values([
+          { shopId: adminA.shop.id, manualId: big.id, fileName: "Big.pdf" },
+          { shopId: adminA.shop.id, manualId: big.id, fileName: "Big-2.pdf" },
+          { shopId: adminA.shop.id, manualId: big.id, fileName: "Big-3.pdf" },
+        ]);
+        await tx.insert(manualCatalogDocuments).values([
+          { shopId: adminA.shop.id, fileName: "Big.pdf", brand: "ATV", importId: randomUUID() },
+          { shopId: adminA.shop.id, fileName: "Big-2.pdf", brand: "RGR", importId: randomUUID() },
+          { shopId: adminA.shop.id, fileName: "Big-3.pdf", brand: null, importId: randomUUID() },
+        ]);
         await tx.execute(sql`
           insert into manual_catalog_models (shop_id, file_key, model_year, model_number, model_description)
           select ${adminA.shop.id}::uuid, 'big.pdf', 2000 + n % 25, 'A' || n, 'SPORTSMAN ' || n || ' ULTIMATE TRAIL'
           from generate_series(1, 5000) n
         `);
-        await tx.execute(sql`analyze manuals, manual_pages, manual_catalog_documents, manual_catalog_models`);
+        await tx.execute(sql`
+          insert into manual_catalog_models (shop_id, file_key, model_year, model_number, model_description)
+          select ${adminA.shop.id}::uuid, 'big-2.pdf', 2000 + n % 25, 'R' || n, 'RANGER ' || n || ' CREW'
+          from generate_series(1, 5000) n
+        `);
+        await tx.execute(
+          sql`analyze manuals, manual_pages, manual_file_names, manual_catalog_documents, manual_catalog_models`,
+        );
         await enterShop(tx, adminA.shop.id);
         await tx.execute(sql`set local enable_seqscan = off`);
         const explain = async (filters: Parameters<typeof searchQuery>[2]) => {
@@ -482,6 +520,14 @@ describe("searching the library", () => {
         filteredPlan = await explain({ brand: "ATV", year: 2020, model: "sportsman ultimate" });
         // Year alone also reads Model Years text.
         yearPlan = await explain({ year: 2020 });
+        vehiclePlans = [
+          await explain({ vehicle: "UTV" }),
+          await explain({ vehicle: "Other", year: 2020 }),
+          await explain({ vehicle: "ATV", model: "ranger crew" }),
+          await explain({ brand: "RGR", year: 2021, model: "ranger" }),
+          // An entry with no brand takes its manual's other brands.
+          await explain({ vehicle: "UTV", year: 2013 }),
+        ];
         tx.rollback();
       })
       .catch((error) => {
@@ -490,6 +536,17 @@ describe("searching the library", () => {
     assert.match(plan, /Bitmap Index Scan on manual_pages_search/, plan);
     assert.match(filteredPlan, /Bitmap Index Scan on manual_pages_search/, filteredPlan);
     assert.match(yearPlan, /Bitmap Index Scan on manual_pages_search/, yearPlan);
+    assert.equal(vehiclePlans.length, 5);
+    for (const vehiclePlan of vehiclePlans) {
+      assert.match(vehiclePlan, /Bitmap Index Scan on manual_pages_search/, vehiclePlan);
+    }
+    // The filters are worked out once, as a list of manuals, never joined
+    // in to run again for each matching page.
+    for (const once of [filteredPlan, yearPlan, ...vehiclePlans]) {
+      assert.match(once, /InitPlan/, once);
+      assert.match(once, /manual_id = ANY/, once);
+      assert.doesNotMatch(once, /Semi Join/, once);
+    }
   });
 
   test("ranks pages that are more about the words higher", async () => {

@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { LocalTime } from "@/components/app/local-time";
 import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { catalogSummary, type CatalogSummary } from "@/lib/manual-catalog";
+import { brandLabel, compareBrands } from "@/lib/manual-catalog-rules";
 import { formatBytes } from "@/lib/manual-rules";
 import { listManuals, type ManualSummary } from "@/lib/manuals";
 import { requireCapability } from "@/lib/session";
@@ -26,14 +27,17 @@ function plural(count: number, one: string, many: string) {
   return `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 }
 
-// Brand, model years and models from the model list, or that it isn't in it.
+// Brands, model years and models from the model list, under any of the
+// manual's names ("Ranger · 2019-2022 · 17 models"), or that it isn't in it.
 function ModelListLine({ manual }: { manual: ManualSummary }) {
   if (!manual.inList) return <p className="text-xs text-trail">Not in the model list</p>;
-  const parts = [
-    manual.brand && (manual.inferredBrand ? `${manual.brand} (filled in from its models)` : manual.brand),
-    manual.modelYears,
-    plural(manual.models, "model", "models"),
-  ].filter(Boolean);
+  const brands = [...manual.brands]
+    .sort(compareBrands)
+    .map((code) =>
+      manual.inferredBrands.includes(code) ? `${brandLabel(code)} (filled in from its models)` : brandLabel(code),
+    )
+    .join(", ");
+  const parts = [brands, manual.modelYears, plural(manual.models, "model", "models")].filter(Boolean);
   return <p className="text-xs text-ink">{parts.join(" · ")}</p>;
 }
 
@@ -60,6 +64,9 @@ function ManualRow({ manual }: { manual: ManualSummary }) {
         {formatBytes(manual.sizeBytes)} · added <LocalTime value={manual.createdAt.toISOString()} />
         {manual.uploadedByName && ` by ${manual.uploadedByName}`}
       </p>
+      {manual.otherNames.length > 0 && (
+        <p className="text-xs break-words text-ink-muted">Also named {manual.otherNames.join(", ")}</p>
+      )}
       {ready && (manual.pagesWithoutText ?? 0) > 0 && (
         <p className="text-xs text-trail">
           {plural(manual.pagesWithoutText ?? 0, "page", "pages")} not searchable — scanned pages with no text.
@@ -112,7 +119,7 @@ function ModelListCard({ summary }: { summary: CatalogSummary }) {
   return (
     <Card
       title="Model list"
-      description="Polaris's spreadsheet of which models each manual covers (the .csv saved with the downloads). Add it above, in the folder or on its own: it tags each manual with its brand, model years and model numbers, matched by file name, so the Library can filter by them. Adding it again replaces what it says about the same files."
+      description="Polaris's spreadsheet of which models each manual covers (the .csv saved with the downloads). Add it above, in the folder or on its own: it tags each manual with its brand, model years and model numbers, matched by file name, so the Library can filter by them. A PDF it lists under several names is matched under each name it was added as. Adding it again replaces what it says about the same files."
     >
       <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Stat label="Manuals added" value={summary.manuals} />
@@ -132,7 +139,7 @@ function ModelListCard({ summary }: { summary: CatalogSummary }) {
           {notListed === 0 && missing === 0 && (
             <p className="text-sm text-glow">Every manual is in the model list, and every entry has its PDF.</p>
           )}
-            <Mismatches
+          <Mismatches
             summary={`${plural(notListed, "manual isn't", "manuals aren't")} in the model list`}
             items={summary.notListed.map((manual) => ({ key: manual.id, label: manual.fileName, detail: manual.title }))}
           />
@@ -172,7 +179,7 @@ async function Manuals() {
       {isStorageConfigured ? (
         <Card
           title="Add manuals"
-          description="Pick PDFs or a whole folder. Each file is uploaded to the shop's storage and its text is read in this browser, two files at a time. Files already in the library are skipped, so adding the same folder again picks up where it left off. A model list (.csv) among them is imported first."
+          description="Pick PDFs or a whole folder. Each file is uploaded to the shop's storage and its text is read in this browser, two files at a time. Files already in the library are skipped, so adding the same folder again picks up where it left off, and a copy of one under another name is linked to it instead of stored twice. A model list (.csv) among them is imported first."
         >
           <ManualUploader />
         </Card>

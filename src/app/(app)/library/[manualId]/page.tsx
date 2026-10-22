@@ -5,6 +5,7 @@ import { Suspense } from "react";
 
 import { LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { getReadyManual } from "@/lib/library";
+import { brandLabels } from "@/lib/manual-catalog-rules";
 import { pdfFileName } from "@/lib/manual-rules";
 import { requireCapability } from "@/lib/session";
 import { STORAGE_ENV_VARS, isStorageConfigured, r2Storage } from "@/lib/storage";
@@ -42,7 +43,7 @@ async function Manual({
         ‹ Library
       </Link>
       <PageHeading
-        eyebrow={[manual.brand, manual.modelYears].filter(Boolean).join(" · ") || undefined}
+        eyebrow={[brandLabels(manual.brands), manual.modelYears].filter(Boolean).join(" · ") || undefined}
         title={manual.title}
       />
       {isStorageConfigured ? (

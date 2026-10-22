@@ -15,6 +15,7 @@ import {
   searchManuals,
   type LibraryFilters,
 } from "@/lib/library";
+import { brandInfo, brandLabels, listsBrands, type Vehicle } from "@/lib/manual-catalog-rules";
 import { allows, requireCapability } from "@/lib/session";
 
 import { LibrarySearchForm } from "./search-form";
@@ -31,18 +32,32 @@ export default function LibraryPage(props: PageProps<"/library">) {
 
 const viewerHref = (manualId: string, page: number) => `/library/${manualId}?page=${page}`;
 
-// "ATV · 2020, 2022": what the model list says, beside a manual's title.
-function CatalogLine({ brand, modelYears }: { brand: string | null; modelYears: string | null }) {
-  const text = [brand, modelYears].filter(Boolean).join(" · ");
+// "Ranger, RZR · 2020, 2022": what the model list says, beside a manual's title.
+function CatalogLine({ brands, modelYears }: { brands: string[]; modelYears: string | null }) {
+  const text = [brandLabels(brands), modelYears].filter(Boolean).join(" · ");
   return text ? <span className="text-xs text-ink-muted">{text}</span> : null;
 }
 
-// "ATV manuals for 2020 RZR XP 1000 models", for the line above results.
+const VEHICLE_MANUALS: Record<Vehicle, string> = {
+  UTV: "UTV manuals",
+  ATV: "ATV manuals",
+  Generator: "generator manuals",
+  Other: "manuals for other vehicles",
+};
+
+// "Ranger manuals for 2020 RZR XP 1000 models", for the line above results.
+// A line that is its vehicle on its own (ATV, GEN) reads as the vehicle.
 function describeFilters(filters: LibraryFilters) {
   const models = [filters.year, filters.model].filter(Boolean).join(" ");
-  return [filters.brand ? `${filters.brand} manuals` : "manuals", models && `for ${models} models`]
-    .filter(Boolean)
-    .join(" ");
+  const brand = filters.brand === undefined ? null : brandInfo(filters.brand);
+  const what = filters.vehicle
+    ? VEHICLE_MANUALS[filters.vehicle]
+    : brand
+      ? listsBrands(brand.vehicle)
+        ? `${brand.label} manuals`
+        : VEHICLE_MANUALS[brand.vehicle]
+      : "manuals";
+  return [what, models && `for ${models} models`].filter(Boolean).join(" ");
 }
 
 function ClearFilters({ query }: { query: string }) {
@@ -72,12 +87,14 @@ async function Library({ searchParams }: { searchParams: PageProps<"/library">["
 
       <LibrarySearchForm
         query={query}
+        vehicle={filters.vehicle ?? ""}
         brand={filters.brand ?? ""}
         year={filters.year === undefined ? "" : String(filters.year)}
         model={filters.model ?? ""}
         maxQueryLength={MAX_QUERY_LENGTH}
         maxModelLength={MAX_MODEL_FILTER_LENGTH}
         showFilters={options.brands.length > 0 || options.years.length > 0 || hasLibraryFilters(filters)}
+        vehicles={options.vehicles}
         brands={options.brands}
         years={options.years}
       />
@@ -144,7 +161,7 @@ async function Results({ shopId, query, filters }: { shopId: string; query: stri
                   Page {hit.pageNumber} of {hit.pageCount}
                 </span>
               </span>
-              <CatalogLine brand={hit.brand} modelYears={hit.modelYears} />
+              <CatalogLine brands={hit.brands} modelYears={hit.modelYears} />
               <span className="mt-2 block text-sm leading-6 text-ink-muted">
                 {hit.snippet.map((part, index) =>
                   part.match ? (
@@ -229,7 +246,7 @@ async function AllManuals({
             >
               <span className="min-w-0">
                 <span className="block font-medium break-words text-ink">{manual.title}</span>
-                <CatalogLine brand={manual.brand} modelYears={manual.modelYears} />
+                <CatalogLine brands={manual.brands} modelYears={manual.modelYears} />
               </span>
               <span className="text-xs text-ink-muted">
                 {manual.pageCount.toLocaleString("en-US")} {manual.pageCount === 1 ? "page" : "pages"}

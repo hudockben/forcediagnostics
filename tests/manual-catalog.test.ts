@@ -699,18 +699,18 @@ describe("the model list and the manuals", () => {
     const ready = await listReadyManuals(adminB.shop.id);
     const mine = ready.find((manual) => manual.id === listed);
     assert.deepEqual(
-      { title: mine?.title, brand: mine?.brand, modelYears: mine?.modelYears },
-      { title: "2027 RZR Pro R Boost / Pro R Boost 4", brand: "RZR", modelYears: "2027" },
+      { title: mine?.title, brands: mine?.brands, modelYears: mine?.modelYears },
+      { title: "2027 RZR Pro R Boost / Pro R Boost 4", brands: ["RZR"], modelYears: "2027" },
     );
     const own = ready.find((manual) => manual.id === notListed);
-    assert.deepEqual({ title: own?.title, brand: own?.brand }, { title: "Own Manual", brand: null });
+    assert.deepEqual({ title: own?.title, brands: own?.brands }, { title: "Own Manual", brands: [] });
 
     const hits = await searchManuals(adminB.shop.id, "zephyrine");
     assert.deepEqual(
-      hits.map((hit) => [hit.title, hit.brand]).sort(),
+      hits.map((hit) => [hit.title, hit.brands.join()]).sort(),
       [
         ["2027 RZR Pro R Boost / Pro R Boost 4", "RZR"],
-        ["Own Manual", null],
+        ["Own Manual", ""],
       ],
     );
     const viewer = await getReadyManual(adminB.shop.id, listed);
@@ -855,7 +855,7 @@ describe("manuals for a model number", () => {
       found.map((manual) => manual.id),
       [atv.id],
     );
-    assert.equal(found[0].brand, "ATV");
+    assert.deepEqual(found[0].brands, ["ATV"]);
     assert.deepEqual(await manualsForModel(adminA.shop.id, " A20SXZ85A1 "), found);
     // Exact only: not the start of a model number.
     assert.deepEqual(await manualsForModel(adminA.shop.id, "A21SXZ85"), []);

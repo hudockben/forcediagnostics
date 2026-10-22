@@ -20,7 +20,9 @@ import { confirmUpload, finishModelList, finishUpload, saveModelList, savePages,
 // Adds manuals from this browser. For each PDF: hash it, check it opens,
 // ask the server what to do (skip, resume or upload), upload it straight to
 // storage, then read its text page by page and save it in batches. Two files
-// go at a time; files are only read while they're being worked on.
+// go at a time; files are only read while they're being worked on. A file
+// already in the library under another name is skipped, and the server links
+// its name to that manual.
 //
 // A model list (Polaris's spreadsheet of which models each manual covers,
 // saved as CSV) among the chosen files is imported first, before any PDF
@@ -360,11 +362,8 @@ export function ManualUploader() {
 
         const start = check(await startUpload({ fileName: file.name, sizeBytes: file.size, sha256 }));
         if (start.next === "skip") {
-          update(id, {
-            state: "skipped",
-            progress: 1,
-            message: `Already in the library as ${start.title}`,
-          });
+          // Says whether this name was linked to the manual already in.
+          update(id, { state: "skipped", progress: 1, message: start.message });
           return false;
         }
         if (start.next === "upload") {
@@ -389,9 +388,12 @@ export function ManualUploader() {
           state: "added",
           progress: 1,
           message:
-            finished.pagesWithoutText > 0
+            (finished.pagesWithoutText > 0
               ? `Added · ${pages}, ${finished.pagesWithoutText} not searchable (scanned)`
-              : `Added · ${pages}`,
+              : `Added · ${pages}`) +
+            (finished.nameTaken
+              ? `. A different manual is already called ${file.name}, so the model list goes with that one.`
+              : ""),
         });
       } finally {
         await loading.destroy();

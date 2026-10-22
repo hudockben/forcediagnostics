@@ -3,15 +3,27 @@
 import { useRouter } from "next/navigation";
 
 import { inputBaseClass, labelClass, primaryLinkClass } from "@/components/hud";
+import {
+  VEHICLES,
+  VEHICLE_NAMES,
+  brandInfo,
+  brandLabel,
+  isVehicle,
+  listsBrands,
+  type Vehicle,
+} from "@/lib/manual-catalog-rules";
 
 // The Library's search box and filters. They live in the address
-// (/library?q=…&brand=ATV&year=2020&model=RZR+XP), so a search can be shared
-// or bookmarked. Choosing a brand or year applies it straight away; the
-// search box and Model apply with Search (or Enter). Without JavaScript it's
-// a plain GET form.
+// (/library?q=…&vehicle=UTV&year=2020&model=RZR+XP, or &brand=RGR for one
+// line), so a search can be shared or bookmarked. Choosing a vehicle or year
+// applies it straight away; the search box and Model apply with Search (or
+// Enter). Without JavaScript it's a plain GET form, which sends a line as
+// ?vehicle=RGR (the server takes that as the brand).
 
 type Props = {
   query: string;
+  // The applied filter: a vehicle, or a brand code for one line.
+  vehicle: string;
   brand: string;
   year: string;
   model: string;
@@ -19,9 +31,45 @@ type Props = {
   maxModelLength: number;
   // Filters only show once there's a model list to filter by.
   showFilters: boolean;
+  vehicles: { vehicle: Vehicle; manuals: number }[];
   brands: { brand: string; manuals: number }[];
   years: number[];
 };
+
+// Indents a line under its vehicle; option text can't be styled.
+const INDENT = "\u00a0\u00a0\u00a0\u00a0";
+
+// The Vehicle select's options: each vehicle some ready manual has, and
+// under UTVs and Other, the lines they have. Values are vehicles or brand
+// codes. A line that is its vehicle on its own (ATV, GEN) is that vehicle.
+function vehicleOptions(props: Props, selected: string) {
+  const count = (manuals: number) => ` (${manuals.toLocaleString("en-US")})`;
+  const options: { value: string; label: string }[] = [];
+  for (const vehicle of VEHICLES) {
+    const total = props.vehicles.find((option) => option.vehicle === vehicle);
+    const lines = listsBrands(vehicle)
+      ? props.brands.filter((option) => brandInfo(option.brand).vehicle === vehicle)
+      : [];
+    if (total) options.push({ value: vehicle, label: VEHICLE_NAMES[vehicle] + count(total.manuals) });
+    for (const line of lines) {
+      options.push({ value: line.brand, label: INDENT + brandLabel(line.brand) + count(line.manuals) });
+    }
+  }
+  // A filter from a shared link that no ready manual has any more still
+  // shows, so the select says what's applied.
+  if (selected && !options.some((option) => option.value === selected)) {
+    const name = isVehicle(selected) ? VEHICLE_NAMES[selected] : brandLabel(selected);
+    options.push({ value: selected, label: `${name} (0)` });
+  }
+  return options;
+}
+
+// What the select shows for the filter in the address.
+function selectedVehicle({ vehicle, brand }: Props) {
+  if (!brand) return vehicle;
+  const { vehicle: of } = brandInfo(brand);
+  return listsBrands(of) ? brand : of;
+}
 
 function Chevron() {
   return (
@@ -40,21 +88,22 @@ function Chevron() {
 
 export function LibrarySearchForm(props: Props) {
   const router = useRouter();
-  const { query, brand, year, model } = props;
+  const { query, year, model } = props;
 
-  // Only what's filled in goes in the address.
+  // Only what's filled in goes in the address; a line goes as ?brand=.
   function go(form: HTMLFormElement) {
     const params = new URLSearchParams();
     for (const [name, value] of new FormData(form)) {
-      if (typeof value === "string" && value.trim()) params.set(name, value.trim());
+      if (typeof value !== "string" || !value.trim()) continue;
+      params.set(name === "vehicle" && !isVehicle(value) ? "brand" : name, value.trim());
     }
     const search = params.toString();
     router.push(search ? `/library?${search}` : "/library");
   }
 
-  // A filter value from a shared link that no ready manual has any more
-  // still shows, so the select says what's applied.
-  const brands = brand && !props.brands.some((b) => b.brand === brand) ? [...props.brands, { brand, manuals: 0 }] : props.brands;
+  const vehicle = selectedVehicle(props);
+  const vehicles = vehicleOptions(props, vehicle);
+  // As for vehicles above.
   const years = year && !props.years.includes(Number(year)) ? [Number(year), ...props.years] : props.years;
 
   return (
@@ -93,22 +142,22 @@ export function LibrarySearchForm(props: Props) {
       {props.showFilters && (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <div className="min-w-0">
-            <label htmlFor="library-brand" className={labelClass}>
-              Brand
+            <label htmlFor="library-vehicle" className={labelClass}>
+              Vehicle
             </label>
             <div className="relative mt-1.5">
               <select
-                key={`brand:${brand}`}
-                id="library-brand"
-                name="brand"
-                defaultValue={brand}
+                key={`vehicle:${vehicle}`}
+                id="library-vehicle"
+                name="vehicle"
+                defaultValue={vehicle}
                 onChange={(event) => event.currentTarget.form && go(event.currentTarget.form)}
                 className={`${inputBaseClass} appearance-none truncate pr-10`}
               >
-                <option value="">All brands</option>
-                {brands.map((option) => (
-                  <option key={option.brand} value={option.brand}>
-                    {option.brand} ({option.manuals.toLocaleString("en-US")})
+                <option value="">All vehicles</option>
+                {vehicles.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
                   </option>
                 ))}
               </select>

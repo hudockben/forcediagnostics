@@ -33,6 +33,10 @@ export const MIN_MODEL_YEAR = 1950;
 export const MAX_MODEL_YEAR = 2100;
 export const MAX_MODELS_PER_FILE = 5000;
 
+// A year or a range of years in an entry's Model Years text, as a Postgres
+// regular expression: "2020, 2022" lists two, "2018-2027" ten.
+export const MODEL_YEARS_PATTERN = "(\\d{4})(?:\\s*[-–]\\s*(\\d{4}))?";
+
 // Entries go to the server in batches and a file's models are never split
 // between two. Server Action requests are capped at 1 MB, so batches stay at
 // about half that, and one file can't be bigger than most of it.
@@ -59,6 +63,61 @@ export type CatalogFile = {
 // The model list finds a manual by its file name, whatever the case. (The
 // database works out its own key with lower(); this one groups rows.)
 export const catalogKey = (fileName: string) => fileName.toLowerCase();
+
+// What the Library calls Polaris's category codes (the list's Brand column),
+// and which kind of vehicle each is, for the Vehicle filter. A code that
+// isn't here shows as it is, under Other.
+export const VEHICLES = ["UTV", "ATV", "Generator", "Other"] as const;
+export type Vehicle = (typeof VEHICLES)[number];
+
+export const VEHICLE_NAMES: Record<Vehicle, string> = {
+  UTV: "UTVs (side-by-sides)",
+  ATV: "ATVs",
+  Generator: "Generators",
+  Other: "Other",
+};
+
+export type BrandInfo = { label: string; vehicle: Vehicle };
+
+// In the order the Library lists them within a vehicle.
+const BRANDS = new Map<string, BrandInfo>([
+  ["RGR", { label: "Ranger", vehicle: "UTV" }],
+  ["RZR", { label: "RZR", vehicle: "UTV" }],
+  ["GRL", { label: "General", vehicle: "UTV" }],
+  ["XXP", { label: "Xpedition", vehicle: "UTV" }],
+  ["ATV", { label: "ATV", vehicle: "ATV" }],
+  ["GEN", { label: "Generators", vehicle: "Generator" }],
+]);
+
+export const KNOWN_BRANDS = [...BRANDS.keys()];
+
+export const brandInfo = (code: string): BrandInfo => BRANDS.get(code) ?? { label: code, vehicle: "Other" };
+export const brandLabel = (code: string) => brandInfo(code).label;
+
+export const isVehicle = (value: unknown): value is Vehicle => VEHICLES.includes(value as Vehicle);
+
+// The codes a vehicle is made of. Other has no list: it's every code that
+// isn't in the table.
+export const brandsOf = (vehicle: Exclude<Vehicle, "Other">) =>
+  KNOWN_BRANDS.filter((code) => brandInfo(code).vehicle === vehicle);
+
+// Whether the Vehicle filter lists a vehicle's codes under it as well. A
+// vehicle that is one code (ATVs, Generators) is just itself.
+export const listsBrands = (vehicle: Vehicle) => vehicle === "Other" || brandsOf(vehicle).length > 1;
+
+// Brands in the order the Library shows them: by vehicle, then as in the
+// table (Ranger, RZR, General, Xpedition), then other codes A to Z.
+export function compareBrands(a: string, b: string) {
+  const rank = (code: string) => {
+    const known = KNOWN_BRANDS.indexOf(code);
+    return [VEHICLES.indexOf(brandInfo(code).vehicle), known === -1 ? KNOWN_BRANDS.length : known];
+  };
+  const [[vehicleA, orderA], [vehicleB, orderB]] = [rank(a), rank(b)];
+  return vehicleA - vehicleB || orderA - orderB || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+// "Ranger, RZR": a manual's brands as the Library shows them.
+export const brandLabels = (codes: readonly string[]) => [...codes].sort(compareBrands).map(brandLabel).join(", ");
 
 const sameHeading = (a: string, b: string) => a.trim().toLowerCase() === b.toLowerCase();
 

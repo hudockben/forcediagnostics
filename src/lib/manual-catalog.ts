@@ -1,13 +1,14 @@
 import "server-only";
 
-import { and, asc, count, eq, inArray, isNotNull, isNull, max, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, isNotNull, max, notExists, sql, type AnyColumn, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { auditLog, manualCatalogDocuments, manualCatalogModels, manuals } from "@/db/schema";
+import { auditLog, manualCatalogDocuments, manualCatalogModels, manualFileNames, manuals } from "@/db/schema";
 import {
   CATALOG_LIMITS,
   MAX_CATALOG_FILES_PER_BATCH,
   MAX_CATALOG_MODELS_PER_BATCH,
+  MODEL_YEARS_PATTERN,
   brandWords,
   catalogKey,
   cleanCatalogText,
@@ -37,17 +38,104 @@ const MODELS_PER_INSERT = 1000;
 
 const unsaved = { error: "That part of the model list couldn't be saved. Import it again." };
 
-// A manual's model-list entry, for joins from manuals: same shop, same file
-// name whatever the case.
-export const catalogEntryOfManual = and(
-  eq(manualCatalogDocuments.shopId, manuals.shopId),
-  eq(manualCatalogDocuments.fileKey, sql`lower(${manuals.fileName})`),
+// A manual can have several model-list entries: one for each name it's known
+// by (manual_file_names) that the list has. These pieces of SQL work out its
+// details from them, for queries that select from manuals (not under an
+// alias). Each is a small subquery per manual, found by index.
+//
+// Each is nested one level (whole): in a query with only one table, Drizzle
+// leaves the table name off columns written straight into a selected field,
+// and inside a subquery a bare "file_name" or "shop_id" would mean the wrong
+// table, or both.
+const whole = <T>(query: SQL) => sql<T>`${query}`;
+
+// For joins from manual_file_names to the entry under that name.
+export const entryOfName = and(
+  eq(manualCatalogDocuments.shopId, manualFileNames.shopId),
+  eq(manualCatalogDocuments.fileKey, manualFileNames.fileKey),
 );
+
+// For joins from manual_file_names to the models of the entry under that name.
+export const modelsOfName = and(
+  eq(manualCatalogModels.shopId, manualFileNames.shopId),
+  eq(manualCatalogModels.fileKey, manualFileNames.fileKey),
+);
+
+const namesOfManual = and(eq(manualFileNames.shopId, manuals.shopId), eq(manualFileNames.manualId, manuals.id));
+
+// The manual's entries, as the FROM and WHERE of a subquery.
+const fromEntries = (where?: SQL) =>
+  sql`from ${manualFileNames} join ${manualCatalogDocuments} on ${entryOfName} where ${and(namesOfManual, where)}`;
+
+// A field of the entry that names the manual: the one for its own file name
+// if the list has it, else the first of its other names A to Z.
+const namingEntry = (field: SQL | AnyColumn) => sql`(
+  select ${field} ${fromEntries()}
+  order by ${manualFileNames.fileKey} = lower(${manuals.fileName}) desc, ${manualFileNames.fileKey}
+  limit 1
+)`;
 
 // What a manual is called in the app: Polaris's subject line from the model
 // list when there is one ("2027 RZR Pro R Boost / Pro R Boost 4"), which says
 // far more than its file name ("9942508").
-export const manualDisplayTitle = sql<string>`coalesce(${manualCatalogDocuments.title}, ${manuals.title})`;
+export const manualDisplayTitle = whole<string>(
+  sql`coalesce(${namingEntry(manualCatalogDocuments.title)}, ${manuals.title})`,
+);
+
+// Its Model Years text ("2020, 2022"): the one its entries give, or when
+// they give different ones, from the earliest year in them to the latest
+// (the RZR 800 manual's "2013" and "2014" make "2013-2014"), whichever name
+// is its own. Years are read as the Year filter reads them.
+export const manualModelYears = whole<string | null>(sql`(
+  select case
+    when count(distinct ${manualCatalogDocuments.modelYears}) <= 1 then max(${manualCatalogDocuments.modelYears})
+    when min(y.first) is null then ${namingEntry(manualCatalogDocuments.modelYears)}
+    when min(y.first) = max(y.last) then min(y.first)::text
+    else min(y.first) || '-' || max(y.last)
+  end
+  from ${manualFileNames} join ${manualCatalogDocuments} on ${entryOfName}
+  left join lateral (
+    select least(r.m[1]::int, coalesce(r.m[2], r.m[1])::int) as first,
+      greatest(r.m[1]::int, coalesce(r.m[2], r.m[1])::int) as last
+    from regexp_matches(coalesce(${manualCatalogDocuments.modelYears}, ''), ${MODEL_YEARS_PATTERN}, 'g') r(m)
+  ) y on true
+  where ${namesOfManual}
+)`);
+
+// Whether the model list has the manual under any of its names.
+export const manualInList = whole<boolean>(sql`exists (select 1 ${fromEntries()})`);
+
+// The brand codes of all its entries, each once (brandLabels shows them).
+// Brands filled in from model numbers count too.
+export const manualBrands = whole<string[]>(sql`coalesce((
+  select array_agg(distinct ${manualCatalogDocuments.brand}) ${fromEntries(isNotNull(manualCatalogDocuments.brand))}
+), '{}')`);
+
+// The brands that were only ever filled in from model numbers, never given
+// by the list.
+export const manualInferredBrands = whole<string[]>(sql`coalesce((
+  select array_agg(brand) from (
+    select ${manualCatalogDocuments.brand} as brand ${fromEntries(isNotNull(manualCatalogDocuments.brand))}
+    group by ${manualCatalogDocuments.brand}
+    having bool_and(${manualCatalogDocuments.inferredBrand})
+  ) filled_in
+), '{}')`);
+
+// How many models its entries cover between them, each model once.
+export const manualModelCount = whole<number>(sql`(
+  select count(distinct (
+    ${manualCatalogModels.modelYear}, ${manualCatalogModels.modelNumber}, ${manualCatalogModels.modelDescription}
+  ))::int
+  from ${manualFileNames} join ${manualCatalogModels} on ${modelsOfName}
+  where ${namesOfManual}
+)`);
+
+// The names it's known by besides its own, A to Z.
+export const manualOtherNames = whole<string[]>(sql`coalesce((
+  select array_agg(${manualFileNames.fileName} order by ${manualFileNames.fileKey})
+  from ${manualFileNames}
+  where ${namesOfManual} and ${manualFileNames.fileKey} <> lower(${manuals.fileName})
+), '{}')`);
 
 // One import at a time per shop, so two tabs can't interleave their writes.
 async function lockCatalog(tx: ShopTransaction, shopId: string) {
@@ -252,9 +340,9 @@ export type CatalogSummary = {
   entries: number;
   models: number;
   lastImportedAt: Date | null;
-  // Manuals whose file name isn't in the model list.
+  // Manuals the model list has under none of their names.
   notListed: { id: string; title: string; fileName: string }[];
-  // Model-list entries whose PDF hasn't been added yet.
+  // Model-list entries whose name no manual is known by yet: no PDF added.
   missingPdfs: { fileName: string; title: string | null }[];
 };
 
@@ -267,17 +355,32 @@ export function catalogSummary(shopId: string): Promise<CatalogSummary> {
       .select({ n: count(), lastImportedAt: max(manualCatalogDocuments.importedAt) })
       .from(manualCatalogDocuments);
     const [models] = await tx.select({ n: count() }).from(manualCatalogModels);
+    // The listed manuals, worked out once (see manualsMatching in
+    // src/lib/library.ts for why it's an array).
+    const listed = sql`array(
+      select ${manualFileNames.manualId} from ${manualFileNames} join ${manualCatalogDocuments} on ${entryOfName}
+    )`;
     const notListed = await tx
       .select({ id: manuals.id, title: manuals.title, fileName: manuals.fileName })
       .from(manuals)
-      .leftJoin(manualCatalogDocuments, catalogEntryOfManual)
-      .where(isNull(manualCatalogDocuments.fileKey))
+      .where(sql`${manuals.id} <> all(${listed})`)
       .orderBy(asc(manuals.fileName));
     const missingPdfs = await tx
       .select({ fileName: manualCatalogDocuments.fileName, title: manualCatalogDocuments.title })
       .from(manualCatalogDocuments)
-      .leftJoin(manuals, catalogEntryOfManual)
-      .where(isNull(manuals.id))
+      .where(
+        notExists(
+          tx
+            .select({ one: sql`1` })
+            .from(manualFileNames)
+            .where(
+              and(
+                eq(manualFileNames.shopId, manualCatalogDocuments.shopId),
+                eq(manualFileNames.fileKey, manualCatalogDocuments.fileKey),
+              ),
+            ),
+        ),
+      )
       .orderBy(asc(manualCatalogDocuments.fileName));
     return {
       manuals: manualCount.n,
