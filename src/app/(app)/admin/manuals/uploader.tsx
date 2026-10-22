@@ -5,6 +5,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { useRef, useState, type DragEvent } from "react";
 
 import { secondaryButtonClass } from "@/components/hud";
+import { catalogBatches, decodeModelList, readModelList, type LeftOutFile } from "@/lib/manual-catalog-rules";
 import {
   MAX_PAGES_PER_BATCH,
   PAGE_BATCH_BYTES,
@@ -14,12 +15,16 @@ import {
 } from "@/lib/manual-rules";
 import { describePdfError, loadPdfJs } from "@/lib/pdfjs";
 
-import { confirmUpload, finishUpload, savePages, startUpload } from "./actions";
+import { confirmUpload, finishModelList, finishUpload, saveModelList, savePages, startUpload } from "./actions";
 
 // Adds manuals from this browser. For each PDF: hash it, check it opens,
 // ask the server what to do (skip, resume or upload), upload it straight to
 // storage, then read its text page by page and save it in batches. Two files
 // go at a time; files are only read while they're being worked on.
+//
+// A model list (Polaris's spreadsheet of which models each manual covers,
+// saved as CSV) among the chosen files is imported first, before any PDF
+// starts: it's read here and sent in batches (see manual-catalog-rules.ts).
 
 const AT_A_TIME = 2;
 // Refresh the list below every so many finished files, and at the end.
@@ -48,6 +53,22 @@ function check<T extends object>(result: T | { error: string }): T {
 }
 
 const isPdf = (file: File) => /\.pdf$/i.test(file.name);
+const isCsv = (file: File) => /\.csv$/i.test(file.name);
+
+// A model list being imported: shown in its own row above the PDFs.
+type ListJob = {
+  id: number;
+  name: string;
+  size: number;
+  state: "waiting" | "importing" | "imported" | "skipped" | "failed";
+  progress: number;
+  message: string;
+  // Files the list couldn't take, with why.
+  leftOut: LeftOutFile[];
+};
+
+const plural = (count: number, one: string, many: string) =>
+  `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 
 // The same file chosen again has the same name, size and date.
 const fileKey = (file: File) => `${file.name}\u0000${file.size}\u0000${file.lastModified}`;
@@ -123,6 +144,10 @@ function describe(job: Job) {
 export function ManualUploader() {
   const router = useRouter();
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [lists, setLists] = useState<ListJob[]>([]);
+  const listFiles = useRef(new Map<number, File>());
+  // Model lists still to import (or importing); PDFs wait for them.
+  const listsPending = useRef(0);
   const [leftOut, setLeftOut] = useState(0);
   const [dragging, setDragging] = useState(false);
   const files = useRef(new Map<number, File>());
@@ -148,6 +173,102 @@ export function ManualUploader() {
 
   function update(id: number, patch: Partial<Job>) {
     setJobs((list) => list.map((job) => (job.id === id ? { ...job, ...patch } : job)));
+  }
+
+  function updateList(id: number, patch: Partial<ListJob>) {
+    setLists((all) => all.map((job) => (job.id === id ? { ...job, ...patch } : job)));
+  }
+
+  async function importList(id: number) {
+    const file = listFiles.current.get(id);
+    if (!file) return;
+    failedIds.current.delete(id);
+    updateList(id, { state: "importing", progress: 0, message: "Reading the model list…", leftOut: [] });
+    try {
+      let bytes: ArrayBuffer;
+      try {
+        bytes = await file.arrayBuffer();
+      } catch {
+        throw new Stop("This file couldn't be read. Check it's still there, then retry.");
+      }
+      const decoded = decodeModelList(new Uint8Array(bytes));
+      if ("error" in decoded) {
+        updateList(id, { state: "skipped", progress: 1, message: `Skipped. ${decoded.error}` });
+        return;
+      }
+      const list = readModelList(decoded.text);
+      if ("error" in list) {
+        // Not the model list, or not readable as one: nothing is imported.
+        updateList(id, { state: "skipped", progress: 1, message: `Skipped. ${list.error}` });
+        return;
+      }
+      if (!crypto.randomUUID) throw new Stop("Importing the model list needs a secure (https) connection.");
+      const importId = crypto.randomUUID();
+      const total = list.files.length;
+      let sent = 0;
+      for (const batch of catalogBatches(list.files)) {
+        updateList(id, {
+          progress: sent / total,
+          message: `Importing: ${sent.toLocaleString("en-US")} of ${plural(total, "manual", "manuals")}`,
+        });
+        check(await saveModelList({ importId, files: batch }));
+        sent += batch.length;
+      }
+      const result = check(
+        await finishModelList({
+          importId,
+          fileName: file.name,
+          leftOut: list.leftOut.length,
+          rowsWithoutFile: list.rowsWithoutFile,
+        }),
+      );
+      updateList(id, {
+        state: "imported",
+        progress: 1,
+        message:
+          `Model list: ${plural(result.manuals, "manual", "manuals")}, ${plural(result.models, "model", "models")}` +
+          (result.brandsInferred > 0
+            ? ` (${plural(result.brandsInferred, "brand", "brands")} filled in)`
+            : ""),
+        leftOut: list.leftOut,
+      });
+    } catch (error) {
+      if (!(error instanceof Stop)) console.error("Couldn't import the model list", error);
+      failedIds.current.add(id);
+      updateList(id, {
+        state: "failed",
+        message: !navigator.onLine
+          ? "The connection dropped. Retry when it's back; what was saved stays."
+          : error instanceof Stop
+            ? error.message
+            : "Something went wrong. Check the connection and retry.",
+      });
+    }
+  }
+
+  // One list at a time, oldest first, so the newest list has the last word
+  // on any file both have. PDFs start once they're all done.
+  function importLists(ids: number[]) {
+    if (ids.length === 0) return;
+    listsPending.current += 1;
+    window.addEventListener("beforeunload", warnBeforeClosing.current);
+    void (async () => {
+      try {
+        for (const id of ids) await importList(id);
+      } finally {
+        listsPending.current -= 1;
+        if (navigator.onLine) router.refresh();
+        if (listsPending.current === 0 && running.current === 0 && queue.current.length === 0) {
+          window.removeEventListener("beforeunload", warnBeforeClosing.current);
+        }
+        pump();
+      }
+    })();
+  }
+
+  function retryList(id: number) {
+    updateList(id, { state: "waiting", progress: 0, message: "", leftOut: [] });
+    importLists([id]);
   }
 
   async function readAndSaveText(id: number, manualId: string, doc: PDFDocumentProxy) {
@@ -239,7 +360,11 @@ export function ManualUploader() {
 
         const start = check(await startUpload({ fileName: file.name, sizeBytes: file.size, sha256 }));
         if (start.next === "skip") {
-          update(id, { state: "skipped", progress: 1, message: `Already in the library as ${start.title}` });
+          update(id, {
+            state: "skipped",
+            progress: 1,
+            message: `Already in the library as ${start.title}`,
+          });
           return false;
         }
         if (start.next === "upload") {
@@ -294,6 +419,8 @@ export function ManualUploader() {
   }
 
   function pump() {
+    // A model list goes first; this runs again once it's in.
+    if (listsPending.current > 0) return;
     // Offline: hold the queue until the connection is back. Refreshing the
     // list now would fail and reload the whole page.
     if (!navigator.onLine) {
@@ -316,7 +443,9 @@ export function ManualUploader() {
         // A file waiting for the connection hasn't finished.
         if (!putBack) finishedSinceRefresh.current += 1;
         const allDone = running.current === 0 && queue.current.length === 0;
-        if (allDone) window.removeEventListener("beforeunload", warnBeforeClosing.current);
+        if (allDone && listsPending.current === 0) {
+          window.removeEventListener("beforeunload", warnBeforeClosing.current);
+        }
         if (navigator.onLine && (allDone || finishedSinceRefresh.current >= REFRESH_EVERY)) {
           finishedSinceRefresh.current = 0;
           router.refresh();
@@ -331,7 +460,39 @@ export function ManualUploader() {
     const pdfs = chosen
       .filter(isPdf)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    setLeftOut(chosen.length - pdfs.length);
+    // Model lists oldest first (see importLists).
+    const csvs = chosen
+      .filter(isCsv)
+      .sort((a, b) => a.lastModified - b.lastModified || a.name.localeCompare(b.name));
+    setLeftOut(chosen.length - pdfs.length - csvs.length);
+
+    // A list that's already listed is only imported again if it failed.
+    const newLists: ListJob[] = [];
+    const listIds: number[] = [];
+    for (const file of csvs) {
+      const listed = jobsByFile.current.get(fileKey(file));
+      if (listed !== undefined) {
+        if (failedIds.current.has(listed)) {
+          failedIds.current.delete(listed);
+          listFiles.current.set(listed, file);
+          listIds.push(listed);
+        }
+        continue;
+      }
+      const id = nextId.current++;
+      jobsByFile.current.set(fileKey(file), id);
+      listFiles.current.set(id, file);
+      listIds.push(id);
+      newLists.push({ id, name: file.name, size: file.size, state: "waiting", progress: 0, message: "", leftOut: [] });
+    }
+    setLists((all) => [
+      ...all.map((job) =>
+        listIds.includes(job.id) ? { ...job, state: "waiting" as const, progress: 0, message: "", leftOut: [] } : job,
+      ),
+      ...newLists,
+    ]);
+    importLists(listIds);
+
     const newJobs: Job[] = [];
     const again: number[] = [];
     for (const file of pdfs) {
@@ -369,15 +530,17 @@ export function ManualUploader() {
   function onDrop(event: DragEvent) {
     event.preventDefault();
     setDragging(false);
-    // Entries have to be taken before the event ends; reading them can wait.
+    // Entries and files have to be taken before the event ends (the list
+    // is empty afterwards); reading them can wait.
+    const dropped = [...event.dataTransfer.files];
     const entries = [...event.dataTransfer.items]
       .map((item) => item.webkitGetAsEntry?.())
       .filter((entry): entry is FileSystemEntry => Boolean(entry));
     if (entries.length === 0) {
-      addFiles([...event.dataTransfer.files]);
+      addFiles(dropped);
       return;
     }
-    void readDroppedEntries(entries).then(addFiles, () => addFiles([...event.dataTransfer.files]));
+    void readDroppedEntries(entries).then(addFiles, () => addFiles(dropped));
   }
 
   return (
@@ -393,11 +556,11 @@ export function ManualUploader() {
           dragging ? "border-glow/70 bg-glow/5" : "border-white/15"
         }`}
       >
-        <p className="text-sm text-ink">Drag PDFs or a whole folder here</p>
+        <p className="text-sm text-ink">Drag PDFs, the model list (.csv) or a whole folder here</p>
         <p className="mt-1 text-xs text-ink-muted">or</p>
         <div className="mx-auto mt-3 flex max-w-md flex-col gap-3 sm:flex-row">
           <button type="button" onClick={() => fileInput.current?.click()} className={secondaryButtonClass}>
-            Choose PDFs
+            Choose files
           </button>
           <button type="button" onClick={() => folderInput.current?.click()} className={secondaryButtonClass}>
             Choose a folder
@@ -406,9 +569,9 @@ export function ManualUploader() {
         <input
           ref={fileInput}
           type="file"
-          accept="application/pdf,.pdf"
+          accept="application/pdf,.pdf,text/csv,.csv"
           multiple
-          aria-label="Choose PDFs"
+          aria-label="Choose files"
           className="sr-only"
           tabIndex={-1}
           onChange={(event) => {
@@ -434,8 +597,69 @@ export function ManualUploader() {
 
       {leftOut > 0 && (
         <p className="text-sm text-ink-muted">
-          Left out {leftOut} {leftOut === 1 ? "file that isn't a PDF" : "files that aren't PDFs"}.
+          Left out {leftOut}{" "}
+          {leftOut === 1 ? "file that isn't a PDF or a model list" : "files that aren't PDFs or a model list"}.
         </p>
+      )}
+
+      {lists.length > 0 && (
+        <ul aria-label="Model lists" className="divide-y divide-white/10 rounded-lg border border-white/10">
+          {lists.map((job) => (
+            <li key={job.id} className="space-y-2 px-4 py-3">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                <p className="min-w-0 truncate text-sm text-ink" title={job.name}>
+                  {job.name}
+                </p>
+                <p className="text-xs text-ink-muted">{formatBytes(job.size)}</p>
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p
+                  role="status"
+                  className={`text-xs ${
+                    job.state === "imported"
+                      ? "text-glow"
+                      : job.state === "failed" || job.state === "skipped"
+                        ? "text-trail"
+                        : "text-ink-muted"
+                  }`}
+                >
+                  {job.state === "waiting" ? "Waiting" : job.message}
+                </p>
+                {job.state === "failed" && (
+                  <button
+                    type="button"
+                    onClick={() => retryList(job.id)}
+                    aria-label={`Retry ${job.name}`}
+                    className="h-9 rounded-lg px-3 text-sm font-medium text-glow transition hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
+              {job.state === "importing" && (
+                <div className="h-1 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full bg-glow/70" style={{ width: `${job.progress * 100}%` }} />
+                </div>
+              )}
+              {job.leftOut.length > 0 && (
+                <div className="text-xs text-trail">
+                  <p>
+                    Left out {plural(job.leftOut.length, "manual", "manuals")} with something wrong in the list
+                    (the rest went in):
+                  </p>
+                  <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                    {job.leftOut.slice(0, 5).map((file) => (
+                      <li key={file.fileName}>
+                        {file.fileName}: {file.problem}
+                      </li>
+                    ))}
+                    {job.leftOut.length > 5 && <li>and {job.leftOut.length - 5} more</li>}
+                  </ul>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
       )}
 
       {jobs.length > 0 && (

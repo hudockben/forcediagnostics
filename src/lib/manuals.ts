@@ -2,10 +2,19 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { DrizzleQueryError, and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { DrizzleQueryError, and, asc, count, eq, inArray, lte, sql } from "drizzle-orm";
 
 import { withShop } from "@/db";
-import { auditLog, manualPages, manuals, users, type ManualStatus } from "@/db/schema";
+import {
+  auditLog,
+  manualCatalogDocuments,
+  manualCatalogModels,
+  manualPages,
+  manuals,
+  users,
+  type ManualStatus,
+} from "@/db/schema";
+import { catalogEntryOfManual, manualDisplayTitle } from "@/lib/manual-catalog";
 import {
   MAX_MANUAL_BYTES,
   MAX_MANUAL_PAGES,
@@ -296,8 +305,15 @@ export async function finishManual(
 
 export type ManualSummary = {
   id: string;
+  // The model list's title when the manual is in it.
   title: string;
   fileName: string;
+  // From the model list; inList is false when the manual isn't in it.
+  inList: boolean;
+  brand: string | null;
+  inferredBrand: boolean;
+  modelYears: string | null;
+  models: number;
   status: ManualStatus;
   sizeBytes: number;
   pageCount: number | null;
@@ -306,14 +322,25 @@ export type ManualSummary = {
   createdAt: Date;
 };
 
-// Every manual in the shop for the admin list: unfinished ones first.
+// Every manual in the shop for the admin list, with its model-list details:
+// unfinished ones first.
 export function listManuals(shopId: string): Promise<ManualSummary[]> {
-  return withShop(shopId, (tx) =>
-    tx
+  return withShop(shopId, (tx) => {
+    const modelCounts = tx
+      .select({ fileKey: manualCatalogModels.fileKey, models: count().as("models") })
+      .from(manualCatalogModels)
+      .groupBy(manualCatalogModels.fileKey)
+      .as("model_counts");
+    return tx
       .select({
         id: manuals.id,
-        title: manuals.title,
+        title: manualDisplayTitle,
         fileName: manuals.fileName,
+        inList: sql<boolean>`${manualCatalogDocuments.fileKey} is not null`,
+        brand: manualCatalogDocuments.brand,
+        inferredBrand: sql<boolean>`coalesce(${manualCatalogDocuments.inferredBrand}, false)`,
+        modelYears: manualCatalogDocuments.modelYears,
+        models: sql<number>`coalesce(${modelCounts.models}, 0)::int`,
         status: manuals.status,
         sizeBytes: manuals.sizeBytes,
         pageCount: manuals.pageCount,
@@ -323,6 +350,8 @@ export function listManuals(shopId: string): Promise<ManualSummary[]> {
       })
       .from(manuals)
       .leftJoin(users, eq(users.id, manuals.uploadedByUserId))
-      .orderBy(sql`${manuals.status} = 'ready'`, asc(manuals.title)),
-  );
+      .leftJoin(manualCatalogDocuments, catalogEntryOfManual)
+      .leftJoin(modelCounts, eq(modelCounts.fileKey, manualCatalogDocuments.fileKey))
+      .orderBy(sql`${manuals.status} = 'ready'`, manualDisplayTitle, asc(manuals.id));
+  });
 }

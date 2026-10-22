@@ -3,6 +3,12 @@
 import { DrizzleQueryError } from "drizzle-orm";
 import { unstable_rethrow } from "next/navigation";
 
+import {
+  finishCatalogImport,
+  saveCatalogBatch,
+  type CatalogFinishResult,
+  type CatalogSaveResult,
+} from "@/lib/manual-catalog";
 import type { PageText } from "@/lib/manual-rules";
 import {
   confirmManualUpload,
@@ -18,8 +24,9 @@ import { requireCapability } from "@/lib/session";
 import { isStorageConfigured, r2Storage } from "@/lib/storage";
 
 // The uploader on System Admin > Manuals calls these for each file, in
-// order (see src/lib/manuals.ts). Every action re-checks the permission:
-// server actions can be called directly, not just from the page.
+// order (see src/lib/manuals.ts), and for the model list (see
+// src/lib/manual-catalog.ts). Every action re-checks the permission: server
+// actions can be called directly, not just from the page.
 
 async function attempt<T>(what: string, run: () => Promise<T | { error: string }>) {
   try {
@@ -76,5 +83,29 @@ export async function finishUpload(input: { manualId: string }): Promise<FinishR
   return attempt("finish a manual", async () => {
     const admin = await requireCapability("settings.manage");
     return finishManual(admin, { manualId: String(input?.manualId ?? "") });
+  });
+}
+
+export async function saveModelList(input: { importId: string; files: unknown }): Promise<CatalogSaveResult> {
+  return attempt("save the model list", async () => {
+    const admin = await requireCapability("settings.manage");
+    return saveCatalogBatch(admin, { importId: String(input?.importId ?? ""), files: input?.files });
+  });
+}
+
+export async function finishModelList(input: {
+  importId: string;
+  fileName: string;
+  leftOut: number;
+  rowsWithoutFile: number;
+}): Promise<CatalogFinishResult> {
+  return attempt("finish the model list", async () => {
+    const admin = await requireCapability("settings.manage");
+    return finishCatalogImport(admin, {
+      importId: String(input?.importId ?? ""),
+      fileName: String(input?.fileName ?? ""),
+      leftOut: Number(input?.leftOut),
+      rowsWithoutFile: Number(input?.rowsWithoutFile),
+    });
   });
 }

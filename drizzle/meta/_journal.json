@@ -78,6 +78,20 @@
       "when": 1792688483366,
       "tag": "0010_manual_search",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1792691696371,
+      "tag": "0011_manual_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792691703268,
+      "tag": "0012_manual_catalog_grants",
+      "breakpoints": true
     }
   ]
 }

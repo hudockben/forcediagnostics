@@ -33,6 +33,26 @@ export function titleFromFileName(fileName: string) {
   return title || base.trim() || "Untitled manual";
 }
 
+// Text cut to at most `length` UTF-16 units without splitting a character
+// outside the Basic Multilingual Plane (an emoji, say) in half: half of one
+// makes encodeURIComponent throw.
+export function cutText(text: string, length: number) {
+  return text.slice(0, length).replace(/[\ud800-\udbff]$/, "");
+}
+
+// The name a manual's PDF opens and saves under: its title, without the
+// characters file systems refuse ("2027 RZR Pro R Boost / Pro R Boost 4"
+// -> "2027 RZR Pro R Boost - Pro R Boost 4.pdf").
+export function pdfFileName(title: string) {
+  const name = title
+    .replace(/"/g, "'")
+    .replace(/\s*[\\/|]+\s*/g, " - ")
+    .replace(/[:*?<>]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `${cutText(name, 200).trim() || "Manual"}.pdf`;
+}
+
 // Characters ts_headline marks matches with in search snippets. Page text
 // never contains them: cleanPageText strips every control character.
 export const SNIPPET_START = "\u0002";

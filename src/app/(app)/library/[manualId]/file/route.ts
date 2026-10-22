@@ -1,4 +1,5 @@
 import { getReadyManual } from "@/lib/library";
+import { pdfFileName } from "@/lib/manual-rules";
 import { allows, lookupCurrentUser } from "@/lib/session";
 import { isStorageConfigured, r2Storage } from "@/lib/storage";
 
@@ -13,7 +14,7 @@ export async function GET(request: Request, ctx: RouteContext<"/library/[manualI
   const { manualId } = await ctx.params;
   const manual = await getReadyManual(result.user.shop.id, manualId);
   if (!manual) return new Response("That manual isn't in the library.", { status: 404 });
-  const url = await r2Storage.downloadUrl(manual.storageKey, `${manual.title}.pdf`);
+  const url = await r2Storage.downloadUrl(manual.storageKey, pdfFileName(manual.title));
   return new Response(null, {
     status: 303,
     // The link is personal and short-lived, so nothing should keep it.

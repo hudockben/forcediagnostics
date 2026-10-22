@@ -9,7 +9,7 @@ import { after, before, describe, test } from "node:test";
 import { TransactionRollbackError, and, eq, sql } from "drizzle-orm";
 
 import { enterShop, systemDb, withShop } from "../src/db";
-import { auditLog, manualPages, manuals, shops, users } from "../src/db/schema";
+import { auditLog, manualCatalogDocuments, manualPages, manuals, shops, users } from "../src/db/schema";
 import { SEARCH_LIMIT, cleanSearchQuery, listReadyManuals, searchManuals, searchQuery } from "../src/lib/library";
 import {
   MAX_PAGES_PER_BATCH,
@@ -415,6 +415,15 @@ describe("searching the library", () => {
     assert.equal((await searchManuals(adminA.shop.id, '"relay pump"')).length, 0);
   });
 
+  test("a long search cut short never ends in half an emoji", () => {
+    // ?q=<199 x>😀 from a hand-made link: cut at 200 UTF-16 units, the
+    // emoji's second half would go and links built from it would throw.
+    const cut = cleanSearchQuery(`${"x".repeat(199)}\u{1F600}`);
+    assert.equal(cut, "x".repeat(199));
+    assert.doesNotThrow(() => encodeURIComponent(cut));
+    assert.equal(cleanSearchQuery(`${"x".repeat(198)}\u{1F600}`), `${"x".repeat(198)}\u{1F600}`);
+  });
+
   test("a NUL in the search is dropped instead of breaking it", async () => {
     assert.equal(cleanSearchQuery("  P03\u000000 "), "P0300");
     assert.deepEqual(await searchManuals(adminA.shop.id, "\u0000"), []);
@@ -424,11 +433,14 @@ describe("searching the library", () => {
     assert.equal(hits[0]?.pageNumber, 2);
   });
 
-  test("uses the page text index under row-level security", async () => {
+  test("uses the page text index under row-level security, with filters too", async () => {
     // Test tables are small enough to read straight through, so this adds a
-    // big manual (in a transaction that's rolled back) and rules out reading
-    // whole tables, leaving the index unless row-level security stops it.
+    // big manual with a big model list entry (in a transaction that's rolled
+    // back) and rules out reading whole tables, leaving the index unless
+    // row-level security or the filters stop it.
     let plan = "";
+    let filteredPlan = "";
+    let yearPlan = "";
     await systemDb
       .transaction(async (tx) => {
         const [big] = await tx
@@ -449,19 +461,35 @@ describe("searching the library", () => {
           select ${big.id}::uuid, ${adminA.shop.id}::uuid, n, 'Torque the bracket bolts to spec, page ' || n
           from generate_series(1, 3000) n
         `);
-        await tx.execute(sql`analyze manuals, manual_pages`);
+        await tx
+          .insert(manualCatalogDocuments)
+          .values({ shopId: adminA.shop.id, fileName: "Big.pdf", brand: "ATV", importId: randomUUID() });
+        await tx.execute(sql`
+          insert into manual_catalog_models (shop_id, file_key, model_year, model_number, model_description)
+          select ${adminA.shop.id}::uuid, 'big.pdf', 2000 + n % 25, 'A' || n, 'SPORTSMAN ' || n || ' ULTIMATE TRAIL'
+          from generate_series(1, 5000) n
+        `);
+        await tx.execute(sql`analyze manuals, manual_pages, manual_catalog_documents, manual_catalog_models`);
         await enterShop(tx, adminA.shop.id);
         await tx.execute(sql`set local enable_seqscan = off`);
-        const result = await tx.execute<{ "QUERY PLAN": string }>(
-          sql`explain ${searchQuery("fuel pump", SEARCH_LIMIT)}`,
-        );
-        plan = result.rows.map((row) => row["QUERY PLAN"]).join("\n");
+        const explain = async (filters: Parameters<typeof searchQuery>[2]) => {
+          const result = await tx.execute<{ "QUERY PLAN": string }>(
+            sql`explain ${searchQuery("fuel pump", SEARCH_LIMIT, filters)}`,
+          );
+          return result.rows.map((row) => row["QUERY PLAN"]).join("\n");
+        };
+        plan = await explain({});
+        filteredPlan = await explain({ brand: "ATV", year: 2020, model: "sportsman ultimate" });
+        // Year alone also reads Model Years text.
+        yearPlan = await explain({ year: 2020 });
         tx.rollback();
       })
       .catch((error) => {
         if (!(error instanceof TransactionRollbackError)) throw error;
       });
     assert.match(plan, /Bitmap Index Scan on manual_pages_search/, plan);
+    assert.match(filteredPlan, /Bitmap Index Scan on manual_pages_search/, filteredPlan);
+    assert.match(yearPlan, /Bitmap Index Scan on manual_pages_search/, yearPlan);
   });
 
   test("ranks pages that are more about the words higher", async () => {

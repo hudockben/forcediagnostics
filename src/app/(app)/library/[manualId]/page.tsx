@@ -5,6 +5,7 @@ import { Suspense } from "react";
 
 import { LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { getReadyManual } from "@/lib/library";
+import { pdfFileName } from "@/lib/manual-rules";
 import { requireCapability } from "@/lib/session";
 import { STORAGE_ENV_VARS, isStorageConfigured, r2Storage } from "@/lib/storage";
 
@@ -40,7 +41,10 @@ async function Manual({
       <Link href="/library" className="text-sm text-glow/90 hover:text-glow hover:underline">
         ‹ Library
       </Link>
-      <PageHeading title={manual.title} />
+      <PageHeading
+        eyebrow={[manual.brand, manual.modelYears].filter(Boolean).join(" · ") || undefined}
+        title={manual.title}
+      />
       {isStorageConfigured ? (
         <ManualViewer
           // A link to another page of the same manual starts the viewer afresh.
@@ -48,7 +52,7 @@ async function Manual({
           manualId={manual.id}
           pageCount={manual.pageCount}
           startPage={startPage}
-          initialUrl={await r2Storage.downloadUrl(manual.storageKey, `${manual.title}.pdf`)}
+          initialUrl={await r2Storage.downloadUrl(manual.storageKey, pdfFileName(manual.title))}
         />
       ) : (
         <Notice tone="trail">

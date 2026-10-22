@@ -4,6 +4,7 @@ import {
   boolean,
   check,
   customType,
+  date,
   foreignKey,
   index,
   integer,
@@ -445,6 +446,117 @@ export const manualPages = pgTable(
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
       withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// The shop's model list: Polaris's spreadsheet of which models each manual
+// covers, imported under System Admin > Manuals (src/lib/manual-catalog.ts).
+// One row per file, kept apart from manuals so the list can come before or
+// after the PDFs, in any order. A manual finds its entry by file name:
+// file_key is the lower-cased name, matched against lower(manuals.file_name).
+export const manualCatalogDocuments = pgTable(
+  "manual_catalog_documents",
+  {
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    // As listed, e.g. "9942508.pdf".
+    fileName: text("file_name").notNull(),
+    // Worked out by Postgres, so it always matches lower(manuals.file_name).
+    fileKey: text("file_key")
+      .notNull()
+      .generatedAlwaysAs(sql`lower("file_name")`),
+    // Polaris's category code as listed ("ATV", "RZR", "GEN"), shown as is.
+    brand: text("brand"),
+    // The list left the brand blank and it was worked out from the model
+    // numbers (see inferBrands in src/lib/manual-catalog-rules.ts).
+    inferredBrand: boolean("inferred_brand").notNull().default(false),
+    // Polaris's part number for the manual.
+    article: text("article"),
+    // Polaris's subject line, which the library shows instead of the file name.
+    title: text("title"),
+    postedOn: date("posted_on"),
+    // Free text as listed: "2020, 2022" or "2018-2027".
+    modelYears: text("model_years"),
+    // The import that last wrote this entry, for that import's counts.
+    importId: uuid("import_id").notNull(),
+    importedAt: timestamp("imported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "manual_catalog_documents_pk", columns: [t.shopId, t.fileKey] }),
+    check("manual_catalog_documents_file_name", sql`length(${t.fileName}) between 1 and 255`),
+    check("manual_catalog_documents_inferred_brand", sql`not ${t.inferredBrand} or ${t.brand} is not null`),
+    pgPolicy("manual_catalog_documents_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manual_catalog_documents_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Only the brand can change in place (filling in a blank one);
+    // the column grant is in drizzle/0012_manual_catalog_grants.sql.
+    pgPolicy("manual_catalog_documents_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Importing a file's entry again replaces it: delete, then add.
+    pgPolicy("manual_catalog_documents_remove_own_shop", {
+      for: "delete",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// The models each model-list entry covers: one row per model number.
+export const manualCatalogModels = pgTable(
+  "manual_catalog_models",
+  {
+    shopId: uuid("shop_id").notNull(),
+    fileKey: text("file_key").notNull(),
+    modelYear: integer("model_year"),
+    // Upper-cased, e.g. "Z24NAE99AK".
+    modelNumber: text("model_number"),
+    // e.g. "SPORTSMAN 850 ULTIMATE TRAIL - CHALK GLO".
+    modelDescription: text("model_description"),
+    // The number and description as upper-case words between spaces
+    // (" Z24NAE99AK RZR XP 1000 EPS "), so the Library's Model filter can
+    // match the start of any word with LIKE '% RZR%'.
+    modelWords: text("model_words").generatedAlwaysAs(
+      sql`' ' || upper(regexp_replace(coalesce("model_number", '') || ' ' || coalesce("model_description", ''), '[^A-Za-z0-9]+', ' ', 'g')) || ' '`,
+    ),
+  },
+  (t) => [
+    // A model can only ever belong to an entry in its own shop.
+    foreignKey({
+      name: "manual_catalog_models_document_fk",
+      columns: [t.shopId, t.fileKey],
+      foreignColumns: [manualCatalogDocuments.shopId, manualCatalogDocuments.fileKey],
+    }).onDelete("cascade"),
+    index("manual_catalog_models_document").on(t.shopId, t.fileKey),
+    index("manual_catalog_models_number").on(t.shopId, t.modelNumber),
+    index("manual_catalog_models_year").on(t.shopId, t.modelYear),
+    check("manual_catalog_models_year", sql`${t.modelYear} between 1950 and 2100`),
+    pgPolicy("manual_catalog_models_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manual_catalog_models_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manual_catalog_models_remove_own_shop", {
+      for: "delete",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
     }),
   ],
 );
