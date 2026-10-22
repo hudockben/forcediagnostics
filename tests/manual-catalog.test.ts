@@ -993,14 +993,6 @@ describe("model list shop isolation", () => {
         .returning(),
     );
     assert.equal(changed.length, 0);
-    const renamed = await withShop(adminB.shop.id, (tx) =>
-      tx
-        .update(manuals)
-        .set({ fileName: "defaced.pdf", title: "Defaced" })
-        .where(eq(manuals.shopId, adminA.shop.id))
-        .returning(),
-    );
-    assert.equal(renamed.length, 0);
     const deleted = await withShop(adminB.shop.id, async (tx) => [
       ...(await tx.delete(manualCatalogModels).where(eq(manualCatalogModels.shopId, adminA.shop.id)).returning()),
       ...(await tx.delete(manualCatalogDocuments).where(eq(manualCatalogDocuments.shopId, adminA.shop.id)).returning()),
@@ -1019,7 +1011,9 @@ describe("model list shop isolation", () => {
       `update "manual_catalog_documents" set "title" = 'x'`,
       `update "manual_catalog_models" set "model_number" = 'X'`,
       `update "manual_catalog_models" set "shop_id" = '${adminB.shop.id}'`,
-      // A manual's name can change (to take a listed one); its file can't.
+      // Nor can a manual's name, title or file change.
+      `update "manuals" set "file_name" = 'x.pdf'`,
+      `update "manuals" set "title" = 'x'`,
       `update "manuals" set "size_bytes" = 1`,
     ]) {
       await assert.rejects(
