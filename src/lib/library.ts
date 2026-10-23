@@ -119,6 +119,10 @@ const thisShop = sql`nullif(current_setting('app.shop_id', true), '')::uuid`;
 
 const codeList = (codes: string[]) => sql.join(codes.map((code) => sql`${code}`), sql`, `);
 
+// A uuid[] of the given IDs, one parameter each.
+export const uuidArray = (ids: string[]) =>
+  ids.length > 0 ? sql`array[${sql.join(ids.map((id) => sql`${id}`), sql`, `)}]::uuid[]` : sql`'{}'::uuid[]`;
+
 // An entry's brand (the column) is that kind of vehicle. Other is any code
 // the app doesn't know; a blank brand is no vehicle at all.
 function brandIsVehicle(vehicle: Vehicle, brand: SQL): SQL {
@@ -229,8 +233,15 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
 // reach into, and the filters then pick from those. Otherwise Postgres,
 // guessing a filter leaves a manual or two, reads each of those manuals'
 // pages instead, which is slow when the filter matches hundreds.
-export function searchQuery(q: string, limit: number, filters: LibraryFilters = {}) {
-  const only = manualsMatching(filters);
+//
+// manualIds, when given, keeps to those manuals as well (Diagnose's manual
+// scope for a unit), the same way.
+export function searchQuery(q: string, limit: number, filters: LibraryFilters = {}, manualIds?: string[]) {
+  const matching = manualsMatching(filters);
+  const conditions = [
+    ...(matching ? [sql`manual_id = any(${matching})`] : []),
+    ...(manualIds ? [sql`manual_id = any(${uuidArray(manualIds)})`] : []),
+  ];
   return sql`
     with query as (select websearch_to_tsquery('english', ${q}) as tsq),
     matches as materialized (
@@ -243,7 +254,7 @@ export function searchQuery(q: string, limit: number, filters: LibraryFilters = 
     top as materialized (
       select manual_id, page_number, rank
       from matches
-      ${only ? sql`where manual_id = any(${only})` : sql``}
+      ${conditions.length > 0 ? sql`where ${sql.join(conditions, sql` and `)}` : sql``}
       order by rank desc, manual_id, page_number
       limit ${limit}
     )
@@ -268,9 +279,10 @@ export async function searchManuals(
   query: string,
   filters: LibraryFilters = {},
   limit = SEARCH_LIMIT,
+  manualIds?: string[],
 ): Promise<SearchHit[]> {
   const q = cleanSearchQuery(query);
-  if (!q) return [];
+  if (!q || manualIds?.length === 0) return [];
   const result = await withShop(shopId, (tx) =>
     tx.execute<{
       manual_id: string;
@@ -281,7 +293,7 @@ export async function searchManuals(
       page_count: number;
       rank: number;
       snippet: string;
-    }>(searchQuery(q, limit, filters)),
+    }>(searchQuery(q, limit, filters, manualIds)),
   );
   return result.rows.map((row) => ({
     manualId: row.manual_id,

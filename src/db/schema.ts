@@ -6,9 +6,11 @@ import {
   check,
   customType,
   date,
+  doublePrecision,
   foreignKey,
   index,
   integer,
+  json,
   jsonb,
   pgPolicy,
   pgRole,
@@ -20,6 +22,17 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+import {
+  CONVERSATION_STATUSES,
+  TURN_STATUSES,
+  type ConversationStatus,
+  type DiagnosisReply,
+  type FeedbackEntry,
+  type ProgressStep,
+  type SeenSources,
+  type TurnStatus,
+  type TurnUsage,
+} from "../lib/diagnose-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
 
@@ -632,6 +645,168 @@ export const manualCatalogModels = pgTable(
       for: "delete",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+
+// Diagnose: a tech and Claude talking a unit's problem through, one
+// conversation per unit and complaint (src/lib/diagnose.ts). The shop's
+// record of it, so anyone in the shop can pick it up again.
+export const diagnosisConversations = pgTable(
+  "diagnosis_conversations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    // Who started it.
+    userId: text("user_id").notNull(),
+    title: text("title").notNull(),
+    // The unit, once the tech or Claude has identified it.
+    unitModelNumber: text("unit_model_number"),
+    unitYear: integer("unit_year"),
+    // As shown: "2019 RZR XP 1000 EPS — Z19VDE99AM".
+    unitLabel: text("unit_label"),
+    // The manuals Claude's tools search and read. Null: the whole library.
+    scopeManualIds: uuid("scope_manual_ids").array(),
+    // Whether web search was declared when it started. The tool list stays
+    // the same for a conversation's whole life (changing it would break
+    // Claude's replayed history); turning web search off later removes it
+    // with a tool_removal message instead, recorded here.
+    webSearch: boolean("web_search").notNull(),
+    webSearchRemoved: boolean("web_search_removed").notNull().default(false),
+    status: text("status").notNull().$type<ConversationStatus>().default("open"),
+    // Totals over its finished messages.
+    techMessages: integer("tech_messages").notNull().default(0),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
+    cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }).notNull().default(0),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }).notNull().default(0),
+    webSearches: integer("web_searches").notNull().default(0),
+    costCents: doublePrecision("cost_cents").notNull().default(0),
+    // The size of Claude's prompt at the last message, for the length cap.
+    contextTokens: integer("context_tokens").notNull().default(0),
+    // "This was it": the cause the tech confirmed, for AI-accuracy figures.
+    outcome: jsonb("outcome").$type<{
+      title: string;
+      likelihood: string;
+      rank: number;
+      seq: number;
+      userId: string;
+      at: string;
+    } | null>(),
+    // Every "Ruled out" / "This was it" press, in order.
+    feedback: jsonb("feedback").$type<FeedbackEntry[]>().notNull().default([]),
+    // App notes for Claude's next message (a unit changed by the tech, say),
+    // cleared once a message carrying them finishes.
+    pendingNotes: jsonb("pending_notes").$type<string[]>().notNull().default([]),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // Lets diagnosis_turns tie a turn to a conversation *and* its shop.
+    unique("diagnosis_conversations_id_shop").on(t.id, t.shopId),
+    foreignKey({
+      name: "diagnosis_conversations_user_shop_fk",
+      columns: [t.userId, t.shopId],
+      foreignColumns: [users.id, users.shopId],
+    }).onDelete("cascade"),
+    index("diagnosis_conversations_shop_updated").on(t.shopId, t.updatedAt),
+    check(
+      "diagnosis_conversations_status",
+      sql`${t.status} in (${sql.raw(CONVERSATION_STATUSES.map((s) => `'${s}'`).join(", "))})`,
+    ),
+    pgPolicy("diagnosis_conversations_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("diagnosis_conversations_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Which columns can change is set by the grant in
+    // drizzle/0019_diagnosis_grants.sql.
+    pgPolicy("diagnosis_conversations_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// One tech message and Claude's work on it. history holds the exact API
+// messages this message added (the tech's, then Claude's replies and the
+// tool results), replayed unchanged ahead of every later message. It's
+// json, not jsonb: json keeps the text as written, so key order and every
+// byte of Claude's blocks come back the same.
+export const diagnosisTurns = pgTable(
+  "diagnosis_turns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id").notNull(),
+    shopId: uuid("shop_id").notNull(),
+    seq: integer("seq").notNull(),
+    userId: text("user_id").notNull(),
+    techText: text("tech_text").notNull(),
+    // Set when it finishes; failed and stopped turns are never replayed.
+    history: json("history").$type<unknown[]>(),
+    reply: jsonb("reply").$type<DiagnosisReply>(),
+    progress: jsonb("progress").$type<ProgressStep[]>().notNull().default([]),
+    // The manual pages and web pages the tools showed Claude, which its
+    // citations are checked against.
+    seen: jsonb("seen").$type<SeenSources>().notNull().default({ pages: [], urls: [] }),
+    usage: jsonb("usage").$type<TurnUsage>(),
+    webSearches: integer("web_searches").notNull().default(0),
+    costCents: doublePrecision("cost_cents").notNull().default(0),
+    status: text("status").notNull().$type<TurnStatus>().default("running"),
+    error: text("error"),
+    attempts: integer("attempts").notNull().default(1),
+    // Bumped while the server works on it; a running turn whose heartbeat
+    // stopped (a crash, a timeout) is marked failed when someone looks.
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+    stopRequestedAt: timestamp("stop_requested_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("diagnosis_turns_conversation_seq").on(t.conversationId, t.seq),
+    // A turn can only ever belong to a conversation in its own shop.
+    foreignKey({
+      name: "diagnosis_turns_conversation_shop_fk",
+      columns: [t.conversationId, t.shopId],
+      foreignColumns: [diagnosisConversations.id, diagnosisConversations.shopId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "diagnosis_turns_user_shop_fk",
+      columns: [t.userId, t.shopId],
+      foreignColumns: [users.id, users.shopId],
+    }).onDelete("cascade"),
+    index("diagnosis_turns_shop_created").on(t.shopId, t.createdAt),
+    check("diagnosis_turns_seq", sql`${t.seq} >= 1`),
+    check(
+      "diagnosis_turns_status",
+      sql`${t.status} in (${sql.raw(TURN_STATUSES.map((s) => `'${s}'`).join(", "))})`,
+    ),
+    pgPolicy("diagnosis_turns_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("diagnosis_turns_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("diagnosis_turns_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
     }),
   ],
 );

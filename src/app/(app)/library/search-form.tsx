@@ -42,7 +42,8 @@ const INDENT = "\u00a0\u00a0\u00a0\u00a0";
 // The Vehicle select's options: each vehicle some ready manual has, and
 // under UTVs and Other, the lines they have. Values are vehicles or brand
 // codes. A line that is its vehicle on its own (ATV, GEN) is that vehicle.
-function vehicleOptions(props: Props, selected: string) {
+// Diagnose's quick form uses it too.
+export function vehicleOptions(props: Pick<Props, "vehicles" | "brands">, selected: string) {
   const count = (manuals: number) => ` (${manuals.toLocaleString("en-US")})`;
   const options: { value: string; label: string }[] = [];
   for (const vehicle of VEHICLES) {
@@ -71,7 +72,7 @@ function selectedVehicle({ vehicle, brand }: Props) {
   return listsBrands(of) ? brand : of;
 }
 
-function Chevron() {
+export function Chevron() {
   return (
     <svg
       aria-hidden
