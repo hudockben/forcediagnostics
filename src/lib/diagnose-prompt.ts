@@ -1,6 +1,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
 import { DIAGNOSE_LIMITS, DIAGNOSE_MODEL } from "@/lib/diagnose-rules";
+import { CAUSE_SYSTEMS } from "@/lib/diagnose-zones";
 
 // What Diagnose sends Claude besides the conversation: the system prompt, the
 // tools, and the request settings. Everything here is the same for every
@@ -143,12 +144,17 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
             type: "object",
             properties: {
               title: { type: "string" },
+              system: {
+                type: "string",
+                enum: [...CAUSE_SYSTEMS],
+                description: "The part of the machine the cause is in, lit up on the tech's diagram; other if none fits.",
+              },
               likelihood: { type: "string", enum: ["high", "medium", "low"] },
               why: { type: "string", description: "One or two sentences on why it fits, or why it's ruled out." },
               status: { type: "string", enum: ["open", "ruled_out", "confirmed"] },
               sources: { type: "array", items: SOURCE_SCHEMA },
             },
-            required: ["title", "likelihood", "why", "status", "sources"],
+            required: ["title", "system", "likelihood", "why", "status", "sources"],
             additionalProperties: false,
           },
         },

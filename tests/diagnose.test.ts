@@ -63,7 +63,7 @@ import {
   type SeenSources,
   type StreamEvent,
 } from "../src/lib/diagnose-rules";
-import { findUnitManuals, readScopedPage, searchScopedPages, suggestUnits } from "../src/lib/diagnose-tools";
+import { findUnitManuals, readScopedPage, searchScopedPages, suggestUnits, unitVehicle } from "../src/lib/diagnose-tools";
 import { finishCatalogImport, saveCatalogBatch } from "../src/lib/manual-catalog";
 import { confirmManualUpload, finishManual, saveManualPages, startManualUpload, storageKeyFor } from "../src/lib/manuals";
 import { can, needsPasswordSession } from "../src/lib/permissions";
@@ -270,7 +270,7 @@ async function startTurn(user: CurrentUser, request: TurnRequest, steps: Step[])
   if (isProblem(prepared)) throw new Error(prepared.error);
   const fake = fakeClaude(steps);
   const events: StreamEvent[] = [];
-  const outcome = await runTurn(prepared, { client: fake.client, emit: (event) => events.push(event), showCost: true });
+  const outcome = await runTurn(prepared, { client: fake.client, emit: (event) => events.push(event) });
   return { ...outcome, requests: fake.requests, events, prepared };
 }
 
@@ -525,6 +525,21 @@ describe("Claude's tools", () => {
     assert.equal((await findUnitManuals(techB.shop.id, { model_number: "G22GAD99A1" })).listed, undefined);
   });
 
+  test("the unit's drawing comes from the model list's brand, then its manuals, then its name", async () => {
+    const shopId = techA.shop.id;
+    // RZR, RGR and GRL are all side-by-sides; a listed model with no manual
+    // still has its brand.
+    assert.equal(await unitVehicle(shopId, { modelNumber: "Z19VDE99AM", manualIds: null, label: null }), "utv");
+    assert.equal(await unitVehicle(shopId, { modelNumber: "g22gad99a1", manualIds: null, label: null }), "utv");
+    assert.equal(await unitVehicle(shopId, { modelNumber: null, manualIds: [rangerManual], label: "Ranger" }), "utv");
+    // Not in the list: the words in the name decide.
+    assert.equal(await unitVehicle(shopId, { modelNumber: "A21SXZ85A1", manualIds: null, label: "2021 SPORTSMAN 850" }), "atv");
+    assert.equal(await unitVehicle(shopId, { modelNumber: "X1", manualIds: null, label: "X1" }), null);
+    assert.equal(await unitVehicle(shopId, { modelNumber: null, manualIds: null, label: null }), null);
+    // Another shop's list doesn't count.
+    assert.equal(await unitVehicle(techB.shop.id, { modelNumber: "G22GAD99A1", manualIds: null, label: null }), null);
+  });
+
   test("model number suggestions come from the shop's list", async () => {
     const byNumber = await suggestUnits(techA.shop.id, "z19v");
     assert.deepEqual(byNumber.map((unit) => unit.label), ["2019 RZR XP 1000 EPS — Z19VDE99AM"]);
@@ -715,7 +730,8 @@ describe("a conversation", () => {
       "Searching the web: RZR XP 1000 misfire under load",
     ]);
     assert.ok(run.events.some((event) => event.type === "reply" && event.text === "P0300 on this unit"));
-    assert.ok(run.events.some((event) => event.type === "scope"));
+    assert.ok(run.events.some((event) => event.type === "scope" && event.vehicle === "utv"));
+    assert.equal(run.conversation.vehicle, "utv");
     assert.equal(run.events.at(-1)?.type, "end");
     // Usage and cost add up over the four requests.
     const [row] = await systemDb.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, run.turn.id));
@@ -726,7 +742,10 @@ describe("a conversation", () => {
     assert.equal(row.webSearches, 1);
     assert.ok(Math.abs(row.costCents - estimateCostCents(row.usage!)) < 1e-9);
     assert.equal(row.costCents, row.usage!.costCents);
-    assert.ok(run.turn.costCents! > 0);
+    assert.ok(row.costCents > 0);
+    // The estimate is kept for the month's figures, not shown per message.
+    assert.ok(!("costCents" in run.turn));
+    assert.ok(run.events.every((event) => !("turn" in event) || !("costCents" in event.turn)));
     // The stored history is the tech's message, the app's note, then each
     // of Claude's responses as it came back and the tool results.
     turn1Appended = row.history as MessageParam[];
@@ -1208,7 +1227,7 @@ describe("the loop: time limit, usage and errors", () => {
     const [row] = await systemDb.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, failed.turn.id));
     const second = estimateCostCents({ ...emptyUsage(), inputTokens: 1000, outputTokens: 200 });
     assert.ok(Math.abs(row.costCents - (first.costCents + second)) < 1e-9, `${row.costCents} vs ${first.costCents} + ${second}`);
-    assert.equal(retried.turn.costCents, row.costCents);
+    assert.ok(!("costCents" in retried.turn));
     assert.equal(row.webSearches, 2);
     assert.equal(row.usage?.requests, 3);
     assert.equal(row.usage?.inputTokens, 3000);
@@ -1234,6 +1253,9 @@ describe("the loop: time limit, usage and errors", () => {
     ]);
     assert.equal(run.conversation.unit, "2022 GENERAL XP 1000 DELUXE — G22GAD99A1");
     assert.equal(run.conversation.scope.label, null);
+    // No manual, but the model list says it's a General: the side-by-side
+    // drawing.
+    assert.equal(run.conversation.vehicle, "utv");
   });
 });
 
@@ -1290,10 +1312,9 @@ describe("limits and housekeeping", () => {
         throw new Anthropic.APIUserAbortError();
       },
       emit: () => {},
-      showCost: false,
     });
     assert.equal(outcome.turn.status, "stopped");
-    assert.equal(outcome.turn.costCents, null);
+    assert.ok(!("costCents" in outcome.turn));
   });
 
   test("messages are limited per tech per hour and per shop per day", async () => {

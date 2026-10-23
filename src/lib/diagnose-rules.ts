@@ -4,6 +4,8 @@
 // limits, and the cost estimate. Kept free of database imports so browser
 // code can use it.
 
+import { inferSystem, listedSystem, type CauseSystem, type UnitVehicle } from "@/lib/diagnose-zones";
+
 // The model behind Diagnose. Change it here only: the prompt, tools and
 // prices all follow from it.
 export const DIAGNOSE_MODEL = "claude-opus-5-5";
@@ -55,6 +57,9 @@ export type SourceView =
 
 export type Cause = {
   title: string;
+  // The part of the machine it's in, for the unit graphic. Replies saved
+  // before causes carried one don't have it: see causeSystem.
+  system?: CauseSystem;
   likelihood: Likelihood;
   why: string;
   status: CauseStatus;
@@ -240,6 +245,59 @@ export function startMessage(input: {
   return tidyText(lines.join("\n"), DIAGNOSE_LIMITS.techText);
 }
 
+// The quick form's first message read back as labelled rows (the reverse
+// of startMessage): its leading "Unit: …", "Complaint: …", "Fault codes: …"
+// and "Already checked: …" lines, and whatever follows. Null when the
+// message doesn't start that way.
+export const OPENING_LABELS = ["Unit", "Complaint", "Fault codes", "Already checked"] as const;
+export type OpeningRow = { label: (typeof OPENING_LABELS)[number]; value: string };
+
+export function openingRows(text: string): { rows: OpeningRow[]; more: string } | null {
+  const lines = String(text ?? "").split("\n");
+  const rows: OpeningRow[] = [];
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const match = /^(Unit|Complaint|Fault codes|Already checked): (.+)$/.exec(lines[i]);
+    if (!match) break;
+    rows.push({ label: match[1] as OpeningRow["label"], value: match[2].trim() });
+  }
+  return rows.length > 0 ? { rows, more: lines.slice(i).join("\n").trim() } : null;
+}
+
+// One of Claude's questions as a short quote for the tech's reply box.
+export const QUOTE_LENGTH = 140;
+export function quoteQuestion(question: string) {
+  const text = String(question ?? "").replace(/\s+/g, " ").trim();
+  const short = text.length > QUOTE_LENGTH ? `${text.slice(0, QUOTE_LENGTH - 1).trimEnd()}…` : text;
+  return `> ${short}\n`;
+}
+
+// The reply box after tapping one of Claude's questions. Typed text with no
+// quote yet is taken as the answer, so the quote goes above it; after
+// earlier quotes (and their answers) it starts a block of its own, a blank
+// line apart, so two quotes never run together.
+export function addQuote(draft: string, question: string) {
+  const quote = quoteQuestion(question);
+  const text = String(draft ?? "").replace(/\s+$/, "");
+  if (!text) return quote;
+  if (!/^> /m.test(text)) return `${quote}${text}`;
+  return `${text}\n\n${quote}`;
+}
+
+// On a tablet, what the Chat tab's badge and the Diagnosis tab's strip say
+// about the last message once it has ended out of sight.
+export function chatNews(status: TurnStatus) {
+  if (status === "done") return { badge: "New reply", tone: "glow", text: "Claude replied.", action: "Read the reply" } as const;
+  if (status === "stopped") return { badge: "Stopped", tone: "trail", text: "Your message was stopped.", action: "Open chat" } as const;
+  return { badge: "Not sent", tone: "trail", text: "Your last message didn't go through.", action: "Open chat" } as const;
+}
+
+// What Claude looked at for one message, counted.
+export function activityCounts(progress: ProgressStep[]) {
+  const count = (kind: ProgressKind) => progress.filter((step) => step.kind === kind).length;
+  return { searches: count("search"), pages: count("read"), web: count("web") };
+}
+
 // A unit from the shop's model list, suggested as the tech types.
 export type UnitSuggestion = {
   modelNumber: string;
@@ -362,10 +420,16 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
       const cause = (item ?? {}) as Record<string, unknown>;
       const checked = checkSources(cause.sources, seen);
       dropped += checked.dropped;
+      const title = tidyText(cause.title, 160);
+      const why = tidyText(cause.why, 1000);
       return {
-        title: tidyText(cause.title, 160),
+        title,
+        // The tools stream their input (eager_input_streaming), so the API
+        // doesn't hold Claude to the enum: a missing or unlisted system is
+        // worked out from the cause's words, like an older reply's.
+        system: listedSystem(cause.system) ?? inferSystem(title, why),
         likelihood: pick(cause.likelihood, LIKELIHOODS, "medium"),
-        why: tidyText(cause.why, 1000),
+        why,
         status: pick(cause.status, CAUSE_STATUSES, "open"),
         sources: checked.sources.length > 0 ? checked.sources : [{ type: "general" as const }],
       };
@@ -460,8 +524,6 @@ export type TurnView = {
   progress: ProgressStep[];
   reply: DiagnosisReply | null;
   error: string | null;
-  // Shown to managers and admins only.
-  costCents: number | null;
 };
 
 export type ScopeView = {
@@ -475,6 +537,8 @@ export type ConversationView = {
   title: string;
   status: ConversationStatus;
   unit: string | null;
+  // Which drawing the unit gets, if any.
+  vehicle: UnitVehicle | null;
   scope: ScopeView;
   feedback: FeedbackEntry[];
   outcome: { title: string; seq: number } | null;
@@ -487,7 +551,7 @@ export type StreamEvent =
   | { type: "start"; conversation: ConversationView; turn: TurnView }
   | { type: "progress"; step: ProgressStep }
   | { type: "reply"; text: string }
-  | { type: "scope"; scope: ScopeView }
+  | { type: "scope"; scope: ScopeView; vehicle: UnitVehicle | null }
   | { type: "end"; conversation: ConversationView; turn: TurnView };
 
 // The conversation is full; the tech starts a new one for the unit.

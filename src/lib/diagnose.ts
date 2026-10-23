@@ -38,8 +38,10 @@ import {
   findUnitManuals,
   readScopedPage,
   searchScopedPages,
+  unitVehicle,
   type ManualScope,
 } from "@/lib/diagnose-tools";
+import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { cleanLibraryFilters, hasLibraryFilters, listReadyManuals } from "@/lib/library";
 import { VEHICLE_NAMES, brandLabel } from "@/lib/manual-catalog-rules";
 import { cutText } from "@/lib/manual-rules";
@@ -101,12 +103,30 @@ const scopeOf = (conversation: Pick<ConversationRow, "scopeManualIds" | "unitLab
   label: conversation.unitLabel,
 });
 
-function toConversationView(conversation: ConversationRow, scope: ScopeView): ConversationView {
+// What the screen needs to show a conversation's unit: its manuals, and
+// which drawing it gets.
+async function unitOf(shopId: string, conversation: ConversationRow) {
+  const [scope, vehicle] = await Promise.all([
+    describeScope(shopId, scopeOf(conversation)),
+    unitVehicle(shopId, {
+      modelNumber: conversation.unitModelNumber,
+      manualIds: conversation.scopeManualIds,
+      label: conversation.unitLabel,
+    }),
+  ]);
+  return { scope, vehicle };
+}
+
+function toConversationView(
+  conversation: ConversationRow,
+  { scope, vehicle }: { scope: ScopeView; vehicle: UnitVehicle | null },
+): ConversationView {
   return {
     id: conversation.id,
     title: conversation.title,
     status: conversation.status,
     unit: conversation.unitLabel,
+    vehicle,
     scope,
     feedback: conversation.feedback,
     outcome: conversation.outcome ? { title: conversation.outcome.title, seq: conversation.outcome.seq } : null,
@@ -115,7 +135,9 @@ function toConversationView(conversation: ConversationRow, scope: ScopeView): Co
   };
 }
 
-function toTurnView(turn: TurnRow, userName: string, showCost: boolean): TurnView {
+// The estimated cost stays in the database (for the month's figures), not
+// on the screen.
+function toTurnView(turn: TurnRow, userName: string): TurnView {
   return {
     id: turn.id,
     seq: turn.seq,
@@ -126,7 +148,6 @@ function toTurnView(turn: TurnRow, userName: string, showCost: boolean): TurnVie
     progress: turn.progress,
     reply: turn.reply ?? null,
     error: turn.error,
-    costCents: showCost ? turn.costCents : null,
   };
 }
 
@@ -179,11 +200,7 @@ export type ConversationDetail = { conversation: ConversationView; turns: TurnVi
 
 // One conversation and its messages, after marking a turn that died as
 // failed. Null when it isn't the shop's.
-export async function getConversation(
-  user: CurrentUser,
-  id: string,
-  showCost = false,
-): Promise<ConversationDetail | null> {
+export async function getConversation(user: CurrentUser, id: string): Promise<ConversationDetail | null> {
   if (!isUuid(id)) return null;
   const found = await withShop(user.shop.id, async (tx) => {
     await failStaleTurns(tx, id);
@@ -198,16 +215,15 @@ export async function getConversation(
     return { conversation, turns, names };
   });
   if (!found) return null;
-  const scope = await describeScope(user.shop.id, scopeOf(found.conversation));
   return {
-    conversation: toConversationView(found.conversation, scope),
-    turns: found.turns.map((turn) => toTurnView(turn, found.names.get(turn.userId) ?? "", showCost)),
+    conversation: toConversationView(found.conversation, await unitOf(user.shop.id, found.conversation)),
+    turns: found.turns.map((turn) => toTurnView(turn, found.names.get(turn.userId) ?? "")),
   };
 }
 
 // One turn, for a page polling a turn another tab or a dropped connection
 // left running.
-export async function getTurn(user: CurrentUser, turnId: string, showCost = false) {
+export async function getTurn(user: CurrentUser, turnId: string) {
   if (!isUuid(turnId)) return null;
   return withShop(user.shop.id, async (tx) => {
     const [row] = await tx.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, turnId));
@@ -215,7 +231,7 @@ export async function getTurn(user: CurrentUser, turnId: string, showCost = fals
     await failStaleTurns(tx, row.conversationId);
     const [turn] = await tx.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, turnId));
     const names = await userNames(tx, [turn.userId]);
-    return toTurnView(turn, names.get(turn.userId) ?? "", showCost);
+    return toTurnView(turn, names.get(turn.userId) ?? "");
   });
 }
 
@@ -559,11 +575,10 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
     await giveBackAllowance(user);
     return saved;
   }
-  const scope = await describeScope(shopId, scopeOf(saved.conversation));
   return {
     ...saved,
-    conversationView: toConversationView(saved.conversation, scope),
-    turnView: toTurnView(saved.turn, user.name, false),
+    conversationView: toConversationView(saved.conversation, await unitOf(shopId, saved.conversation)),
+    turnView: toTurnView(saved.turn, user.name),
   };
 }
 
@@ -577,7 +592,7 @@ export const isProblem = (value: Prepared | Problem): value is Problem => "error
 // database (requestStop), which the heartbeat notices.
 export async function runTurn(
   prepared: Prepared,
-  options: { client: ClaudeStream; emit: (event: StreamEvent) => void; showCost: boolean },
+  options: { client: ClaudeStream; emit: (event: StreamEvent) => void },
 ) {
   const { user, conversation, turn } = prepared;
   const shopId = user.shop.id;
@@ -643,8 +658,11 @@ export async function runTurn(
           })
           .where(eq(diagnosisConversations.id, conversation.id)),
       );
-      const view = await describeScope(shopId, scope);
-      emit({ type: "scope", scope: view });
+      const [view, vehicle] = await Promise.all([
+        describeScope(shopId, scope),
+        unitVehicle(shopId, { modelNumber: lookup.scope.unit?.number ?? null, manualIds: scope.manualIds, label: scope.label }),
+      ]);
+      emit({ type: "scope", scope: view, vehicle });
       const count = view.manuals.length;
       return {
         result: lookup.result,
@@ -699,7 +717,7 @@ export async function runTurn(
     clearInterval(progressTimer);
   }
   await saving;
-  return saveOutcome(prepared, result, { progress, scopeChanged, scope, emit, showCost: options.showCost });
+  return saveOutcome(prepared, result, { progress, scopeChanged, scope, emit });
 }
 
 async function saveOutcome(
@@ -710,7 +728,6 @@ async function saveOutcome(
     scopeChanged: boolean;
     scope: ManualScope;
     emit: (event: StreamEvent) => void;
-    showCost: boolean;
   },
 ) {
   const { user, conversation, turn } = prepared;
@@ -781,9 +798,8 @@ async function saveOutcome(
       .returning();
     return { turn: savedTurn, conversation: updated };
   });
-  const scope = await describeScope(user.shop.id, scopeOf(saved.conversation));
-  const turnView = toTurnView(saved.turn, user.name, extra.showCost);
-  const conversationView = toConversationView(saved.conversation, scope);
+  const turnView = toTurnView(saved.turn, user.name);
+  const conversationView = toConversationView(saved.conversation, await unitOf(user.shop.id, saved.conversation));
   extra.emit({ type: "end", conversation: conversationView, turn: turnView });
   return { turn: turnView, conversation: conversationView };
 }
@@ -868,7 +884,7 @@ export async function markCause(
 export async function changeUnit(
   user: CurrentUser,
   input: { conversationId: string; modelNumber?: string; wholeLibrary?: boolean },
-): Promise<{ scope: ScopeView; unit: string | null } | { error: string }> {
+): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null } | { error: string }> {
   if (!isUuid(input.conversationId)) return { error: "That diagnosis isn't in this shop." };
   const shopId = user.shop.id;
   let next: { manualIds: string[] | null; label: string | null; number: string | null; year: number | null };
@@ -911,7 +927,8 @@ export async function changeUnit(
     return row;
   });
   if (!updated) return { error: "That diagnosis isn't in this shop." };
-  return { scope: await describeScope(shopId, scopeOf(updated)), unit: updated.unitLabel };
+  const { scope, vehicle } = await unitOf(shopId, updated);
+  return { scope, unit: updated.unitLabel, vehicle };
 }
 
 // What a new diagnosis starts with when it carries on from a full one: the

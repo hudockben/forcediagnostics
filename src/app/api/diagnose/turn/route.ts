@@ -85,7 +85,7 @@ export async function POST(request: Request) {
   };
   send({ type: "start", conversation: prepared.conversationView, turn: prepared.turnView });
 
-  const work = runTurn(prepared, { client: streamFromClaude, emit: send, showCost: allows(user, "reports.kpis") })
+  const work = runTurn(prepared, { client: streamFromClaude, emit: send })
     .catch((error) => console.error("Diagnose turn couldn't be saved", error))
     .finally(() => {
       try {

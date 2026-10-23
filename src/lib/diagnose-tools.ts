@@ -5,9 +5,11 @@ import { and, asc, eq, sql, type SQL } from "drizzle-orm";
 import { withShop } from "@/db";
 import { manualPages, manuals } from "@/db/schema";
 import { DIAGNOSE_LIMITS, isUuid, unitLabel, type ScopeView, type UnitSuggestion } from "@/lib/diagnose-rules";
+import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { cleanSearchQuery, likeEscape, modelFilterWords, modelWordMatches, searchManuals, uuidArray } from "@/lib/library";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import { CATALOG_LIMITS, cleanCatalogText, isModelYear } from "@/lib/manual-catalog-rules";
+import { chooseVehicle, vehicleForUnit } from "@/lib/unit-vehicle";
 import { cutText } from "@/lib/manual-rules";
 
 // What Claude's tools can reach in the shop's library, for Diagnose. Every
@@ -52,6 +54,38 @@ export async function describeScope(shopId: string, scope: ManualScope): Promise
   if (scope.manualIds === null) return { label: null, manuals: [] };
   const titles = await manualTitles(shopId, scope.manualIds);
   return { label: scope.label, manuals: titles.map(({ id, title }) => ({ id, title })) };
+}
+
+// Which drawing a conversation's unit gets: the model list's brand codes
+// for its model number (RZR, RGR, ATV, GEN, ...); when those don't decide
+// it, the codes of the manuals it's using; failing that, the words in its
+// name.
+export async function unitVehicle(
+  shopId: string,
+  unit: { modelNumber: string | null; manualIds: string[] | null; label: string | null },
+): Promise<UnitVehicle | null> {
+  if (!unit.modelNumber && !unit.manualIds?.length && !unit.label) return null;
+  const { byNumber, byManual } = await withShop(shopId, async (tx) => {
+    const byNumber = unit.modelNumber
+      ? await tx.execute<{ brand: string }>(sql`
+          select distinct d.brand from manual_catalog_models cm
+          join manual_catalog_documents d on d.shop_id = cm.shop_id and d.file_key = cm.file_key
+          where cm.model_number = ${unit.modelNumber.toUpperCase()} and d.brand is not null
+        `)
+      : null;
+    const numberBrands = byNumber?.rows.map((row) => row.brand) ?? [];
+    // The model number's brands decide it: no need to look at the manuals.
+    if (chooseVehicle({ brands: numberBrands, label: null })) return { byNumber: numberBrands, byManual: [] };
+    const byManual = unit.manualIds?.length
+      ? await tx.execute<{ brand: string }>(sql`
+          select distinct d.brand from manual_file_names n
+          join manual_catalog_documents d on d.shop_id = n.shop_id and d.file_key = n.file_key
+          where n.manual_id = any(${uuidArray(unit.manualIds)}) and d.brand is not null
+        `)
+      : null;
+    return { byNumber: numberBrands, byManual: byManual?.rows.map((row) => row.brand) ?? [] };
+  });
+  return vehicleForUnit({ numberBrands: byNumber, manualBrands: byManual, label: unit.label });
 }
 
 type ModelMatches = {
