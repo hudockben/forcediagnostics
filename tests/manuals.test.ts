@@ -373,13 +373,13 @@ describe("saving page text", () => {
       added: true,
       pageCount: 3,
       pagesWithoutText: 1,
-      nameTaken: false,
+      nameTaken: null,
     });
     assert.deepEqual(await finishManual(adminA, { manualId }), {
       added: false,
       pageCount: 3,
       pagesWithoutText: 1,
-      nameTaken: false,
+      nameTaken: null,
     });
 
     const [row] = await systemDb.select().from(manuals).where(eq(manuals.id, manualId));

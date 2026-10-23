@@ -75,6 +75,9 @@ const plural = (count: number, one: string, many: string) =>
 // The same file chosen again has the same name, size and date.
 const fileKey = (file: File) => `${file.name}\u0000${file.size}\u0000${file.lastModified}`;
 
+// Model lists go in oldest first by their date (see importLists).
+const olderFirst = (a: File, b: File) => a.lastModified - b.lastModified || a.name.localeCompare(b.name);
+
 // Files being worked on, by SHA-256. Shared by every uploader in the tab:
 // Next keeps a page running in the background after someone moves to
 // another one, and can later show a fresh copy of it, so a file chosen in
@@ -161,8 +164,12 @@ export function ManualUploader() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [lists, setLists] = useState<ListJob[]>([]);
   const listFiles = useRef(new Map<number, File>());
-  // Model lists still to import (or importing); PDFs wait for them.
-  const listsPending = useRef(0);
+  // Model lists waiting to import, by ID, in order (see listOrder).
+  const listQueue = useRef<number[]>([]);
+  // A model list is importing or waiting to; PDFs wait for them.
+  const importingLists = useRef(false);
+  // Lists whose last import went through.
+  const importedLists = useRef(new Set<number>());
   const [leftOut, setLeftOut] = useState(0);
   const [dragging, setDragging] = useState(false);
   const files = useRef(new Map<number, File>());
@@ -211,6 +218,7 @@ export function ManualUploader() {
     const file = listFiles.current.get(id);
     if (!file) return;
     failedIds.current.delete(id);
+    importedLists.current.delete(id);
     updateList(id, { state: "importing", progress: 0, message: "Reading the model list…", leftOut: [] });
     try {
       let bytes: ArrayBuffer;
@@ -250,6 +258,7 @@ export function ManualUploader() {
           rowsWithoutFile: list.rowsWithoutFile,
         }),
       );
+      importedLists.current.add(id);
       updateList(id, {
         state: "imported",
         progress: 1,
@@ -274,19 +283,33 @@ export function ManualUploader() {
     }
   }
 
-  // One list at a time, oldest first, so the newest list has the last word
-  // on any file both have. PDFs start once they're all done.
+  // The order lists import in: by date, then in the order they were chosen.
+  function listOrder(a: number, b: number) {
+    return olderFirst(listFiles.current.get(a)!, listFiles.current.get(b)!) || a - b;
+  }
+
+  // One list at a time, oldest first by date, whichever drop or Retry queued
+  // it, so the newest list has the last word on any file two lists have. A
+  // list that goes in after a newer one did (in a later drop, with Retry, or
+  // chosen again after it failed) puts its entries over the newer one's, so
+  // the newer lists that went in are imported again after it. PDFs start
+  // once they're all done.
   function importLists(ids: number[]) {
-    if (ids.length === 0) return;
-    listsPending.current += 1;
+    queueLists(ids);
+    if (importingLists.current || listQueue.current.length === 0) return;
+    importingLists.current = true;
     window.addEventListener("beforeunload", warnBeforeClosing.current);
     void (async () => {
       try {
-        for (const id of ids) await importList(id);
+        for (let id = listQueue.current.shift(); id !== undefined; id = listQueue.current.shift()) {
+          await importList(id);
+          // Even after a failure: a batch that was saved still counts.
+          queueLists([...importedLists.current].filter((other) => listOrder(other, id) > 0));
+        }
       } finally {
-        listsPending.current -= 1;
+        importingLists.current = false;
         if (navigator.onLine) refreshList(router);
-        if (listsPending.current === 0 && running.current === 0 && queue.current.length === 0) {
+        if (running.current === 0 && queue.current.length === 0) {
           window.removeEventListener("beforeunload", warnBeforeClosing.current);
         }
         pump();
@@ -294,8 +317,20 @@ export function ManualUploader() {
     })();
   }
 
+  // Adds lists to the queue, each once, in order, and shows them waiting.
+  function queueLists(ids: number[]) {
+    const added = [...new Set(ids)].filter((id) => !listQueue.current.includes(id));
+    if (added.length === 0) return;
+    for (const id of added) failedIds.current.delete(id);
+    listQueue.current = [...listQueue.current, ...added].sort(listOrder);
+    setLists((all) =>
+      all.map((job) =>
+        added.includes(job.id) ? { ...job, state: "waiting" as const, progress: 0, message: "", leftOut: [] } : job,
+      ),
+    );
+  }
+
   function retryList(id: number) {
-    updateList(id, { state: "waiting", progress: 0, message: "", leftOut: [] });
     importLists([id]);
   }
 
@@ -419,8 +454,10 @@ export function ManualUploader() {
             (finished.pagesWithoutText > 0
               ? `Added · ${pages}, ${finished.pagesWithoutText} not searchable (scanned). Read them with Scanned pages below.`
               : `Added · ${pages}`) +
+            // The name the model list knows it by, with or without the
+            // browser's copy number ("X.pdf" for "X (1).pdf").
             (finished.nameTaken
-              ? `${finished.pagesWithoutText > 0 ? "" : "."} A different manual is already called ${file.name}, so the model list goes with that one.`
+              ? `${finished.pagesWithoutText > 0 ? "" : "."} A different manual is already called ${finished.nameTaken}, so the model list goes with that one.`
               : ""),
         });
       } finally {
@@ -450,7 +487,7 @@ export function ManualUploader() {
 
   function pump() {
     // A model list goes first; this runs again once it's in.
-    if (listsPending.current > 0) return;
+    if (importingLists.current) return;
     // Offline: hold the queue until the connection is back. Refreshing the
     // list now would fail and reload the whole page.
     if (!navigator.onLine) {
@@ -473,7 +510,7 @@ export function ManualUploader() {
         // A file waiting for the connection hasn't finished.
         if (!putBack) finishedSinceRefresh.current += 1;
         const allDone = running.current === 0 && queue.current.length === 0;
-        if (allDone && listsPending.current === 0) {
+        if (allDone && !importingLists.current) {
           window.removeEventListener("beforeunload", warnBeforeClosing.current);
         }
         if (navigator.onLine && (allDone || finishedSinceRefresh.current >= REFRESH_EVERY)) {
@@ -490,10 +527,8 @@ export function ManualUploader() {
     const pdfs = chosen
       .filter(isPdf)
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    // Model lists oldest first (see importLists).
-    const csvs = chosen
-      .filter(isCsv)
-      .sort((a, b) => a.lastModified - b.lastModified || a.name.localeCompare(b.name));
+    // Model lists oldest first, the order they import in.
+    const csvs = chosen.filter(isCsv).sort(olderFirst);
     setLeftOut(chosen.length - pdfs.length - csvs.length);
 
     // A list that's already listed is only imported again if it failed.
@@ -503,7 +538,6 @@ export function ManualUploader() {
       const listed = jobsByFile.current.get(fileKey(file));
       if (listed !== undefined) {
         if (failedIds.current.has(listed)) {
-          failedIds.current.delete(listed);
           listFiles.current.set(listed, file);
           listIds.push(listed);
         }
@@ -515,12 +549,7 @@ export function ManualUploader() {
       listIds.push(id);
       newLists.push({ id, name: file.name, size: file.size, state: "waiting", progress: 0, message: "", leftOut: [] });
     }
-    setLists((all) => [
-      ...all.map((job) =>
-        listIds.includes(job.id) ? { ...job, state: "waiting" as const, progress: 0, message: "", leftOut: [] } : job,
-      ),
-      ...newLists,
-    ]);
+    setLists((all) => [...all, ...newLists]);
     importLists(listIds);
 
     const newJobs: Job[] = [];
