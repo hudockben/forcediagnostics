@@ -524,6 +524,10 @@ export type TurnView = {
   progress: ProgressStep[];
   reply: DiagnosisReply | null;
   error: string | null;
+  // Always null; the screen no longer shows a cost per message. Pages loaded
+  // before that release show "≈ <cost>" whenever this isn't null, which
+  // reads "≈ $NaN" when it's missing, so it stays for one more release.
+  costCents?: null;
 };
 
 export type ScopeView = {

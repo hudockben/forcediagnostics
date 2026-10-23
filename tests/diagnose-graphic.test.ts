@@ -246,11 +246,27 @@ describe("which drawing a unit gets", () => {
   test("the model number's brands first, then the manuals' brands, then the name", () => {
     assert.equal(vehicleForUnit({ numberBrands: ["RZR"], manualBrands: ["ATV"], label: "Sportsman" }), "utv");
     // The model number's brands don't decide it: the manuals' do.
-    assert.equal(vehicleForUnit({ numberBrands: ["RZR", "ATV"], manualBrands: ["ATV"], label: "Ranger" }), "atv");
+    assert.equal(vehicleForUnit({ numberBrands: ["RZR", "ATV"], manualBrands: ["RZR"], label: "Sportsman" }), "utv");
     assert.equal(vehicleForUnit({ numberBrands: ["SNO"], manualBrands: ["GEN"], label: null }), "generator");
     // Neither does: the name.
     assert.equal(vehicleForUnit({ numberBrands: ["SNO"], manualBrands: [], label: "2021 Ranger 1000" }), "utv");
     assert.equal(vehicleForUnit({ numberBrands: [], manualBrands: [], label: "Honda Pioneer" }), null);
+  });
+
+  test("a side-by-side the model list has only under ATV (the 2009-2010 RZR 170) goes by its name", () => {
+    // As Polaris lists them: A09VA17AA and R10VA17AA under ATV alone.
+    assert.equal(vehicleForUnit({ numberBrands: ["ATV"], manualBrands: [], label: "2009 RZR 170, RED — A09VA17AA" }), "utv");
+    assert.equal(vehicleForUnit({ numberBrands: ["ATV"], manualBrands: [], label: "2010 RANGER RZR 170 Indy Red — R10VA17AA" }), "utv");
+    // Found by name: its manuals are listed under ATV.
+    assert.equal(vehicleForUnit({ numberBrands: [], manualBrands: ["ATV"], label: "2009 RZR 170 (3 models)" }), "utv");
+    // Listed without a name (A10VA17AA): its manuals' titles in the list.
+    const titles = ["2010 RANGER RZR 170 Service Manual - 11x17 Wire Diagram"];
+    assert.equal(vehicleForUnit({ numberBrands: ["ATV"], numberTitles: titles, manualBrands: [], label: "A10VA17AA" }), "utv");
+    // ATVs stay ATVs: the 2000-2002 Xpedition was one, and Polaris lists the
+    // ACE as one.
+    assert.equal(vehicleForUnit({ numberBrands: ["ATV"], manualBrands: [], label: "2001 XPEDITION 425 DESERT DUNE — A01CK42AA" }), "atv");
+    assert.equal(vehicleForUnit({ numberBrands: ["ATV"], manualBrands: [], label: "2015 SPORTSMAN ACE SAGE GREEN — A15DAA32AA" }), "atv");
+    assert.equal(vehicleForUnit({ numberBrands: ["ATV"], numberTitles: ["2021 Sportsman 570 Service Manual"], manualBrands: [], label: "A21SEE57F1" }), "atv");
   });
 
   test("otherwise the words in the unit's name", () => {

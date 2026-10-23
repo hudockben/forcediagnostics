@@ -9,7 +9,7 @@ import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
 import { libraryFilterOptions } from "@/lib/library";
 import { requireCapability } from "@/lib/session";
 
-import { DiagnoseChat } from "../chat";
+import { NewDiagnosisChat } from "../chat";
 
 export const metadata: Metadata = { title: "New diagnosis" };
 
@@ -42,10 +42,5 @@ async function NewDiagnosis({ searchParams }: { searchParams: PageProps<"/diagno
 
   // The heading is the chat's own: once the first message is sent, the same
   // page becomes the conversation.
-  return (
-    <DiagnoseChat
-      initial={null}
-      starter={{ vehicles: options.vehicles, brands: options.brands, years: options.years, carry }}
-    />
-  );
+  return <NewDiagnosisChat starter={{ vehicles: options.vehicles, brands: options.brands, years: options.years, carry }} />;
 }

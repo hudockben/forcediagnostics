@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
 import { Badge, Notice, PageHeading } from "@/components/app/ui";
@@ -550,6 +551,19 @@ function Starter({
 
 // --- The conversation -----------------------------------------------------
 
+// New diagnosis. Next keeps the page in <Activity> when someone moves on and
+// shows the same instance again when they come back; once a diagnosis has
+// started here, that instance is the conversation (under its own address).
+// bfcacheId changes when they follow a link to New diagnosis, so the next
+// unit gets the quick form rather than joining the last unit's conversation;
+// it stays the same for Back and Forward, which find that conversation as it
+// was. "Start a new diagnosis for this unit" from a conversation started here
+// only changes ?from=, which keeps bfcacheId, so the carried one is in the key.
+export function NewDiagnosisChat({ starter }: { starter: StarterOptions }) {
+  const { bfcacheId } = useRouter();
+  return <DiagnoseChat key={`${bfcacheId}:${starter.carry?.id ?? ""}`} initial={null} starter={starter} />;
+}
+
 export function DiagnoseChat({
   initial,
   starter,
@@ -564,6 +578,20 @@ export function DiagnoseChat({
   const [notice, setNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [stopping, setStopping] = useState(false);
+  // A conversation's page stays in <Activity> too: coming back to it by a
+  // link shows the same instance, with the server's fresh copy as `initial`.
+  // Take that copy, which has whatever another tablet or tab sent since; the
+  // draft and the tab stay. Back and Forward bring back the copy already
+  // taken, which changes nothing. One with fewer messages than the screen
+  // isn't newer, and while this tab streams a message the stream is.
+  const [taken, setTaken] = useState(initial);
+  if (initial !== taken) {
+    setTaken(initial);
+    if (initial && !streaming && initial.turns.length >= turns.length) {
+      setConversation(initial.conversation);
+      setTurns(initial.turns);
+    }
+  }
   const bottom = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
 

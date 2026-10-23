@@ -125,7 +125,7 @@ async function addManual(actor: CurrentUser, fileName: string, pages: string[]) 
 
 async function importModels(
   actor: CurrentUser,
-  files: { fileName: string; brand: string; title?: string; models: [number, string, string][] }[],
+  files: { fileName: string; brand: string; title?: string; models: [number | null, string, string | null][] }[],
 ) {
   const importId = randomUUID();
   const saved = await saveCatalogBatch(actor, {
@@ -575,6 +575,37 @@ describe("Claude's tools", () => {
     assert.equal(await unitVehicle(techB.shop.id, { modelNumber: "G22GAD99A1", manualIds: null, label: null }), null);
   });
 
+  test("the 2009-2010 RZR 170, which the model list has only under ATV, gets the side-by-side drawing", async () => {
+    const shop = await createShop(`dv${suffix}`);
+    const admin = await createUser(shop, "admin", "Vi");
+    await addManual(admin, "9922134.pdf", ["RZR 170 clutch."]);
+    await addManual(admin, "9922351.pdf", ["RZR 170 wiring."]);
+    await addManual(admin, "9921480.pdf", ["Sportsman 500 clutch."]);
+    // As Polaris lists them; A10VA17AA has no year or name.
+    await importModels(admin, [
+      { fileName: "9922134.pdf", brand: "ATV", title: "2009 RZR 170 Service Manual", models: [[2009, "A09VA17AA", "RZR 170, RED"], [2009, "R09VA17AA", "RZR 170"]] },
+      {
+        fileName: "9922351.pdf",
+        brand: "ATV",
+        title: "2010 RANGER RZR 170 Service Manual - 11x17 Wire Diagram",
+        models: [[2010, "R10VA17AA", "RANGER RZR 170 Indy Red"], [null, "A10VA17AA", null]],
+      },
+      { fileName: "9921480.pdf", brand: "ATV", title: "2009 Sportsman 500 H.O. Service Manual", models: [[2009, "A09MH50AA", "SPORTSMAN 500 H.O."]] },
+    ]);
+    // Through find_unit_manuals, as a diagnosis gets its unit.
+    const drawing = async (input: Record<string, unknown>) => {
+      const lookup = await findUnitManuals(shop.id, input);
+      assert.ok(lookup.scope, JSON.stringify(input));
+      const { scope } = lookup;
+      return unitVehicle(shop.id, { modelNumber: scope.unit?.number ?? null, manualIds: scope.manualIds, label: scope.label });
+    };
+    assert.equal(await drawing({ model_number: "A09VA17AA" }), "utv");
+    assert.equal(await drawing({ model_number: "R10VA17AA" }), "utv");
+    assert.equal(await drawing({ model_number: "A10VA17AA" }), "utv");
+    assert.equal(await drawing({ description: "RZR 170", year: 2009 }), "utv");
+    assert.equal(await drawing({ model_number: "A09MH50AA" }), "atv");
+  });
+
   test("model number suggestions come from the shop's list", async () => {
     const byNumber = await suggestUnits(techA.shop.id, "z19v");
     assert.deepEqual(byNumber.map((unit) => unit.label), ["2019 RZR XP 1000 EPS — Z19VDE99AM"]);
@@ -778,9 +809,12 @@ describe("a conversation", () => {
     assert.ok(Math.abs(row.costCents - estimateCostCents(row.usage!)) < 1e-9);
     assert.equal(row.costCents, row.usage!.costCents);
     assert.ok(row.costCents > 0);
-    // The estimate is kept for the month's figures, not shown per message.
-    assert.ok(!("costCents" in run.turn));
-    assert.ok(run.events.every((event) => !("turn" in event) || !("costCents" in event.turn)));
+    // The estimate is kept for the month's figures, not shown per message:
+    // the field is null (pages from before showed "≈ $NaN" without it).
+    assert.equal(run.turn.costCents, null);
+    assert.ok(run.events.every((event) => !("turn" in event) || event.turn.costCents === null));
+    const reloaded = await getConversation(techA, run.conversation.id);
+    assert.ok(reloaded?.turns.every((turn) => turn.costCents === null));
     // The stored history is the tech's message, the app's note, then each
     // of Claude's responses as it came back and the tool results.
     turn1Appended = row.history as MessageParam[];
@@ -1262,7 +1296,7 @@ describe("the loop: time limit, usage and errors", () => {
     const [row] = await systemDb.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, failed.turn.id));
     const second = estimateCostCents({ ...emptyUsage(), inputTokens: 1000, outputTokens: 200 });
     assert.ok(Math.abs(row.costCents - (first.costCents + second)) < 1e-9, `${row.costCents} vs ${first.costCents} + ${second}`);
-    assert.ok(!("costCents" in retried.turn));
+    assert.equal(retried.turn.costCents, null);
     assert.equal(row.webSearches, 2);
     assert.equal(row.usage?.requests, 3);
     assert.equal(row.usage?.inputTokens, 3000);
@@ -1349,7 +1383,7 @@ describe("limits and housekeeping", () => {
       emit: () => {},
     });
     assert.equal(outcome.turn.status, "stopped");
-    assert.ok(!("costCents" in outcome.turn));
+    assert.equal(outcome.turn.costCents, null);
   });
 
   test("messages are limited per tech per hour and per shop per day", async () => {

@@ -136,9 +136,10 @@ function toConversationView(
 }
 
 // The estimated cost stays in the database (for the month's figures), not
-// on the screen.
+// on the screen: costCents is always null (see TurnView).
 function toTurnView(turn: TurnRow, userName: string): TurnView {
   return {
+    costCents: null,
     id: turn.id,
     seq: turn.seq,
     status: turn.status,
