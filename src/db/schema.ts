@@ -564,6 +564,13 @@ export const manualCatalogDocuments = pgTable(
     article: text("article"),
     // Polaris's subject line, which the library shows instead of the file name.
     title: text("title"),
+    // The title as upper-case words between spaces, like
+    // manual_catalog_models.model_words, for the Model filter: older models'
+    // descriptions often shorten the name the title spells out ("SPM XP 850"
+    // for the "2009 SPORTSMAN XP 850 Service Manual").
+    titleWords: text("title_words").generatedAlwaysAs(
+      sql`' ' || upper(regexp_replace(coalesce("title", ''), '[^A-Za-z0-9]+', ' ', 'g')) || ' '`,
+    ),
     postedOn: date("posted_on"),
     // Free text as listed: "2020, 2022" or "2018-2027".
     modelYears: text("model_years"),

@@ -140,6 +140,25 @@ function brandMatches(filters: LibraryFilters, brand: SQL): SQL {
   return sql.join(conditions, sql` and `);
 }
 
+// LIKE patterns can't be steered by what's typed.
+export const likeEscape = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
+
+// LIKE '% RZR%' on model_words or title_words: a word that starts so.
+const wordStart = (word: string) => `% ${likeEscape(word)}%`;
+
+// A Model filter word (see modelFilterWords) at the start of a word of a
+// model's number or description (cm), or of its entry's title: Polaris's
+// descriptions of older models often shorten the name the title spells out,
+// "SPM XP 850" in the "2009 SPORTSMAN XP 850 Service Manual". The entries
+// whose title has it are an array worked out once, not a join (see
+// manualsMatching).
+export function modelWordMatches(word: string): SQL {
+  return sql`(cm.model_words like ${wordStart(word)} or cm.file_key = any(array(
+    select td.file_key from manual_catalog_documents td
+    where td.shop_id = ${thisShop} and td.title_words like ${wordStart(word)}
+  )))`;
+}
+
 // The file keys of the shop's entries with a model that meets every
 // condition (on cm), as an array worked out once rather than per entry (see
 // below).
@@ -167,7 +186,8 @@ function namesOfManualsWithBrand(filters: LibraryFilters): SQL {
 // for `id = any(...)`, or null with no filters. A manual is in the model list
 // once for each of its names the list has, and matches when one of those
 // entries matches every filter. Year and Model have to match the same model
-// ("a 2020 RZR XP 1000"), not two different ones. An entry with no brand
+// ("a 2020 RZR XP 1000"), not two different ones, though Model's words can be
+// in the entry's title too (see modelWordMatches). An entry with no brand
 // counts as having the brands of the manual's other entries: Polaris lists
 // the RZR 800 manual's 2013 models under a name with no brand, and its 2014
 // ones under a RZR name. Manuals that aren't in the model list never match
@@ -177,7 +197,9 @@ function namesOfManualsWithBrand(filters: LibraryFilters): SQL {
 // once, before the rest. As subqueries they can become joins that Postgres
 // runs again for every page, manual or entry it checks, which takes seconds
 // to minutes whenever it underestimates the shop's list (before it has
-// statistics on a freshly imported one, say).
+// statistics on a freshly imported one, say). A join inside an array can go
+// the same way, which is why modelWordMatches looks titles up in an array of
+// their own rather than joining each model to its entry.
 function manualsMatching(filters: LibraryFilters): SQL | null {
   const conditions: SQL[] = [];
   const words = filters.model === undefined ? [] : modelFilterWords(filters.model);
@@ -195,22 +217,27 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
   if (byModel) {
     const model = [
       ...(filters.year === undefined ? [] : [sql`cm.model_year = ${filters.year}`]),
-      ...words.map((word) => sql`cm.model_words like ${`% ${word}%`}`),
+      ...words.map((word) => modelWordMatches(word)),
     ];
     const covered = sql`d.file_key = any(${entriesWithModels(model)})`;
-    // Year alone: an entry with no dated models (a manual listed without
-    // any) goes by its Model Years text instead.
-    conditions.push(
-      filters.year === undefined || words.length > 0
-        ? covered
-        : sql`(${covered} or (
-            d.file_key <> all(${entriesWithModels([sql`cm.model_year is not null`])})
-            and exists (
-              select 1 from regexp_matches(coalesce(d.model_years, ''), ${MODEL_YEARS_PATTERN}, 'g') r(m)
-              where ${filters.year} between symmetric r.m[1]::int and coalesce(r.m[2], r.m[1])::int
-            )
-          ))`,
-    );
+    if (filters.year === undefined) {
+      // Model alone: an entry whose title has every word matches whatever
+      // its models, so one listed without any models matches too.
+      const titled = words.map((word) => sql`d.title_words like ${wordStart(word)}`);
+      conditions.push(sql`(${covered} or (${sql.join(titled, sql` and `)}))`);
+    } else if (words.length > 0) {
+      conditions.push(covered);
+    } else {
+      // Year alone: an entry with no dated models (a manual listed without
+      // any) goes by its Model Years text instead.
+      conditions.push(sql`(${covered} or (
+        d.file_key <> all(${entriesWithModels([sql`cm.model_year is not null`])})
+        and exists (
+          select 1 from regexp_matches(coalesce(d.model_years, ''), ${MODEL_YEARS_PATTERN}, 'g') r(m)
+          where ${filters.year} between symmetric r.m[1]::int and coalesce(r.m[2], r.m[1])::int
+        )
+      ))`);
+    }
   }
   if (conditions.length === 0) return null;
   // The matching entries first, then the ready manuals known by their names.
@@ -229,24 +256,29 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
 // row-level security the GIN index can't be used and every search would read
 // every page (see drizzle/0010_manual_search.sql). Run it inside withShop.
 //
-// The index finds every matching page first, in a CTE the filters can't
-// reach into, and the filters then pick from those. Otherwise Postgres,
-// guessing a filter leaves a manual or two, reads each of those manuals'
-// pages instead, which is slow when the filter matches hundreds.
-//
+// The index finds every matching page first, in a CTE whose WHERE is only
+// the match, and the filters then pick from those. With a filter in that
+// WHERE, Postgres, guessing it leaves a manual or two, reads each of those
+// manuals' pages instead, which is slow when the filter matches hundreds.
 // manualIds, when given, keeps to those manuals as well (Diagnose's manual
 // scope for a unit), the same way.
+//
+// Only the pages they keep are ranked, though: ranking reads a page's whole
+// tsvector, which is most of the time a word on most pages takes. So the
+// filters are a CASE in the CTE's select list, where they can't steer how
+// the pages are found, and a page they leave out gets no rank.
 export function searchQuery(q: string, limit: number, filters: LibraryFilters = {}, manualIds?: string[]) {
   const matching = manualsMatching(filters);
   const conditions = [
-    ...(matching ? [sql`manual_id = any(${matching})`] : []),
-    ...(manualIds ? [sql`manual_id = any(${uuidArray(manualIds)})`] : []),
+    ...(matching ? [sql`v.manual_id = any(${matching})`] : []),
+    ...(manualIds ? [sql`v.manual_id = any(${uuidArray(manualIds)})`] : []),
   ];
+  const rank = sql`ts_rank_cd(v.search_vector, query.tsq, 1)`;
   return sql`
     with query as (select websearch_to_tsquery('english', ${q}) as tsq),
     matches as materialized (
       select v.manual_id, v.page_number,
-        ts_rank_cd(v.search_vector, query.tsq, 1) as rank
+        ${conditions.length > 0 ? sql`case when ${sql.join(conditions, sql` and `)} then ${rank} end` : rank} as rank
       from ready_manual_pages v
       cross join query
       where v.search_vector @@ query.tsq
@@ -254,7 +286,7 @@ export function searchQuery(q: string, limit: number, filters: LibraryFilters = 
     top as materialized (
       select manual_id, page_number, rank
       from matches
-      ${conditions.length > 0 ? sql`where ${sql.join(conditions, sql` and `)}` : sql``}
+      where rank is not null
       order by rank desc, manual_id, page_number
       limit ${limit}
     )

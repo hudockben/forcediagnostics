@@ -123,7 +123,10 @@ async function addManual(actor: CurrentUser, fileName: string, pages: string[]) 
   return start.manualId;
 }
 
-async function importModels(actor: CurrentUser, files: { fileName: string; brand: string; models: [number, string, string][] }[]) {
+async function importModels(
+  actor: CurrentUser,
+  files: { fileName: string; brand: string; title?: string; models: [number, string, string][] }[],
+) {
   const importId = randomUUID();
   const saved = await saveCatalogBatch(actor, {
     importId,
@@ -131,7 +134,7 @@ async function importModels(actor: CurrentUser, files: { fileName: string; brand
       fileName: file.fileName,
       brand: file.brand,
       article: null,
-      title: null,
+      title: file.title ?? null,
       postedOn: null,
       modelYears: null,
       models: file.models,
@@ -149,6 +152,7 @@ let adminB: CurrentUser;
 let techB: CurrentUser;
 let rzrManual: string;
 let rangerManual: string;
+let sportsmanManual: string;
 let otherShopManual: string;
 
 const RZR_PAGES = [
@@ -171,10 +175,18 @@ before(async () => {
     "Ranger trouble codes. P0300 misfire on the Ranger XP 1000.",
     "Ranger drive belt inspection.",
   ]);
+  sportsmanManual = await addManual(adminA, "9921889.pdf", ["Sportsman drive belt removal."]);
   otherShopManual = await addManual(adminB, "9928000.pdf", ["P0300 misfire in the other shop's own copy. Secret page."]);
   await importModels(adminA, [
     { fileName: "9928000.pdf", brand: "RZR", models: [[2019, "Z19VDE99AM", "RZR XP 1000 EPS"]] },
     { fileName: "9929000.pdf", brand: "RGR", models: [[2020, "R20RRE99A9", "RANGER XP 1000 EPS"]] },
+    // The model list abbreviates the name its manual's title spells out.
+    {
+      fileName: "9921889.pdf",
+      brand: "ATV",
+      title: "2009 SPORTSMAN XP 850 Service Manual",
+      models: [[2009, "A09ZN85AL", "SPM XP 850, PNTD RED"]],
+    },
     // Listed, but its PDF was never added to the library.
     { fileName: "9930000.pdf", brand: "GRL", models: [[2022, "G22GAD99A1", "GENERAL XP 1000 DELUXE"]] },
   ]);
@@ -443,6 +455,53 @@ describe("Claude's tools", () => {
     assert.equal((await findUnitManuals(techA.shop.id, { description: "XP 1000" })).scope?.manualIds.length, 2);
     // Another shop finds only its own copy.
     assert.deepEqual((await findUnitManuals(techB.shop.id, { model_number: "Z19VDE99AM" })).scope?.manualIds, [otherShopManual]);
+  });
+
+  test("find_unit_manuals finds a model by the name its manual's title gives it", async () => {
+    const lookup = await findUnitManuals(techA.shop.id, { description: "Sportsman XP 850", year: 2009 });
+    assert.deepEqual(lookup.scope?.manualIds, [sportsmanManual]);
+    assert.equal(lookup.scope?.label, "2009 SPM XP 850, PNTD RED — A09ZN85AL");
+    assert.deepEqual((await findUnitManuals(techA.shop.id, { description: "sportsman" })).scope?.manualIds, [sportsmanManual]);
+    // The year is still the model's own, and every word has to match.
+    assert.equal((await findUnitManuals(techA.shop.id, { description: "Sportsman XP 850", year: 2010 })).scope, null);
+    assert.equal((await findUnitManuals(techA.shop.id, { description: "Sportsman XP 1000" })).result.found, false);
+  });
+
+  test("find_unit_manuals by name keeps every matching model's manuals, not just the newest models'", async () => {
+    // A newer manual whose title names two lines and lists hundreds of
+    // models, and an older one found only by its models' descriptions.
+    const shop = await createShop(`dc${suffix}`);
+    const admin = await createUser(shop, "admin", "Cy");
+    const newer = await addManual(admin, "9925000.pdf", ["Scrambler 1000 clutch."]);
+    const older = await addManual(admin, "9926000.pdf", ["Scrambler 850 clutch."]);
+    const colors = ["RED", "BLUE", "GREEN", "WHITE", "BLACK"];
+    const newerModels = Array.from({ length: 201 }, (_, i): [number, string, string] => [
+      2021 + (i % 5),
+      `A${21 + (i % 5)}SCR${String(i).padStart(3, "0")}`,
+      `SCRAMBLER 1000 S, ${colors[Math.floor(i / 5) % 5]}`,
+    ]);
+    await importModels(admin, [
+      { fileName: "9925000.pdf", brand: "ATV", title: "2021-2025 Scrambler 850 / 1000 Service Manual", models: newerModels },
+      { fileName: "9926000.pdf", brand: "ATV", models: [[2012, "A12SCR850", "SCRAMBLER 850 H.O."]] },
+    ]);
+    const lookup = await findUnitManuals(shop.id, { description: "Scrambler 850" });
+    assert.deepEqual(lookup.scope?.manualIds.toSorted(), [newer, older].toSorted());
+    assert.equal(lookup.scope?.label, "Scrambler 850 (202 models)");
+    assert.equal(lookup.result.models_found, 202);
+    assert.equal(lookup.result.manuals_found, 2);
+    // Claude is shown the newest few.
+    const shown = lookup.result.models as { year: number }[];
+    assert.equal(shown.length, 10);
+    assert.ok(shown.every((model) => model.year === 2025));
+
+    // A year in the name too is the model's year: it isn't repeated in the
+    // label, and the title doesn't have to have it.
+    const byYear = await findUnitManuals(shop.id, { description: "2021 Scrambler", year: 2021 });
+    assert.deepEqual(byYear.scope?.manualIds, [newer]);
+    assert.equal(byYear.scope?.label, "2021 Scrambler (41 models)");
+    const notInTitle = await findUnitManuals(shop.id, { description: "2023 Scrambler 1000", year: 2023 });
+    assert.deepEqual(notInTitle.scope?.manualIds, [newer]);
+    assert.equal(notInTitle.scope?.label, "2023 Scrambler 1000 (40 models)");
   });
 
   test("find_unit_manuals says so when nothing matches, and leaves the scope", async () => {
