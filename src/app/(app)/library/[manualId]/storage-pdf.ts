@@ -93,7 +93,10 @@ async function fetchPart(
       const url = link.current();
       const response = await fetch(url, { headers: { Range: `bytes=${begin}-${end - 1}` }, signal });
       alive();
-      if (response.status === 206 && response.body) {
+      // A range that starts at the beginning may come back as the whole file
+      // (200), which is what was asked for when the file is that short; a
+      // longer one is caught below.
+      if ((response.status === 206 || (response.status === 200 && begin === 0)) && response.body) {
         const bytes = new Uint8Array(end - begin);
         let length = 0;
         const reader = response.body.getReader();

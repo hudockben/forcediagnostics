@@ -149,6 +149,23 @@ describe("manual viewer: reading the PDF from storage", () => {
     await pdf.loading.destroy();
   });
 
+  test("a short file storage sends whole (200) for its one range opens; a longer whole file breaks the copy", async () => {
+    const short = buildPdf(1).bytes;
+    assert.ok(short.length < CHUNK);
+    storage = () => new Response(short.slice(), { status: 200 });
+    const pdf = openStoragePdf(pdfjs, storageLink(), { sizeBytes: short.length, chunkBytes: CHUNK });
+    const doc = (await within(pdf.loading.promise, 5000)) as Awaited<typeof pdf.loading.promise> | typeof PENDING;
+    assert.notEqual(doc, PENDING, "the short file opens");
+    assert.notEqual(doc !== PENDING && (await within(doc.getPage(1), 5000)), PENDING, "and shows its page");
+    await pdf.loading.destroy();
+
+    storage = () => new Response(bytes.slice(), { status: 200 });
+    const long = openStoragePdf(pdfjs, storageLink(), { sizeBytes: bytes.length, chunkBytes: CHUNK });
+    void long.loading.promise.catch(() => {});
+    await assert.rejects(within(long.broken, 5000), /Storage (sent more than|answered 200)/);
+    await long.loading.destroy();
+  });
+
   test("a part refused even with a new link breaks the copy", async () => {
     storage = () => undefined;
     const link = storageLink();
