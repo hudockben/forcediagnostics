@@ -433,11 +433,11 @@ export async function manualsForModel(shopId: string, modelNumber: string): Prom
 export async function getReadyManual(
   shopId: string,
   id: string,
-): Promise<(LibraryManual & { storageKey: string }) | null> {
+): Promise<(LibraryManual & { storageKey: string; sizeBytes: number }) | null> {
   if (!isManualId(id)) return null;
   const [row] = await withShop(shopId, (tx) =>
     tx
-      .select({ ...libraryColumns, storageKey: manuals.storageKey })
+      .select({ ...libraryColumns, storageKey: manuals.storageKey, sizeBytes: manuals.sizeBytes })
       .from(manuals)
       .where(and(eq(manuals.id, id), eq(manuals.status, "ready"))),
   );

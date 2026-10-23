@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { useRef, useState, type DragEvent } from "react";
+import { useLayoutEffect, useRef, useState, type DragEvent } from "react";
 
 import { secondaryButtonClass } from "@/components/hud";
 import { catalogBatches, decodeModelList, readModelList, type LeftOutFile } from "@/lib/manual-catalog-rules";
@@ -80,6 +80,19 @@ const fileKey = (file: File) => `${file.name}\u0000${file.size}\u0000${file.last
 // another one, and can later show a fresh copy of it, so a file chosen in
 // the new copy waits for the old one instead of being uploaded twice.
 const inFlight = new Map<string, Promise<void>>();
+
+// Uploaders on screen in the tab, and whether the list owes a refresh. A
+// refresh reloads whatever page is on screen, which needn't be this one
+// (the admin may be reading a manual meanwhile), so while they're elsewhere
+// in the tab it waits until a Manuals page is shown again: this one, or a
+// fresh copy.
+let uploadersShown = 0;
+let refreshOwed = false;
+
+function refreshList(router: { refresh: () => void }) {
+  if (uploadersShown > 0) router.refresh();
+  else refreshOwed = true;
+}
 
 async function sha256Hex(data: ArrayBuffer) {
   if (!crypto.subtle) throw new Stop("Adding manuals needs a secure (https) connection.");
@@ -167,6 +180,19 @@ export function ManualUploader() {
   const nextId = useRef(1);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
+
+  // Layout effects are cleaned up as soon as Next hides the page, and run
+  // again when it's shown.
+  useLayoutEffect(() => {
+    uploadersShown += 1;
+    if (refreshOwed && navigator.onLine) {
+      refreshOwed = false;
+      router.refresh();
+    }
+    return () => {
+      uploadersShown -= 1;
+    };
+  }, [router]);
 
   const busy = jobs.some((job) => BUSY.has(job.state));
   const done = jobs.filter((job) => job.state === "added" || job.state === "skipped").length;
@@ -259,7 +285,7 @@ export function ManualUploader() {
         for (const id of ids) await importList(id);
       } finally {
         listsPending.current -= 1;
-        if (navigator.onLine) router.refresh();
+        if (navigator.onLine) refreshList(router);
         if (listsPending.current === 0 && running.current === 0 && queue.current.length === 0) {
           window.removeEventListener("beforeunload", warnBeforeClosing.current);
         }
@@ -452,7 +478,7 @@ export function ManualUploader() {
         }
         if (navigator.onLine && (allDone || finishedSinceRefresh.current >= REFRESH_EVERY)) {
           finishedSinceRefresh.current = 0;
-          router.refresh();
+          refreshList(router);
         }
         pump();
       });
