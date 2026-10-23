@@ -5,9 +5,11 @@ import { and, asc, eq, sql, type SQL } from "drizzle-orm";
 import { withShop } from "@/db";
 import { manualPages, manuals } from "@/db/schema";
 import { DIAGNOSE_LIMITS, isUuid, unitLabel, type ScopeView, type UnitSuggestion } from "@/lib/diagnose-rules";
-import { cleanSearchQuery, modelFilterWords, searchManuals, uuidArray } from "@/lib/library";
+import type { UnitVehicle } from "@/lib/diagnose-zones";
+import { cleanSearchQuery, likeEscape, modelFilterWords, modelWordMatches, searchManuals, uuidArray } from "@/lib/library";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import { CATALOG_LIMITS, cleanCatalogText, isModelYear } from "@/lib/manual-catalog-rules";
+import { chooseVehicle, vehicleForUnit } from "@/lib/unit-vehicle";
 import { cutText } from "@/lib/manual-rules";
 
 // What Claude's tools can reach in the shop's library, for Diagnose. Every
@@ -54,30 +56,76 @@ export async function describeScope(shopId: string, scope: ManualScope): Promise
   return { label: scope.label, manuals: titles.map(({ id, title }) => ({ id, title })) };
 }
 
-type ModelRow = { year: number | null; number: string | null; description: string | null; manualIds: string[] };
+// Which drawing a conversation's unit gets: the model list's brand codes
+// for its model number (RZR, RGR, ATV, GEN, ...); when those don't decide
+// it, the codes of the manuals it's using; failing that, the words in its
+// name.
+export async function unitVehicle(
+  shopId: string,
+  unit: { modelNumber: string | null; manualIds: string[] | null; label: string | null },
+): Promise<UnitVehicle | null> {
+  if (!unit.modelNumber && !unit.manualIds?.length && !unit.label) return null;
+  const { byNumber, byManual } = await withShop(shopId, async (tx) => {
+    const byNumber = unit.modelNumber
+      ? await tx.execute<{ brand: string }>(sql`
+          select distinct d.brand from manual_catalog_models cm
+          join manual_catalog_documents d on d.shop_id = cm.shop_id and d.file_key = cm.file_key
+          where cm.model_number = ${unit.modelNumber.toUpperCase()} and d.brand is not null
+        `)
+      : null;
+    const numberBrands = byNumber?.rows.map((row) => row.brand) ?? [];
+    // The model number's brands decide it: no need to look at the manuals.
+    if (chooseVehicle({ brands: numberBrands, label: null })) return { byNumber: numberBrands, byManual: [] };
+    const byManual = unit.manualIds?.length
+      ? await tx.execute<{ brand: string }>(sql`
+          select distinct d.brand from manual_file_names n
+          join manual_catalog_documents d on d.shop_id = n.shop_id and d.file_key = n.file_key
+          where n.manual_id = any(${uuidArray(unit.manualIds)}) and d.brand is not null
+        `)
+      : null;
+    return { byNumber: numberBrands, byManual: byManual?.rows.map((row) => row.brand) ?? [] };
+  });
+  return vehicleForUnit({ numberBrands: byNumber, manualBrands: byManual, label: unit.label });
+}
+
+type ModelMatches = {
+  // How many models match, and how many units (a year and model name) they are.
+  count: number;
+  units: number;
+  // The ready manuals of every one of them.
+  manualIds: string[];
+  // The newest few, to show.
+  shown: UnitModel[];
+};
 
 // Models from the model list that meet the conditions (on cm) and have a
-// ready manual, with those manuals' IDs.
-async function modelsWhere(shopId: string, conditions: SQL[], limit = 200): Promise<ModelRow[]> {
+// ready manual. The manuals are every matching model's, not just those of
+// the newest few shown: a name with no year matches hundreds of models over
+// many years (a title naming two lines brings in all of both), and a scope
+// of only the newest models' manuals would leave out the older units' while
+// its label claims them all. One statement, so the model list is read once.
+async function modelsWhere(shopId: string, conditions: SQL[]): Promise<ModelMatches> {
   const result = await withShop(shopId, (tx) =>
-    tx.execute<{ year: number | null; number: string | null; description: string | null; manual_ids: string[] }>(sql`
-      select cm.model_year as year, cm.model_number as number, cm.model_description as description,
-        array_agg(distinct n.manual_id) as manual_ids
-      from manual_catalog_models cm
-      join manual_file_names n on n.shop_id = cm.shop_id and n.file_key = cm.file_key
-      join manuals m on m.id = n.manual_id and m.shop_id = n.shop_id and m.status = 'ready'
-      where ${sql.join(conditions, sql` and `)}
-      group by 1, 2, 3
-      order by cm.model_year desc nulls last, cm.model_number, cm.model_description
-      limit ${limit}
+    tx.execute<{ count: number; units: number; manual_ids: string[] | null; shown: UnitModel[] | null }>(sql`
+      with found as materialized (
+        select cm.model_year as year, cm.model_number as number, cm.model_description as description, n.manual_id
+        from manual_catalog_models cm
+        join manual_file_names n on n.shop_id = cm.shop_id and n.file_key = cm.file_key
+        join manuals m on m.id = n.manual_id and m.shop_id = n.shop_id and m.status = 'ready'
+        where ${sql.join(conditions, sql` and `)}
+      ),
+      models as (select distinct year, number, description from found)
+      select
+        (select count(*) from models)::int as count,
+        (select count(distinct (year, description)) from models)::int as units,
+        (select array_agg(distinct manual_id) from found) as manual_ids,
+        (select json_agg(s order by s.year desc nulls last, s.number, s.description) from (
+          select * from models order by year desc nulls last, number, description limit ${MODELS_SHOWN}
+        ) s) as shown
     `),
   );
-  return result.rows.map((row) => ({
-    year: row.year,
-    number: row.number,
-    description: row.description,
-    manualIds: row.manual_ids,
-  }));
+  const [row] = result.rows;
+  return { count: row.count, units: row.units, manualIds: row.manual_ids ?? [], shown: row.shown ?? [] };
 }
 
 // A model number in the model list, whether or not the shop has a manual for
@@ -101,21 +149,25 @@ const cleanModelNumber = (value: unknown) => {
   return number && number.length <= CATALOG_LIMITS.modelNumber ? number : "";
 };
 
-// LIKE patterns can't be steered by what's typed.
-const likeEscape = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
-
 // find_unit_manuals: finds the unit in the shop's model list, by model
-// number (exactly, or failing that its start), or by year and model name.
-// When its manuals are few enough to be a narrowing (one unit, or at most a
-// vehicle line), they become the conversation's scope.
+// number (exactly, or failing that its start), or by year and model name
+// (words of the model's number or description or its manual's title, the
+// way the Library's Model filter matches them).
+// When the manuals of every model it finds are few enough to be a narrowing
+// (one unit, or at most a vehicle line), they become the conversation's
+// scope.
 export async function findUnitManuals(
   shopId: string,
   input: { model_number?: unknown; description?: unknown; year?: unknown },
 ): Promise<UnitLookup> {
   const number = cleanModelNumber(input.model_number);
   const description = cutText(cleanCatalogText(typeof input.description === "string" ? input.description : "") ?? "", 60);
-  const words = modelFilterWords(description);
   const year = isModelYear(Number(input.year)) ? Number(input.year) : null;
+  // The year in the name as well ("2019 RZR XP 1000") is the year asked for,
+  // which the models' own years have to match, not a word their names or
+  // titles need.
+  const named = modelFilterWords(description);
+  const words = year === null ? named : named.filter((word) => word !== String(year));
   if (!number && words.length === 0) {
     return {
       scope: null,
@@ -127,25 +179,25 @@ export async function findUnitManuals(
   }
 
   const yearCondition = year === null ? [] : [sql`cm.model_year = ${year}`];
-  let models: ModelRow[] = [];
+  let found: ModelMatches = { count: 0, units: 0, manualIds: [], shown: [] };
   let how = "";
+  let byName = false;
   if (number) {
-    models = await modelsWhere(shopId, [sql`cm.model_number = ${number}`, ...yearCondition]);
+    found = await modelsWhere(shopId, [sql`cm.model_number = ${number}`, ...yearCondition]);
     how = `model number ${number}`;
-    if (models.length === 0 && number.length >= 4) {
-      models = await modelsWhere(shopId, [sql`cm.model_number like ${`${likeEscape(number)}%`}`, ...yearCondition]);
+    if (found.count === 0 && number.length >= 4) {
+      found = await modelsWhere(shopId, [sql`cm.model_number like ${`${likeEscape(number)}%`}`, ...yearCondition]);
       how = `model numbers starting ${number}`;
     }
   }
-  if (models.length === 0 && words.length > 0) {
-    models = await modelsWhere(shopId, [
-      ...words.map((word) => sql`cm.model_words like ${`% ${likeEscape(word)}%`}`),
-      ...yearCondition,
-    ]);
-    how = [year, description].filter(Boolean).join(" ");
+  if (found.count === 0 && words.length > 0) {
+    found = await modelsWhere(shopId, [...words.map((word) => modelWordMatches(word)), ...yearCondition]);
+    // Not "2019 2019 RZR XP 1000" when the description has the year already.
+    how = words.length < named.length ? description : [year, description].filter(Boolean).join(" ");
+    byName = true;
   }
 
-  const listed = models.length === 0 && number ? await listedModel(shopId, number, yearCondition) : null;
+  const listed = found.count === 0 && number ? await listedModel(shopId, number, yearCondition) : null;
   if (listed) {
     const name = [listed.year, listed.description].filter(Boolean).join(" ");
     return {
@@ -160,7 +212,7 @@ export async function findUnitManuals(
       },
     };
   }
-  if (models.length === 0) {
+  if (found.count === 0) {
     return {
       scope: null,
       result: {
@@ -170,17 +222,16 @@ export async function findUnitManuals(
     };
   }
 
-  const manualIds = [...new Set(models.flatMap((model) => model.manualIds))];
-  const titles = await manualTitles(shopId, manualIds);
-  const oneUnit = new Set(models.map((model) => `${model.year}|${model.description}`)).size === 1;
-  const label = oneUnit ? unitLabel(models[0]) : `${how} (${models.length} models)`;
+  const titles = await manualTitles(shopId, found.manualIds);
+  const oneUnit = found.units === 1;
+  const label = oneUnit ? unitLabel(found.shown[0]) : `${how} (${found.count} models)`;
   const shown = {
-    models: models.slice(0, MODELS_SHOWN).map((model) => ({
+    models: found.shown.map((model) => ({
       model_number: model.number,
       year: model.year,
       description: model.description,
     })),
-    models_found: models.length,
+    models_found: found.count,
     manuals: titles.slice(0, MANUALS_SHOWN).map((manual) => ({
       manual_id: manual.id,
       title: manual.title,
@@ -195,12 +246,12 @@ export async function findUnitManuals(
         found: true,
         narrowed: false,
         ...shown,
-        message: `That matches ${titles.length} manuals, too many to narrow the search to. Searches still use the same manuals as before. Ask the tech for the model number to narrow it down.`,
+        message: `That matches ${titles.length} manuals, too many to narrow the search to. Searches still use the same manuals as before. Ask the tech for the model number${byName && year === null ? " or the year" : ""} to narrow it down.`,
       },
     };
   }
   return {
-    scope: { manualIds: titles.map((manual) => manual.id), label, unit: oneUnit ? models[0] : null },
+    scope: { manualIds: titles.map((manual) => manual.id), label, unit: oneUnit ? found.shown[0] : null },
     result: {
       found: true,
       narrowed: true,
@@ -208,7 +259,7 @@ export async function findUnitManuals(
       ...shown,
       message: oneUnit
         ? `Searches and page reads now use the ${titles.length === 1 ? "manual" : `${titles.length} manuals`} for ${label}.`
-        : `Several models match (${models.length}); searches and page reads now use their ${titles.length} manuals. If the tech can give the exact model number, look it up again.`,
+        : `Several models match (${found.count}); searches and page reads now use their ${titles.length} manuals. If the tech can give the exact model number, look it up again.`,
     },
   };
 }

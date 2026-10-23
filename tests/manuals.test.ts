@@ -373,13 +373,13 @@ describe("saving page text", () => {
       added: true,
       pageCount: 3,
       pagesWithoutText: 1,
-      nameTaken: false,
+      nameTaken: null,
     });
     assert.deepEqual(await finishManual(adminA, { manualId }), {
       added: false,
       pageCount: 3,
       pagesWithoutText: 1,
-      nameTaken: false,
+      nameTaken: null,
     });
 
     const [row] = await systemDb.select().from(manuals).where(eq(manuals.id, manualId));
@@ -464,6 +464,7 @@ describe("searching the library", () => {
     let filteredPlan = "";
     let yearPlan = "";
     let vehiclePlans: string[] = [];
+    let scopedPlans: string[] = [];
     await systemDb
       .transaction(async (tx) => {
         const [big] = await tx
@@ -510,9 +511,10 @@ describe("searching the library", () => {
         );
         await enterShop(tx, adminA.shop.id);
         await tx.execute(sql`set local enable_seqscan = off`);
-        const explain = async (filters: Parameters<typeof searchQuery>[2]) => {
+        // Verbose, to show what the CTE works out for each page.
+        const explain = async (filters: Parameters<typeof searchQuery>[2], manualIds?: string[]) => {
           const result = await tx.execute<{ "QUERY PLAN": string }>(
-            sql`explain ${searchQuery("fuel pump", SEARCH_LIMIT, filters)}`,
+            sql`explain (verbose) ${searchQuery("fuel pump", SEARCH_LIMIT, filters, manualIds)}`,
           );
           return result.rows.map((row) => row["QUERY PLAN"]).join("\n");
         };
@@ -528,6 +530,8 @@ describe("searching the library", () => {
           // An entry with no brand takes its manual's other brands.
           await explain({ vehicle: "UTV", year: 2013 }),
         ];
+        // Diagnose's scope for a unit, alone and with a filter.
+        scopedPlans = [await explain({}, [big.id]), await explain({ vehicle: "ATV" }, [big.id])];
         tx.rollback();
       })
       .catch((error) => {
@@ -546,6 +550,20 @@ describe("searching the library", () => {
       assert.match(once, /InitPlan/, once);
       assert.match(once, /manual_id = ANY/, once);
       assert.doesNotMatch(once, /Semi Join/, once);
+    }
+    // Only the pages the filters and the scope keep are ranked: ranking
+    // reads each page's whole tsvector, which for a word on most pages is
+    // most of the search's time.
+    assert.equal(scopedPlans.length, 2);
+    for (const narrowed of [filteredPlan, yearPlan, ...vehiclePlans, ...scopedPlans]) {
+      assert.match(narrowed, /Bitmap Index Scan on manual_pages_search/, narrowed);
+      assert.match(narrowed, /CASE WHEN .*manual_id = ANY .* THEN ts_rank_cd\(/, narrowed);
+    }
+    // Model's words look titles up as arrays of their own, never by joining
+    // entries to their models, which Postgres can loop over once per entry
+    // before it has statistics on a freshly imported list.
+    for (const titled of [filteredPlan, vehiclePlans[2], vehiclePlans[3]]) {
+      assert.match(titled, /InitPlan \d+[^\n]*\n\s*->  [^\n]* on public\.manual_catalog_documents td\b/, titled);
     }
   });
 

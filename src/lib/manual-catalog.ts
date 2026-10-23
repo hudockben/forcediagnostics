@@ -137,7 +137,10 @@ export const manualOtherNames = whole<string[]>(sql`coalesce((
   where ${namesOfManual} and ${manualFileNames.fileKey} <> lower(${manuals.fileName})
 ), '{}')`);
 
-// One import at a time per shop, so two tabs can't interleave their writes.
+// One batch (or finish) at a time per shop, so two tabs importing at once
+// take turns batch by batch instead of mixing within one. Which list a file
+// both have keeps is then whichever batch came last: the uploader puts lists
+// in order within its own tab only.
 async function lockCatalog(tx: ShopTransaction, shopId: string) {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext('manual_catalog'), hashtext(${shopId}))`);
 }

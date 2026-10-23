@@ -12,6 +12,7 @@ import { systemDb, withShop } from "../src/db";
 import { auditLog, manualCatalogDocuments, manualCatalogModels, manuals, shops, users } from "../src/db/schema";
 import { CsvError, parseCsv } from "../src/lib/csv";
 import {
+  SEARCH_LIMIT,
   cleanLibraryFilters,
   getReadyManual,
   libraryFilterOptions,
@@ -805,6 +806,20 @@ describe("library filters", () => {
     assert.deepEqual(await listIds({ brand: "ATV", year: 2021, model: "sportsman 850" }), sorted("atv"));
   });
 
+  test("a filter or a scope keeps the whole library's hits for its manuals, ranked and ordered the same", async () => {
+    const all = await searchManuals(adminA.shop.id, "quillwort");
+    assert.equal(all.length, 4);
+    assert.ok(new Set(all.map((hit) => hit.rank)).size > 1, JSON.stringify(all));
+    const only = (...names: string[]) => all.filter((hit) => names.some((name) => ids[name] === hit.manualId));
+    assert.deepEqual(await searchManuals(adminA.shop.id, "quillwort", { brand: "ATV" }), only("atv"));
+    assert.deepEqual(await searchManuals(adminA.shop.id, "quillwort", { year: 2020 }), only("atv", "gen"));
+    // Diagnose's scope for a unit, alone and with a filter.
+    const scope = [ids.gen, ids.rzr, ids.unlisted];
+    assert.deepEqual(await searchManuals(adminA.shop.id, "quillwort", {}, SEARCH_LIMIT, scope), only("gen", "rzr", "unlisted"));
+    assert.deepEqual(await searchManuals(adminA.shop.id, "quillwort", { year: 2020 }, SEARCH_LIMIT, scope), only("gen"));
+    assert.deepEqual(await searchManuals(adminA.shop.id, "quillwort", { brand: "ATV" }, SEARCH_LIMIT, scope), []);
+  });
+
   test("manuals that aren't in the model list only show without filters", async () => {
     assert.ok((await listIds({})).includes(ids.unlisted));
     assert.ok(!(await listIds({ year: 2020 })).includes(ids.unlisted));
@@ -936,6 +951,66 @@ describe("the year filter and Model Years text", () => {
       (await listReadyManuals(adminC.shop.id, { year: 2021 })).map((manual) => manual.id),
       [ids.range],
     );
+  });
+});
+
+describe("the model filter and manual titles", () => {
+  const ids: Record<string, string> = {};
+
+  before(async () => {
+    ids.spm = await addManual(adminC, "9921889.pdf", ["Marmotine belt."]);
+    ids.rgr = await addManual(adminC, "9920736.pdf", ["Marmotine belt."]);
+    ids.supplement = await addManual(adminC, "supplement.pdf", ["Marmotine belt."]);
+    await importEntries(adminC, [
+      // As in Polaris's list: older model descriptions abbreviate the name
+      // (or leave it out) that the manual's title spells out.
+      entry(
+        "9921889.pdf",
+        [
+          [2009, "A09ZN85AL", "SPM XP 850, PNTD RED"],
+          [2009, "A09ZN8EAW", "SPM XP 850 EPS, WHITE"],
+        ],
+        { brand: "ATV", title: "2009 SPORTSMAN XP 850 Service Manual", modelYears: "2009" },
+      ),
+      entry("9920736.pdf", [[2007, "R07RB50AA", "2X4,500 CARB,EB GRN"]], {
+        brand: "RGR",
+        title: "2007 RANGER 500 Service Manual",
+        modelYears: "2007",
+      }),
+      // Listed without models: its title is all Model has to go on.
+      entry("supplement.pdf", [], { brand: "ATV", title: "Sportsman Touring Supplement", modelYears: "2009" }),
+    ]);
+  });
+
+  const searchIds = async (filters: LibraryFilters) =>
+    (await searchManuals(adminC.shop.id, "marmotine", filters)).map((hit) => hit.manualId).sort();
+  const listIds = async (filters: LibraryFilters) =>
+    (await listReadyManuals(adminC.shop.id, filters)).map((manual) => manual.id).sort();
+  const sorted = (...names: string[]) => names.map((name) => ids[name]).sort();
+
+  test("model words match the manual's title as well as its models", async () => {
+    assert.deepEqual(await searchIds({ model: "sportsman" }), sorted("spm", "supplement"));
+    assert.deepEqual(await searchIds({ model: "Sportsman XP 850" }), sorted("spm"));
+    assert.deepEqual(await searchIds({ model: "spm xp 850" }), sorted("spm"));
+    assert.deepEqual(await searchIds({ model: "ranger 500" }), sorted("rgr"));
+    assert.deepEqual(await listIds({ model: "sportsman xp 850" }), sorted("spm"));
+    // Every word has to match the same entry, in its title or one model.
+    assert.deepEqual(await searchIds({ model: "sportsman 500" }), []);
+    assert.deepEqual(await searchIds({ model: "ranger 850" }), []);
+    assert.deepEqual(await searchIds({ model: "sportsman eps white" }), sorted("spm"));
+    assert.deepEqual(await searchIds({ model: "sportsman pntd white" }), []);
+    // From the start of a word only, as in model names.
+    assert.deepEqual(await searchIds({ model: "ortsman" }), []);
+  });
+
+  test("with a year, the year still has to be one of the entry's own models'", async () => {
+    assert.deepEqual(await searchIds({ year: 2009, model: "sportsman" }), sorted("spm"));
+    assert.deepEqual(await searchIds({ vehicle: "ATV", year: 2009, model: "sportsman" }), sorted("spm"));
+    assert.deepEqual(await listIds({ brand: "ATV", year: 2009, model: "sportsman xp 850" }), sorted("spm"));
+    assert.deepEqual(await searchIds({ year: 2010, model: "sportsman" }), []);
+    assert.deepEqual(await searchIds({ year: 2007, model: "ranger" }), sorted("rgr"));
+    assert.deepEqual(await searchIds({ year: 2008, model: "ranger 500" }), []);
+    assert.deepEqual(await searchIds({ vehicle: "UTV", year: 2009, model: "sportsman" }), []);
   });
 });
 

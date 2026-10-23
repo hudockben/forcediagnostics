@@ -51,13 +51,16 @@ test("a successful sign-in clears the count", async () => {
 });
 
 test("a new window starts after the old one ends", async () => {
+  // The window is long enough for the first two round trips to land inside
+  // it on a slow CI runner (50 ms wasn't).
+  const windowMs = 1000;
   const key = `test|${randomUUID()}`;
-  assert.equal((await takeAttempt(key, 1, 50)).allowed, true);
-  assert.equal((await takeAttempt(key, 1, 50)).allowed, false);
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.deepEqual(await takeAttempt(key, 1, 50), { allowed: true, count: 1 });
+  assert.equal((await takeAttempt(key, 1, windowMs)).allowed, true);
+  assert.equal((await takeAttempt(key, 1, windowMs)).allowed, false);
+  await new Promise((resolve) => setTimeout(resolve, windowMs + 100));
+  assert.deepEqual(await takeAttempt(key, 1, windowMs), { allowed: true, count: 1 });
   await giveBackAttempt(key);
-  assert.deepEqual(await takeAttempt(key, 1, 50), { allowed: true, count: 1 });
+  assert.deepEqual(await takeAttempt(key, 1, windowMs), { allowed: true, count: 1 });
 });
 
 test("many attempts at once never get past the limit", async () => {

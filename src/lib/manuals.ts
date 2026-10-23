@@ -60,10 +60,12 @@ export type ConfirmResult = { next: "extract" | "done" } | Problem;
 // there's no more text to send.
 export type SaveResult = { saved: number; done?: true } | Problem;
 // added is false when it was already finished (in another tab, say).
-// nameTaken: another ready manual is already known by this one's file name,
-// so the model list's entry for that name stays with the other one.
+// nameTaken: the name another ready manual is already known by, of this
+// one's file name and that name without a browser's copy number ("X.pdf"
+// for "X (1).pdf"), so the model list's entry for it stays with the other
+// one; null when there's none.
 export type FinishResult =
-  | { added: boolean; pageCount: number; pagesWithoutText: number; nameTaken: boolean }
+  | { added: boolean; pageCount: number; pagesWithoutText: number; nameTaken: string | null }
   | Problem;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -179,7 +181,7 @@ async function linkName(
     .values({ shopId: actor.shop.id, manualId: manual.id, fileName })
     .onConflictDoNothing()
     .returning({ fileName: manualFileNames.fileName });
-  await linkWithoutCopyNumber(tx, actor.shop.id, manual.id, fileName);
+  await linkWithoutCopyNumber(tx, actor.shop.id, manual, fileName);
   let takenFrom: string | null = null;
   if (!added) {
     const owner = await ownerOfName(tx, fileName);
@@ -202,24 +204,51 @@ async function linkName(
   return "linked";
 }
 
-// Gives a ready manual its own file name, if no manual has it yet or the one
-// that has it never finished. Returns false when another ready manual (a
-// different file under the same name) has it.
-async function takeOwnName(tx: ShopTransaction, shopId: string, manual: { id: string; fileName: string }) {
-  await tx
+// Records that a manual is known by a file name, unless some manual already
+// is; a ready manual also takes it from one that never finished (see
+// claimName). Returns false when another manual keeps it.
+async function addName(
+  tx: ShopTransaction,
+  shopId: string,
+  manual: { id: string; status: ManualStatus },
+  fileName: string,
+) {
+  const [added] = await tx
     .insert(manualFileNames)
-    .values({ shopId, manualId: manual.id, fileName: manual.fileName })
-    .onConflictDoNothing();
-  await linkWithoutCopyNumber(tx, shopId, manual.id, manual.fileName);
-  const owner = await ownerOfName(tx, manual.fileName);
-  return owner === manual.id || (owner !== null && (await claimName(tx, manual.id, owner, manual.fileName)));
+    .values({ shopId, manualId: manual.id, fileName })
+    .onConflictDoNothing()
+    .returning({ fileName: manualFileNames.fileName });
+  if (added) return true;
+  const owner = await ownerOfName(tx, fileName);
+  if (owner === manual.id) return true;
+  return owner !== null && manual.status === "ready" && (await claimName(tx, manual.id, owner, fileName));
+}
+
+// Gives a ready manual (finishManual has just made it so, or found it so
+// under its lock) its own file name and that name without a copy number
+// (see linkWithoutCopyNumber), each if no manual has it yet or the one that
+// has it never finished. Returns the first of them another ready manual (a
+// different file under the same name) has, or null.
+async function takeOwnName(tx: ShopTransaction, shopId: string, manual: { id: string; fileName: string }) {
+  const ready = { id: manual.id, status: "ready" as const };
+  const plain = withoutCopyNumber(manual.fileName);
+  let taken: string | null = null;
+  for (const fileName of plain ? [manual.fileName, plain] : [manual.fileName]) {
+    if (!(await addName(tx, shopId, ready, fileName))) taken ??= fileName;
+  }
+  return taken;
 }
 
 // "X (1).pdf" is also known as "X.pdf", the name the model list has, unless
-// some manual already is. Never taken from another manual.
-async function linkWithoutCopyNumber(tx: ShopTransaction, shopId: string, manualId: string, fileName: string) {
+// some manual already is (see addName).
+async function linkWithoutCopyNumber(
+  tx: ShopTransaction,
+  shopId: string,
+  manual: { id: string; status: ManualStatus },
+  fileName: string,
+) {
   const plain = withoutCopyNumber(fileName);
-  if (plain) await tx.insert(manualFileNames).values({ shopId, manualId, fileName: plain }).onConflictDoNothing();
+  if (plain) await addName(tx, shopId, manual, plain);
 }
 
 // The manual a file's hash belongs to, if it's in the library already, with
@@ -294,7 +323,7 @@ export async function startManualUpload(
       });
       // Its own name, unless another manual (a different file) has it.
       await tx.insert(manualFileNames).values({ shopId: actor.shop.id, manualId: id, fileName }).onConflictDoNothing();
-      await linkWithoutCopyNumber(tx, actor.shop.id, id, fileName);
+      await linkWithoutCopyNumber(tx, actor.shop.id, { id, status: "uploading" }, fileName);
     });
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;
@@ -400,16 +429,16 @@ export async function finishManual(
     // Locked, so two tabs finishing the same manual record it once.
     const [row] = await tx.select(rowColumns).from(manuals).where(eq(manuals.id, input.manualId)).for("update");
     if (!row) return notFound;
-    // Its own name, if it somehow has none yet (added by an older version
-    // of the app, say, or held by a manual that never finished), and whether
-    // another manual has it instead. Only once it's ready: a finish that
-    // fails below still commits.
+    // Its own name and the one without a copy number, if it somehow lacks
+    // them (added by an older version of the app, say, or held by a manual
+    // that never finished), and which another manual has instead. Only once
+    // it's ready: a finish that fails below still commits.
     if (row.status === "ready") {
       return {
         added: false,
         pageCount: row.pageCount ?? 0,
         pagesWithoutText: row.pagesWithoutText ?? 0,
-        nameTaken: !(await takeOwnName(tx, actor.shop.id, row)),
+        nameTaken: await takeOwnName(tx, actor.shop.id, row),
       };
     }
     if (row.status !== "extracting" || row.pageCount === null) {
@@ -446,7 +475,7 @@ export async function finishManual(
         sizeBytes: row.sizeBytes,
       },
     });
-    const nameTaken = !(await takeOwnName(tx, actor.shop.id, row));
+    const nameTaken = await takeOwnName(tx, actor.shop.id, row);
     return { added: true, pageCount: row.pageCount, pagesWithoutText: pages.withoutText, nameTaken };
   });
 }

@@ -106,8 +106,9 @@ function fakeStorage() {
 
 const randomSha = () => createHash("sha256").update(randomUUID()).digest("hex");
 
-// Adds a ready manual through the uploader's steps.
-async function addManual(actor: CurrentUser, fileName: string, pages: string[], sha256 = randomSha()) {
+// Adds a ready manual through the uploader's steps, and says what finishing
+// it returned.
+async function addManualFinished(actor: CurrentUser, fileName: string, pages: string[], sha256 = randomSha()) {
   const { objects, storage } = fakeStorage();
   const sizeBytes = 1000 + pages.join("").length;
   const start = await startManualUpload(actor, { fileName, sizeBytes, sha256 }, storage);
@@ -122,7 +123,34 @@ async function addManual(actor: CurrentUser, fileName: string, pages: string[], 
   });
   const finished = await finishManual(actor, { manualId: start.manualId });
   assert.ok("added" in finished && finished.added, JSON.stringify(finished));
-  return start.manualId;
+  return { manualId: start.manualId, finished };
+}
+
+// Adds a ready manual through the uploader's steps.
+async function addManual(actor: CurrentUser, fileName: string, pages: string[], sha256 = randomSha()) {
+  return (await addManualFinished(actor, fileName, pages, sha256)).manualId;
+}
+
+// An upload that stopped part way (pages that couldn't be read, or the tab
+// closed) and was never tried again: its row holds its name, unfinished.
+async function addStalled(actor: CurrentUser, fileName: string) {
+  const { objects, storage } = fakeStorage();
+  const start = await startManualUpload(actor, { fileName, sizeBytes: 700, sha256: randomSha() }, storage);
+  assert.ok("next" in start && start.next === "upload", JSON.stringify(start));
+  objects.set(storageKeyFor(actor.shop.id, start.manualId), 700);
+  assert.deepEqual(await confirmManualUpload(actor, { manualId: start.manualId, pageCount: 3 }, storage), {
+    next: "extract",
+  });
+  await saveManualPages(actor, { manualId: start.manualId, pages: [{ pageNumber: 1, text: "Truncated." }] });
+  // Finishing it later, after all (its tab came back).
+  const finish = async () => {
+    await saveManualPages(actor, {
+      manualId: start.manualId,
+      pages: [2, 3].map((pageNumber) => ({ pageNumber, text: "The rest." })),
+    });
+    return finishManual(actor, { manualId: start.manualId });
+  };
+  return { manualId: start.manualId, finish };
 }
 
 // Starts a byte-identical copy of a manual under another name, as choosing
@@ -304,9 +332,9 @@ describe("linking a copy's name to its manual", () => {
     assert.equal(await ownerOf(adminB.shop.id, "Shared name.pdf"), first);
     assert.deepEqual(await namesOf(third), []);
     const again = await finishManual(adminB, { manualId: third });
-    assert.ok("nameTaken" in again && again.nameTaken && !again.added, JSON.stringify(again));
+    assert.ok("nameTaken" in again && again.nameTaken === "shared name.PDF" && !again.added, JSON.stringify(again));
     const own = await finishManual(adminB, { manualId: first });
-    assert.ok("nameTaken" in own && !own.nameTaken, JSON.stringify(own));
+    assert.ok("nameTaken" in own && own.nameTaken === null, JSON.stringify(own));
   });
 
   test("a ready manual takes its name from one that never finished, never from a ready one", async () => {
@@ -326,7 +354,7 @@ describe("linking a copy's name to its manual", () => {
     });
     await saveManualPages(adminB, { manualId: newer.manualId, pages: [{ pageNumber: 1, text: "Revised text." }] });
     const finished = await finishManual(adminB, { manualId: newer.manualId });
-    assert.deepEqual(finished, { added: true, pageCount: 1, pagesWithoutText: 0, nameTaken: false });
+    assert.deepEqual(finished, { added: true, pageCount: 1, pagesWithoutText: 0, nameTaken: null });
     assert.equal(await ownerOf(adminB.shop.id, "Revised.pdf"), newer.manualId);
     assert.deepEqual(await namesOf(stalled.manualId), []);
 
@@ -336,7 +364,7 @@ describe("linking a copy's name to its manual", () => {
     await confirmManualUpload(adminB, { manualId: stalled.manualId, pageCount: 1 }, storage);
     await saveManualPages(adminB, { manualId: stalled.manualId, pages: [{ pageNumber: 1, text: "Old text." }] });
     const late = await finishManual(adminB, { manualId: stalled.manualId });
-    assert.ok("nameTaken" in late && late.added && late.nameTaken, JSON.stringify(late));
+    assert.ok("nameTaken" in late && late.added && late.nameTaken === "Revised.pdf", JSON.stringify(late));
     assert.equal(await ownerOf(adminB.shop.id, "Revised.pdf"), newer.manualId);
 
     // A copy of a ready manual takes a name the same way.
@@ -803,16 +831,89 @@ describe("browser copy numbers", () => {
     assert.ok(!summary.missingPdfs.some((missing) => missing.fileName === plain), JSON.stringify(summary.missingPdfs));
   });
 
-  test("the plain name stays with a manual that already has it", async () => {
+  test("the plain name stays with a ready manual that already has it, and finishing says so", async () => {
     const plain = `98${suffix}.pdf`;
     const first = await addManual(adminB, plain, ["The original."]);
-    const second = await addManual(adminB, `98${suffix} (1).pdf`, ["A different file under a numbered name."]);
+    // A newer download into the same folder: a different file, numbered.
+    const second = await addManualFinished(adminB, `98${suffix} (1).pdf`, ["A different file under a numbered name."]);
+    assert.equal(second.finished.nameTaken, plain);
     assert.equal(await ownerOf(adminB.shop.id, plain), first);
-    assert.deepEqual(await namesOf(second), [`98${suffix} (1).pdf`]);
+    assert.deepEqual(await namesOf(second.manualId), [`98${suffix} (1).pdf`]);
+    // Finishing it again says the same.
+    const again = await finishManual(adminB, { manualId: second.manualId });
+    assert.ok("nameTaken" in again && !again.added && again.nameTaken === plain, JSON.stringify(again));
     // Choosing the numbered copy of the first file again links only that name.
     skipped(await startCopy(adminB, first, `98${suffix} (2).pdf`));
     assert.equal(await ownerOf(adminB.shop.id, plain), first);
     assert.equal(await ownerOf(adminB.shop.id, `98${suffix} (2).pdf`), first);
+  });
+
+  test("a ready 'X (1).pdf' takes 'X.pdf' from a manual that never finished, with its entry", async () => {
+    const plain = `97${suffix}.pdf`;
+    const model = `A24CN${suffix}`;
+    await importEntries(adminB, [
+      entry(plain, [[2024, model, "SPORTSMAN 570"]], { brand: "ATV", title: "2024 Sportsman 570", modelYears: "2024" }),
+    ]);
+    const stalled = await addStalled(adminB, plain);
+    assert.equal(await ownerOf(adminB.shop.id, plain), stalled.manualId);
+    // Downloaded again into the same folder, which still has the old file:
+    // different bytes, saved as "(1)".
+    const { manualId, finished } = await addManualFinished(adminB, `97${suffix} (1).pdf`, ["The complete download."]);
+    assert.deepEqual(finished, { added: true, pageCount: 1, pagesWithoutText: 0, nameTaken: null });
+    assert.equal(await ownerOf(adminB.shop.id, plain), manualId);
+    assert.deepEqual(await namesOf(stalled.manualId), []);
+
+    const listed = (await listManuals(adminB.shop.id)).find((manual) => manual.id === manualId);
+    assert.deepEqual([listed?.title, listed?.brands, listed?.inList], ["2024 Sportsman 570", ["ATV"], true]);
+    const atvs = (await listReadyManuals(adminB.shop.id, { vehicle: "ATV", year: 2024 })).map((manual) => manual.id);
+    assert.ok(atvs.includes(manualId), JSON.stringify(atvs));
+    assert.deepEqual(
+      (await manualsForModel(adminB.shop.id, model)).map((manual) => manual.id),
+      [manualId],
+    );
+    const summary = await catalogSummary(adminB.shop.id);
+    assert.ok(!summary.notListed.some((manual) => manual.id === manualId), JSON.stringify(summary.notListed));
+    assert.ok(summary.notListed.some((manual) => manual.id === stalled.manualId), JSON.stringify(summary.notListed));
+
+    // The old download finishing after all doesn't take the name back from a
+    // ready manual, and says so.
+    const late = await stalled.finish();
+    assert.ok("nameTaken" in late && late.added && late.nameTaken === plain, JSON.stringify(late));
+    assert.equal(await ownerOf(adminB.shop.id, plain), manualId);
+  });
+
+  test("of two numbered names, the ready manual's takes the plain name from one that never finished", async () => {
+    const plain = `96${suffix}.pdf`;
+    // As migration 0015 decides between two numbered names.
+    const stalled = await addStalled(adminB, `96${suffix} (1).pdf`);
+    assert.equal(await ownerOf(adminB.shop.id, plain), stalled.manualId);
+    const { manualId, finished } = await addManualFinished(adminB, `96${suffix} (2).pdf`, ["The ready one."]);
+    assert.ok("nameTaken" in finished && finished.nameTaken === null, JSON.stringify(finished));
+    assert.equal(await ownerOf(adminB.shop.id, plain), manualId);
+    assert.deepEqual(await namesOf(stalled.manualId), [`96${suffix} (1).pdf`]);
+  });
+
+  test("a copy of a ready manual chosen as 'X (1).pdf' takes 'X.pdf' from a manual that never finished", async () => {
+    const plain = `95${suffix}.pdf`;
+    const stalled = await addStalled(adminB, plain);
+    const ready = await addManual(adminB, `95${suffix}-ready.pdf`, ["Ready file."]);
+    const linked = skipped(await startCopy(adminB, ready, `95${suffix} (1).pdf`));
+    assert.equal(linked.message, `Same file as 95${suffix}-ready.pdf, already in the library. Linked this name to it.`);
+    assert.equal(await ownerOf(adminB.shop.id, plain), ready);
+    assert.deepEqual(await namesOf(stalled.manualId), []);
+
+    // A copy of a manual that isn't ready yet takes nothing.
+    const otherPlain = `94${suffix}.pdf`;
+    const otherStalled = await addStalled(adminB, otherPlain);
+    const unfinished = await addStalled(adminB, `94${suffix}-unfinished.pdf`);
+    const [row] = await systemDb.select().from(manuals).where(eq(manuals.id, unfinished.manualId));
+    const copy = await startManualUpload(
+      adminB,
+      { fileName: `94${suffix} (1).pdf`, sizeBytes: row.sizeBytes, sha256: row.sha256 },
+      fakeStorage().storage,
+    );
+    assert.ok("manualId" in copy && copy.manualId === unfinished.manualId, JSON.stringify(copy));
+    assert.equal(await ownerOf(adminB.shop.id, otherPlain), otherStalled.manualId);
   });
 });
 
@@ -891,5 +992,125 @@ describe("the copy-number migration", () => {
     assert.equal(owner("2020 RZR APEX RC LE.pdf"), undefined);
     assert.equal(names.length, all.length + 3);
     assert.equal(again, names.length);
+  });
+});
+
+describe("the plain-name repair migration", () => {
+  test("a ready numbered manual takes its plain name from one that never finished, never from a ready one", async () => {
+    // Every statement of the migration, run as written against stand-ins
+    // for manuals and manual_file_names (temporary tables come first on the
+    // search path), with the names as 0014, 0015 and the app left them.
+    const migration = readFileSync(new URL("../drizzle/0020_manual_plain_names.sql", import.meta.url), "utf8");
+    const statements = migration
+      .split("--> statement-breakpoint")
+      .map((statement) => statement.replace(/^--.*$/gm, "").trim())
+      .filter(Boolean);
+    assert.ok(statements.some((statement) => statement.startsWith("UPDATE")), "the migration has the repair");
+
+    type Row = { id: string; shopId: string; fileName: string; status: string; readyAt: string | null; names: string[] };
+    const manual = (shopId: string, fileName: string, status: string, readyAt: string | null = null, extra: string[] = []): Row => ({
+      id: randomUUID(),
+      shopId,
+      fileName,
+      status,
+      readyAt,
+      names: [fileName, ...extra],
+    });
+    const a = adminA.shop.id;
+    const b = adminB.shop.id;
+    const m = {
+      // An unfinished X.pdf, then a ready "X (1).pdf": 0015 gave neither the other's name.
+      stalled: manual(a, "9960100.pdf", "uploading"),
+      numbered: manual(a, "9960100 (1).pdf", "ready", "2026-10-01T00:00:00Z"),
+      // Firefox leaves out the space; names match whatever the case.
+      stalledCase: manual(a, "9960200.PDF", "extracting"),
+      firefox: manual(a, "9960200(1).pdf", "ready", "2026-10-01T00:00:00Z"),
+      // The app since 0015: the stalled "(1)" got the plain name first.
+      stalledOne: manual(a, "9960300 (1).pdf", "uploading", null, ["9960300.pdf"]),
+      readyTwo: manual(a, "9960300 (2).pdf", "ready", "2026-10-02T00:00:00Z"),
+      // Two ready manuals could take it: the first to be ready does.
+      stalledFour: manual(a, "9960400.pdf", "uploading"),
+      laterReady: manual(a, "9960400 (1).pdf", "ready", "2026-10-03T00:00:00Z"),
+      firstReady: manual(a, "9960400 (2).pdf", "ready", "2026-10-02T00:00:00Z"),
+      // A ready manual keeps its name.
+      original: manual(a, "9960500.pdf", "ready", "2026-09-01T00:00:00Z"),
+      newer: manual(a, "9960500 (1).pdf", "ready", "2026-10-01T00:00:00Z"),
+      // Nothing ready to take it.
+      stalledSix: manual(a, "9960600.pdf", "uploading"),
+      stalledSixCopy: manual(a, "9960600 (1).pdf", "extracting"),
+      // Three digits isn't a browser's copy number.
+      stalledSeven: manual(a, "9960700.pdf", "uploading"),
+      partNumber: manual(a, "9960700 (123).pdf", "ready", "2026-10-01T00:00:00Z"),
+      // A numbered name linked to a ready manual (a copy chosen under it).
+      stalledEight: manual(a, "9960800.pdf", "uploading"),
+      linked: manual(a, "Winch.pdf", "ready", "2026-10-01T00:00:00Z", ["9960800 (1).pdf"]),
+      // Another shop's unfinished manual under the same name as shop A's.
+      otherShop: manual(b, "9960100.pdf", "uploading"),
+    };
+    const all = Object.values(m);
+
+    let names: { manualId: string; fileKey: string }[] = [];
+    let again: typeof names = [];
+    await systemDb
+      .transaction(async (tx) => {
+        await tx.execute(sql`create temp table manuals (like public.manuals including all) on commit drop`);
+        await tx.execute(
+          sql`create temp table manual_file_names (like public.manual_file_names including all) on commit drop`,
+        );
+        await tx.execute(sql`
+          insert into pg_temp.manuals (id, shop_id, title, file_name, sha256, size_bytes, storage_key, status, page_count, ready_at)
+          values ${sql.join(
+            all.map(
+              (row) =>
+                sql`(${row.id}, ${row.shopId}, ${row.fileName}, ${row.fileName}, ${randomSha()}, 1, ${"shops/x/manuals/x.pdf"}, ${row.status}, 1, ${row.readyAt})`,
+            ),
+            sql`, `,
+          )}
+        `);
+        await tx.execute(sql`
+          insert into pg_temp.manual_file_names (shop_id, manual_id, file_name)
+          values ${sql.join(
+            all.flatMap((row) => row.names.map((name) => sql`(${row.shopId}, ${row.id}, ${name})`)),
+            sql`, `,
+          )}
+        `);
+        // Each plain name is held by the manual that had it first, so 0015's
+        // ON CONFLICT DO NOTHING (and the app before this) never gave it to
+        // the numbered ones.
+        const read = async () =>
+          (
+            await tx.execute<{ manual_id: string; file_key: string }>(
+              sql`select manual_id, file_key from pg_temp.manual_file_names order by shop_id, file_key`,
+            )
+          ).rows.map((row) => ({ manualId: row.manual_id, fileKey: row.file_key }));
+        for (const statement of statements) await tx.execute(sql.raw(statement));
+        names = await read();
+        // Running it again (a retried deploy) changes nothing.
+        for (const statement of statements) await tx.execute(sql.raw(statement));
+        again = await read();
+        tx.rollback();
+      })
+      .catch((error) => {
+        if (!(error instanceof TransactionRollbackError)) throw error;
+      });
+    const owner = (shopId: string, fileName: string) => {
+      const ids = new Set(all.filter((row) => row.shopId === shopId).map((row) => row.id));
+      return names.find((name) => ids.has(name.manualId) && name.fileKey === fileName.toLowerCase())?.manualId;
+    };
+    assert.equal(owner(a, "9960100.pdf"), m.numbered.id);
+    assert.equal(owner(a, "9960200.pdf"), m.firefox.id);
+    assert.equal(owner(a, "9960300.pdf"), m.readyTwo.id);
+    assert.equal(owner(a, "9960300 (1).pdf"), m.stalledOne.id);
+    assert.equal(owner(a, "9960400.pdf"), m.firstReady.id);
+    assert.equal(owner(a, "9960500.pdf"), m.original.id);
+    assert.equal(owner(a, "9960600.pdf"), m.stalledSix.id);
+    assert.equal(owner(a, "9960700.pdf"), m.stalledSeven.id);
+    assert.equal(owner(a, "9960800.pdf"), m.linked.id);
+    assert.equal(owner(b, "9960100.pdf"), m.otherShop.id);
+    // Names only moved: none added or lost.
+    assert.equal(names.length, all.reduce((total, row) => total + row.names.length, 0));
+    assert.deepEqual(again, names);
+    // The real tables were never touched.
+    assert.equal((await systemDb.select().from(manuals).where(eq(manuals.id, m.numbered.id))).length, 0);
   });
 });

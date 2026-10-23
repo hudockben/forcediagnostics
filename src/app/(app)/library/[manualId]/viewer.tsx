@@ -1,6 +1,7 @@
 "use client";
 
-import type { PDFDocumentLoadingTask, RenderTask } from "pdfjs-dist";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import type { RenderTask } from "pdfjs-dist";
 import { useEffect, useEffectEvent, useRef, useState, type FormEvent } from "react";
 
 import { Notice } from "@/components/app/ui";
@@ -8,10 +9,13 @@ import { inputBaseClass } from "@/components/hud";
 import { PDFJS_WASM_URL, loadPdfJs } from "@/lib/pdfjs";
 
 import { getManualFileUrl } from "../actions";
+import { pageFromAddress } from "./page-number";
+import { openStoragePdf, type StorageLink, type StoragePdf } from "./storage-pdf";
 
-// Shows one page of a manual at a time. pdf.js fetches only the parts of the
-// PDF that page needs (HTTP range requests straight from storage), so a
-// 100 MB manual opens on a tablet without downloading all of it.
+// Shows one page of a manual at a time. pdf.js reads only the parts of the
+// PDF that page needs (HTTP range requests straight from storage, see
+// storage-pdf.ts), so a 100 MB manual opens on a tablet without downloading
+// all of it.
 
 // Bytes per range request: fewer, bigger requests suit slow shop Wi-Fi.
 const RANGE_CHUNK_BYTES = 128 * 1024;
@@ -27,28 +31,64 @@ const isCancelled = (error: unknown) =>
 
 type View = { kind: "loading" } | { kind: "shown" } | { kind: "failed"; message: string };
 
-export function ManualViewer({
-  manualId,
-  pageCount,
-  startPage,
-  initialUrl,
-}: {
+type ViewerProps = {
   manualId: string;
   pageCount: number;
+  sizeBytes: number;
+  // Where it opens: the server's reading of the address, which the viewer
+  // reads itself once it's on screen. After that the viewer keeps its own
+  // place (and the address with it), so a refresh, whose address has the
+  // page on screen, changes nothing.
   startPage: number;
   initialUrl: string;
-}) {
-  const [pageNumber, setPageNumber] = useState(startPage);
-  const [draft, setDraft] = useState(String(startPage));
+};
+
+// Next keeps this page in <Activity> when someone moves on, and shows the
+// same viewer again if they come back to this manual. bfcacheId changes when
+// they follow a link here (a search hit, the Library list, a Diagnose source),
+// so the viewer starts afresh at the linked page; it stays the same for
+// Back/Forward and refreshes, which find the viewer as it was (at the page
+// the address names).
+export function ManualViewer(props: ViewerProps) {
+  const { bfcacheId } = useRouter();
+  return <Viewer key={`${bfcacheId}:${props.manualId}`} {...props} />;
+}
+
+function Viewer({ manualId, pageCount, sizeBytes, startPage, initialUrl }: ViewerProps) {
+  // The page the address names while this manual is on screen (goTo keeps
+  // it there). Back or Forward to an earlier visit can bring back a viewer
+  // at another page than that visit's address: Next keeps the route under
+  // the address it was opened at, which two visits by the same link share
+  // (so the later visit's viewer comes back), and a viewer it has dropped
+  // is made again from that first address. So when the address changes, or
+  // the viewer comes back to it, the viewer goes to the page it names.
+  const onScreen = usePathname() === `/library/${manualId}`;
+  const searchParams = useSearchParams();
+  const addressed = onScreen ? pageFromAddress(searchParams.get("page"), pageCount) : null;
+  const [followed, setFollowed] = useState(addressed);
+
+  const [pageNumber, setPageNumber] = useState(addressed ?? startPage);
+  const [draft, setDraft] = useState(String(addressed ?? startPage));
   const [zoom, setZoom] = useState(1);
   const [width, setWidth] = useState(0);
   const [view, setView] = useState<View>({ kind: "loading" });
   const [tries, setTries] = useState(0);
 
+  if (addressed !== followed) {
+    setFollowed(addressed);
+    // After goTo the address catches up with the page; nothing to do then.
+    if (addressed !== null && addressed !== pageNumber) {
+      setPageNumber(addressed);
+      setDraft(String(addressed));
+      setView({ kind: "loading" });
+    }
+  }
+
   const frame = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const fileUrl = useRef(initialUrl);
-  const pdf = useRef<PDFDocumentLoadingTask | null>(null);
+  const renewal = useRef<Promise<void> | null>(null);
+  const pdf = useRef<StoragePdf | null>(null);
   // The canvas takes one render at a time; each waits for the one before.
   const lastRender = useRef<Promise<unknown>>(Promise.resolve());
 
@@ -64,7 +104,7 @@ export function ManualViewer({
   // Closes the PDF when the page goes away.
   useEffect(
     () => () => {
-      void pdf.current?.destroy();
+      void pdf.current?.loading.destroy();
       pdf.current = null;
     },
     [],
@@ -75,37 +115,46 @@ export function ManualViewer({
     let cancelled = false;
     let task: RenderTask | undefined;
 
+    // Storage links expire after 15 minutes. One new link serves every
+    // request that found the old one had run out.
+    const link: StorageLink = {
+      current: () => fileUrl.current,
+      renew(expired) {
+        if (fileUrl.current !== expired) return Promise.resolve();
+        renewal.current ??= getManualFileUrl(manualId)
+          .then((result) => {
+            if ("error" in result) throw new Error(result.error);
+            fileUrl.current = result.url;
+          })
+          .finally(() => (renewal.current = null));
+        return renewal.current;
+      },
+    };
+
     async function open(fresh: boolean) {
       if (fresh || !pdf.current) {
-        await pdf.current?.destroy();
+        await pdf.current?.loading.destroy();
         pdf.current = null;
-        if (fresh) {
-          // Storage links expire after 15 minutes; ask for a new one.
-          const result = await getManualFileUrl(manualId);
-          if ("error" in result) throw new Error(result.error);
-          fileUrl.current = result.url;
-        }
+        if (fresh) await link.renew(fileUrl.current);
         const pdfjs = await loadPdfJs();
         // The page or size changed while waiting: the newer run opens the
         // PDF, so there's only ever one (each has its own worker).
         if (cancelled) throw new Error("cancelled");
-        pdf.current = pdfjs.getDocument({
-          url: fileUrl.current,
-          // Only fetch what the page on screen needs.
-          disableAutoFetch: true,
-          disableStream: true,
-          rangeChunkSize: RANGE_CHUNK_BYTES,
-          // Decoders for scanned-page images (CCITT, JBIG2, JPEG 2000).
+        pdf.current = openStoragePdf(pdfjs, link, {
+          sizeBytes,
+          chunkBytes: RANGE_CHUNK_BYTES,
           wasmUrl: PDFJS_WASM_URL,
-          verbosity: pdfjs.VerbosityLevel.ERRORS,
         });
       }
-      return pdf.current.promise;
+      return pdf.current;
     }
 
     async function draw(fresh: boolean) {
-      const doc = await open(fresh);
-      const page = await doc.getPage(pageNumber);
+      const { loading, broken } = await open(fresh);
+      // Each step gives up as soon as this copy of the PDF breaks, rather
+      // than wait for a part of it that isn't coming.
+      const doc = await Promise.race([broken, loading.promise]);
+      const page = await Promise.race([broken, doc.getPage(pageNumber)]);
       await lastRender.current;
       const target = canvas.current;
       if (cancelled || !target) return;
@@ -122,15 +171,19 @@ export function ManualViewer({
       target.style.height = `${Math.floor(cssViewport.height)}px`;
       task = page.render({ canvas: target, viewport });
       lastRender.current = task.promise.catch(() => {});
-      await task.promise;
+      await Promise.race([broken, task.promise]);
       if (!cancelled) setView({ kind: "shown" });
     }
 
     draw(false).catch((error) => {
       if (cancelled || isCancelled(error)) return;
-      // Most likely the storage link ran out: try once more with a new one.
+      // A drawing left waiting on a broken copy would hold up the next one.
+      task?.cancel();
+      // Part of the file couldn't be fetched (the connection dropped, say):
+      // try once more, from a fresh copy with a new link.
       draw(true).catch((again) => {
         if (cancelled || isCancelled(again)) return;
+        task?.cancel();
         console.error("Couldn't show a manual page", again);
         setView({ kind: "failed", message: "This page couldn't be shown. Check the connection and try again." });
       });
@@ -140,7 +193,7 @@ export function ManualViewer({
       cancelled = true;
       task?.cancel();
     };
-  }, [manualId, pageNumber, width, zoom, tries]);
+  }, [manualId, pageNumber, sizeBytes, width, zoom, tries]);
 
   function goTo(requested: number) {
     const next = Math.min(Math.max(Math.round(requested) || 1, 1), pageCount);
@@ -164,9 +217,18 @@ export function ManualViewer({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // An empty page box (cleared to type a new number, or holding something
+  // that isn't one, which a number box reads as empty) puts the current
+  // page back rather than going to page 1.
+  function commitDraft() {
+    const requested = Number(draft);
+    if (draft.trim() === "" || !Number.isFinite(requested)) setDraft(String(pageNumber));
+    else goTo(requested);
+  }
+
   function onPageSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    goTo(Number(draft));
+    commitDraft();
   }
 
   function changeZoom(next: number) {
@@ -202,7 +264,7 @@ export function ManualViewer({
               max={pageCount}
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              onBlur={() => goTo(Number(draft))}
+              onBlur={commitDraft}
               // w-20! wins over inputBaseClass's w-full.
               className={`${inputBaseClass} w-20! text-center`}
             />

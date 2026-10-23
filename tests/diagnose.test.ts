@@ -63,7 +63,7 @@ import {
   type SeenSources,
   type StreamEvent,
 } from "../src/lib/diagnose-rules";
-import { findUnitManuals, readScopedPage, searchScopedPages, suggestUnits } from "../src/lib/diagnose-tools";
+import { findUnitManuals, readScopedPage, searchScopedPages, suggestUnits, unitVehicle } from "../src/lib/diagnose-tools";
 import { finishCatalogImport, saveCatalogBatch } from "../src/lib/manual-catalog";
 import { confirmManualUpload, finishManual, saveManualPages, startManualUpload, storageKeyFor } from "../src/lib/manuals";
 import { can, needsPasswordSession } from "../src/lib/permissions";
@@ -123,7 +123,10 @@ async function addManual(actor: CurrentUser, fileName: string, pages: string[]) 
   return start.manualId;
 }
 
-async function importModels(actor: CurrentUser, files: { fileName: string; brand: string; models: [number, string, string][] }[]) {
+async function importModels(
+  actor: CurrentUser,
+  files: { fileName: string; brand: string; title?: string; models: [number, string, string][] }[],
+) {
   const importId = randomUUID();
   const saved = await saveCatalogBatch(actor, {
     importId,
@@ -131,7 +134,7 @@ async function importModels(actor: CurrentUser, files: { fileName: string; brand
       fileName: file.fileName,
       brand: file.brand,
       article: null,
-      title: null,
+      title: file.title ?? null,
       postedOn: null,
       modelYears: null,
       models: file.models,
@@ -149,6 +152,7 @@ let adminB: CurrentUser;
 let techB: CurrentUser;
 let rzrManual: string;
 let rangerManual: string;
+let sportsmanManual: string;
 let otherShopManual: string;
 
 const RZR_PAGES = [
@@ -171,10 +175,18 @@ before(async () => {
     "Ranger trouble codes. P0300 misfire on the Ranger XP 1000.",
     "Ranger drive belt inspection.",
   ]);
+  sportsmanManual = await addManual(adminA, "9921889.pdf", ["Sportsman drive belt removal."]);
   otherShopManual = await addManual(adminB, "9928000.pdf", ["P0300 misfire in the other shop's own copy. Secret page."]);
   await importModels(adminA, [
     { fileName: "9928000.pdf", brand: "RZR", models: [[2019, "Z19VDE99AM", "RZR XP 1000 EPS"]] },
     { fileName: "9929000.pdf", brand: "RGR", models: [[2020, "R20RRE99A9", "RANGER XP 1000 EPS"]] },
+    // The model list abbreviates the name its manual's title spells out.
+    {
+      fileName: "9921889.pdf",
+      brand: "ATV",
+      title: "2009 SPORTSMAN XP 850 Service Manual",
+      models: [[2009, "A09ZN85AL", "SPM XP 850, PNTD RED"]],
+    },
     // Listed, but its PDF was never added to the library.
     { fileName: "9930000.pdf", brand: "GRL", models: [[2022, "G22GAD99A1", "GENERAL XP 1000 DELUXE"]] },
   ]);
@@ -258,7 +270,7 @@ async function startTurn(user: CurrentUser, request: TurnRequest, steps: Step[])
   if (isProblem(prepared)) throw new Error(prepared.error);
   const fake = fakeClaude(steps);
   const events: StreamEvent[] = [];
-  const outcome = await runTurn(prepared, { client: fake.client, emit: (event) => events.push(event), showCost: true });
+  const outcome = await runTurn(prepared, { client: fake.client, emit: (event) => events.push(event) });
   return { ...outcome, requests: fake.requests, events, prepared };
 }
 
@@ -445,6 +457,53 @@ describe("Claude's tools", () => {
     assert.deepEqual((await findUnitManuals(techB.shop.id, { model_number: "Z19VDE99AM" })).scope?.manualIds, [otherShopManual]);
   });
 
+  test("find_unit_manuals finds a model by the name its manual's title gives it", async () => {
+    const lookup = await findUnitManuals(techA.shop.id, { description: "Sportsman XP 850", year: 2009 });
+    assert.deepEqual(lookup.scope?.manualIds, [sportsmanManual]);
+    assert.equal(lookup.scope?.label, "2009 SPM XP 850, PNTD RED — A09ZN85AL");
+    assert.deepEqual((await findUnitManuals(techA.shop.id, { description: "sportsman" })).scope?.manualIds, [sportsmanManual]);
+    // The year is still the model's own, and every word has to match.
+    assert.equal((await findUnitManuals(techA.shop.id, { description: "Sportsman XP 850", year: 2010 })).scope, null);
+    assert.equal((await findUnitManuals(techA.shop.id, { description: "Sportsman XP 1000" })).result.found, false);
+  });
+
+  test("find_unit_manuals by name keeps every matching model's manuals, not just the newest models'", async () => {
+    // A newer manual whose title names two lines and lists hundreds of
+    // models, and an older one found only by its models' descriptions.
+    const shop = await createShop(`dc${suffix}`);
+    const admin = await createUser(shop, "admin", "Cy");
+    const newer = await addManual(admin, "9925000.pdf", ["Scrambler 1000 clutch."]);
+    const older = await addManual(admin, "9926000.pdf", ["Scrambler 850 clutch."]);
+    const colors = ["RED", "BLUE", "GREEN", "WHITE", "BLACK"];
+    const newerModels = Array.from({ length: 201 }, (_, i): [number, string, string] => [
+      2021 + (i % 5),
+      `A${21 + (i % 5)}SCR${String(i).padStart(3, "0")}`,
+      `SCRAMBLER 1000 S, ${colors[Math.floor(i / 5) % 5]}`,
+    ]);
+    await importModels(admin, [
+      { fileName: "9925000.pdf", brand: "ATV", title: "2021-2025 Scrambler 850 / 1000 Service Manual", models: newerModels },
+      { fileName: "9926000.pdf", brand: "ATV", models: [[2012, "A12SCR850", "SCRAMBLER 850 H.O."]] },
+    ]);
+    const lookup = await findUnitManuals(shop.id, { description: "Scrambler 850" });
+    assert.deepEqual(lookup.scope?.manualIds.toSorted(), [newer, older].toSorted());
+    assert.equal(lookup.scope?.label, "Scrambler 850 (202 models)");
+    assert.equal(lookup.result.models_found, 202);
+    assert.equal(lookup.result.manuals_found, 2);
+    // Claude is shown the newest few.
+    const shown = lookup.result.models as { year: number }[];
+    assert.equal(shown.length, 10);
+    assert.ok(shown.every((model) => model.year === 2025));
+
+    // A year in the name too is the model's year: it isn't repeated in the
+    // label, and the title doesn't have to have it.
+    const byYear = await findUnitManuals(shop.id, { description: "2021 Scrambler", year: 2021 });
+    assert.deepEqual(byYear.scope?.manualIds, [newer]);
+    assert.equal(byYear.scope?.label, "2021 Scrambler (41 models)");
+    const notInTitle = await findUnitManuals(shop.id, { description: "2023 Scrambler 1000", year: 2023 });
+    assert.deepEqual(notInTitle.scope?.manualIds, [newer]);
+    assert.equal(notInTitle.scope?.label, "2023 Scrambler 1000 (40 models)");
+  });
+
   test("find_unit_manuals says so when nothing matches, and leaves the scope", async () => {
     const lookup = await findUnitManuals(techA.shop.id, { model_number: "X99ZZZ00" });
     assert.equal(lookup.scope, null);
@@ -464,6 +523,21 @@ describe("Claude's tools", () => {
     assert.ok(!/Ask the tech for the model number/.test(String(lookup.result.message)));
     // Another shop's list doesn't have it.
     assert.equal((await findUnitManuals(techB.shop.id, { model_number: "G22GAD99A1" })).listed, undefined);
+  });
+
+  test("the unit's drawing comes from the model list's brand, then its manuals, then its name", async () => {
+    const shopId = techA.shop.id;
+    // RZR, RGR and GRL are all side-by-sides; a listed model with no manual
+    // still has its brand.
+    assert.equal(await unitVehicle(shopId, { modelNumber: "Z19VDE99AM", manualIds: null, label: null }), "utv");
+    assert.equal(await unitVehicle(shopId, { modelNumber: "g22gad99a1", manualIds: null, label: null }), "utv");
+    assert.equal(await unitVehicle(shopId, { modelNumber: null, manualIds: [rangerManual], label: "Ranger" }), "utv");
+    // Not in the list: the words in the name decide.
+    assert.equal(await unitVehicle(shopId, { modelNumber: "A21SXZ85A1", manualIds: null, label: "2021 SPORTSMAN 850" }), "atv");
+    assert.equal(await unitVehicle(shopId, { modelNumber: "X1", manualIds: null, label: "X1" }), null);
+    assert.equal(await unitVehicle(shopId, { modelNumber: null, manualIds: null, label: null }), null);
+    // Another shop's list doesn't count.
+    assert.equal(await unitVehicle(techB.shop.id, { modelNumber: "G22GAD99A1", manualIds: null, label: null }), null);
   });
 
   test("model number suggestions come from the shop's list", async () => {
@@ -656,7 +730,8 @@ describe("a conversation", () => {
       "Searching the web: RZR XP 1000 misfire under load",
     ]);
     assert.ok(run.events.some((event) => event.type === "reply" && event.text === "P0300 on this unit"));
-    assert.ok(run.events.some((event) => event.type === "scope"));
+    assert.ok(run.events.some((event) => event.type === "scope" && event.vehicle === "utv"));
+    assert.equal(run.conversation.vehicle, "utv");
     assert.equal(run.events.at(-1)?.type, "end");
     // Usage and cost add up over the four requests.
     const [row] = await systemDb.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, run.turn.id));
@@ -667,7 +742,10 @@ describe("a conversation", () => {
     assert.equal(row.webSearches, 1);
     assert.ok(Math.abs(row.costCents - estimateCostCents(row.usage!)) < 1e-9);
     assert.equal(row.costCents, row.usage!.costCents);
-    assert.ok(run.turn.costCents! > 0);
+    assert.ok(row.costCents > 0);
+    // The estimate is kept for the month's figures, not shown per message.
+    assert.ok(!("costCents" in run.turn));
+    assert.ok(run.events.every((event) => !("turn" in event) || !("costCents" in event.turn)));
     // The stored history is the tech's message, the app's note, then each
     // of Claude's responses as it came back and the tool results.
     turn1Appended = row.history as MessageParam[];
@@ -1149,7 +1227,7 @@ describe("the loop: time limit, usage and errors", () => {
     const [row] = await systemDb.select().from(diagnosisTurns).where(eq(diagnosisTurns.id, failed.turn.id));
     const second = estimateCostCents({ ...emptyUsage(), inputTokens: 1000, outputTokens: 200 });
     assert.ok(Math.abs(row.costCents - (first.costCents + second)) < 1e-9, `${row.costCents} vs ${first.costCents} + ${second}`);
-    assert.equal(retried.turn.costCents, row.costCents);
+    assert.ok(!("costCents" in retried.turn));
     assert.equal(row.webSearches, 2);
     assert.equal(row.usage?.requests, 3);
     assert.equal(row.usage?.inputTokens, 3000);
@@ -1175,6 +1253,9 @@ describe("the loop: time limit, usage and errors", () => {
     ]);
     assert.equal(run.conversation.unit, "2022 GENERAL XP 1000 DELUXE — G22GAD99A1");
     assert.equal(run.conversation.scope.label, null);
+    // No manual, but the model list says it's a General: the side-by-side
+    // drawing.
+    assert.equal(run.conversation.vehicle, "utv");
   });
 });
 
@@ -1231,10 +1312,9 @@ describe("limits and housekeeping", () => {
         throw new Anthropic.APIUserAbortError();
       },
       emit: () => {},
-      showCost: false,
     });
     assert.equal(outcome.turn.status, "stopped");
-    assert.equal(outcome.turn.costCents, null);
+    assert.ok(!("costCents" in outcome.turn));
   });
 
   test("messages are limited per tech per hour and per shop per day", async () => {

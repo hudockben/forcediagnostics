@@ -6,7 +6,8 @@ import { unstable_rethrow } from "next/navigation";
 import { changeUnit, getConversation, markCause, requestStop, type ConversationDetail } from "@/lib/diagnose";
 import type { CauseVerdict, ConversationView, FeedbackEntry, ScopeView, UnitSuggestion } from "@/lib/diagnose-rules";
 import { suggestUnits } from "@/lib/diagnose-tools";
-import { allows, requireCapability } from "@/lib/session";
+import type { UnitVehicle } from "@/lib/diagnose-zones";
+import { requireCapability } from "@/lib/session";
 
 // The Diagnose screen's small actions. Sending a message goes through the
 // streaming route instead (src/app/api/diagnose/turn/route.ts).
@@ -53,7 +54,7 @@ export async function changeUnitAction(input: {
   conversationId: string;
   modelNumber?: string;
   wholeLibrary?: boolean;
-}): Promise<{ scope: ScopeView; unit: string | null } | Failed> {
+}): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null } | Failed> {
   const user = await requireCapability("diagnostics.work");
   return attempt("change the unit", () =>
     changeUnit(user, {
@@ -72,8 +73,6 @@ export async function stopTurnAction(turnId: string): Promise<{ ok: boolean } | 
 // The whole conversation again, after a message finished somewhere else.
 export async function loadConversationAction(id: string): Promise<ConversationDetail | Failed> {
   const user = await requireCapability("diagnostics.work");
-  const result = await attempt("load the diagnosis", () =>
-    getConversation(user, String(id ?? ""), allows(user, "reports.kpis")),
-  );
+  const result = await attempt("load the diagnosis", () => getConversation(user, String(id ?? "")));
   return result ?? { error: "That diagnosis isn't in this shop." };
 }

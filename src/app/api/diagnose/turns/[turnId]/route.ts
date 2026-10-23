@@ -9,7 +9,7 @@ export async function GET(_request: Request, ctx: RouteContext<"/api/diagnose/tu
   if ("redirectTo" in lookup) return Response.json({ redirectTo: lookup.redirectTo }, { status: 401 });
   if (!allows(lookup.user, "diagnostics.work")) return Response.json({ error: "Not allowed." }, { status: 403 });
   const { turnId } = await ctx.params;
-  const turn = await getTurn(lookup.user, turnId, allows(lookup.user, "reports.kpis"));
+  const turn = await getTurn(lookup.user, turnId);
   if (!turn) return Response.json({ error: "That message isn't in this shop." }, { status: 404 });
   return Response.json({ turn }, { headers: { "cache-control": "private, no-store" } });
 }

@@ -10,6 +10,7 @@ import { pdfFileName } from "@/lib/manual-rules";
 import { requireCapability } from "@/lib/session";
 import { STORAGE_ENV_VARS, isStorageConfigured, r2Storage } from "@/lib/storage";
 
+import { pageFromAddress } from "./page-number";
 import { ManualViewer } from "./viewer";
 
 export const metadata: Metadata = { title: "Manual" };
@@ -34,8 +35,6 @@ async function Manual({
   // Only finds ready manuals in the user's own shop.
   const manual = await getReadyManual(user.shop.id, manualId);
   if (!manual) notFound();
-  const requested = Number(typeof page === "string" ? page : 1);
-  const startPage = Number.isInteger(requested) ? Math.min(Math.max(requested, 1), manual.pageCount) : 1;
 
   return (
     <div className="space-y-4">
@@ -48,11 +47,10 @@ async function Manual({
       />
       {isStorageConfigured ? (
         <ManualViewer
-          // A link to another page of the same manual starts the viewer afresh.
-          key={`${manual.id}:${startPage}`}
           manualId={manual.id}
           pageCount={manual.pageCount}
-          startPage={startPage}
+          sizeBytes={manual.sizeBytes}
+          startPage={pageFromAddress(page, manual.pageCount)}
           initialUrl={await r2Storage.downloadUrl(manual.storageKey, pdfFileName(manual.title))}
         />
       ) : (

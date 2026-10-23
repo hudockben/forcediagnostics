@@ -1,0 +1,1 @@
+ALTER TABLE "manual_catalog_documents" ADD COLUMN "title_words" text GENERATED ALWAYS AS (' ' || upper(regexp_replace(coalesce("title", ''), '[^A-Za-z0-9]+', ' ', 'g')) || ' ') STORED;
