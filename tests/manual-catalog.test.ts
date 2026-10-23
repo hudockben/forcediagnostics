@@ -997,7 +997,10 @@ describe("the model filter and manual titles", () => {
     // Every word has to match the same entry, in its title or one model.
     assert.deepEqual(await searchIds({ model: "sportsman 500" }), []);
     assert.deepEqual(await searchIds({ model: "ranger 850" }), []);
-    assert.deepEqual(await searchIds({ model: "sportsman eps white" }), sorted("spm"));
+    // Never some words from the title and the rest from a model: all from
+    // one or all from the other.
+    assert.deepEqual(await searchIds({ model: "sportsman eps white" }), []);
+    assert.deepEqual(await searchIds({ model: "spm eps white" }), sorted("spm"));
     assert.deepEqual(await searchIds({ model: "sportsman pntd white" }), []);
     // From the start of a word only, as in model names.
     assert.deepEqual(await searchIds({ model: "ortsman" }), []);
@@ -1011,6 +1014,52 @@ describe("the model filter and manual titles", () => {
     assert.deepEqual(await searchIds({ year: 2007, model: "ranger" }), sorted("rgr"));
     assert.deepEqual(await searchIds({ year: 2008, model: "ranger 500" }), []);
     assert.deepEqual(await searchIds({ vehicle: "UTV", year: 2009, model: "sportsman" }), []);
+  });
+
+  test("a title covering several sizes or lines doesn't lend one model another's name", async () => {
+    ids.r900 = await addManual(adminC, "9928100.pdf", ["Marmotine belt."]);
+    ids.r1000 = await addManual(adminC, "9928101.pdf", ["Marmotine belt."]);
+    ids.rzr170 = await addManual(adminC, "9928102.pdf", ["Marmotine belt."]);
+    ids.rzrs = await addManual(adminC, "9928103.pdf", ["Marmotine belt."]);
+    await importEntries(
+      adminC,
+      [
+        entry("9928100.pdf", [[2019, "R19RRE99A1", "RANGER XP 900 EPS"]], {
+          brand: "RGR",
+          title: "2018-2019 RANGER 900 / 1000",
+          modelYears: "2018-2019",
+        }),
+        entry("9928101.pdf", [[2019, "R19RSE99A1", "RANGER XP 1000 EPS"]], {
+          brand: "RGR",
+          title: "2018-2019 RANGER XP 1000 (DOHC)",
+          modelYears: "2018-2019",
+        }),
+        entry("9928102.pdf", [[2009, "Y09RZ17AB", "RZR 170, BLUE"]], {
+          brand: "RZR",
+          title: "2009 RZR 170 Service Manual",
+          modelYears: "2009",
+        }),
+        entry("9928103.pdf", [[2009, "R09VH76AD", "RZR S, RED"]], {
+          brand: "RZR",
+          title: "2009-2010 RANGER RZR / RZR S / RZR 4 Service Manual",
+          modelYears: "2009-2010",
+        }),
+      ],
+      "manual-list - sizes.csv",
+    );
+    // RANGER and XP from the 900's model, 1000 from its title: not a match.
+    assert.deepEqual(await searchIds({ year: 2019, model: "ranger xp 1000" }), sorted("r1000"));
+    assert.deepEqual(await searchIds({ model: "ranger xp 1000" }), sorted("r1000"));
+    // The whole title still counts: it names a RANGER 900.
+    assert.deepEqual(await searchIds({ year: 2019, model: "ranger 900" }), sorted("r900"));
+    // Short words and numbers only match whole title words: S isn't SERVICE.
+    assert.deepEqual(await searchIds({ year: 2009, model: "rzr s" }), sorted("rzrs"));
+  });
+
+  test("words every title has, and years, don't match titles", async () => {
+    for (const model of ["service", "manual", "service manual", "wire diagrams", "chapter", "2019", "2009 sportsman"]) {
+      assert.deepEqual(await listIds({ model }), [], model);
+    }
   });
 });
 

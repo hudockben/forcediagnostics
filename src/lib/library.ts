@@ -143,19 +143,54 @@ function brandMatches(filters: LibraryFilters, brand: SQL): SQL {
 // LIKE patterns can't be steered by what's typed.
 export const likeEscape = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
 
-// LIKE '% RZR%' on model_words or title_words: a word that starts so.
+// LIKE '% RZR%' on model_words: a word that starts so.
 const wordStart = (word: string) => `% ${likeEscape(word)}%`;
 
-// A Model filter word (see modelFilterWords) at the start of a word of a
-// model's number or description (cm), or of its entry's title: Polaris's
-// descriptions of older models often shorten the name the title spells out,
-// "SPM XP 850" in the "2009 SPORTSMAN XP 850 Service Manual". The entries
-// whose title has it are an array worked out once, not a join (see
-// manualsMatching).
-export function modelWordMatches(word: string): SQL {
-  return sql`(cm.model_words like ${wordStart(word)} or cm.file_key = any(array(
+// Words in Polaris's titles that say what kind of document it is, not which
+// machine ("2009 SPORTSMAN XP 850 Service Manual", "... - Wire Diagrams").
+const TITLE_NOISE = new Set([
+  "SERVICE", "MANUAL", "MANUALS", "WIRE", "WIRING", "DIAGRAM", "DIAGRAMS", "CHAPTER", "11X17", "SUPPLEMENT", "GUIDE",
+  "BOOK", "COMPLETE",
+]);
+
+// A Model word that is a model year (2019): titles name year ranges, so a
+// year never matches one.
+export const isModelYearWord = (word: string) => /^(19[5-9]\d|20\d\d)$/.test(word);
+
+// A title has every Model word: words with a digit, and short ones, only as
+// a whole word ("S" isn't SERVICE, "1000" isn't 10000), longer ones also at
+// the start of a word ("SPORT" for SPORTSMAN). Null when a word can't count
+// from a title (a year, or SERVICE, which most titles have).
+function titleHasWords(titleWords: SQL, words: string[]): SQL | null {
+  if (words.length === 0 || words.some((word) => TITLE_NOISE.has(word) || isModelYearWord(word))) return null;
+  const pattern = (word: string) =>
+    /\d/.test(word) || word.length < 3 ? `% ${likeEscape(word)} %` : `% ${likeEscape(word)}%`;
+  return sql.join(
+    words.map((word) => sql`${titleWords} like ${pattern(word)}`),
+    sql` and `,
+  );
+}
+
+// A model (cm) whose own number and description have every Model word (see
+// modelFilterWords) at the start of a word, or whose entry's title has every
+// one: Polaris's descriptions of older models often shorten the name the
+// title spells out, "SPM XP 850" in the "2009 SPORTSMAN XP 850 Service
+// Manual". Never some words from one and the rest from the other: a title
+// that covers several sizes or lines ("2018-2019 RANGER 900 / 1000") would
+// lend a model of one ("RANGER XP 900 EPS") the other's number, and a
+// "2019 Ranger XP 1000" would get the 900's manual. The entries whose title
+// has them are an array worked out once, not a join (see manualsMatching).
+// With titles: false, only the model's own words count.
+export function modelWordsMatch(words: string[], { titles = true } = {}): SQL {
+  const own = sql.join(
+    words.map((word) => sql`cm.model_words like ${wordStart(word)}`),
+    sql` and `,
+  );
+  const titled = titles ? titleHasWords(sql`td.title_words`, words) : null;
+  if (!titled) return sql`(${own})`;
+  return sql`((${own}) or cm.file_key = any(array(
     select td.file_key from manual_catalog_documents td
-    where td.shop_id = ${thisShop} and td.title_words like ${wordStart(word)}
+    where td.shop_id = ${thisShop} and ${titled}
   )))`;
 }
 
@@ -187,7 +222,7 @@ function namesOfManualsWithBrand(filters: LibraryFilters): SQL {
 // once for each of its names the list has, and matches when one of those
 // entries matches every filter. Year and Model have to match the same model
 // ("a 2020 RZR XP 1000"), not two different ones, though Model's words can be
-// in the entry's title too (see modelWordMatches). An entry with no brand
+// in the entry's title instead (see modelWordsMatch). An entry with no brand
 // counts as having the brands of the manual's other entries: Polaris lists
 // the RZR 800 manual's 2013 models under a name with no brand, and its 2014
 // ones under a RZR name. Manuals that aren't in the model list never match
@@ -198,7 +233,7 @@ function namesOfManualsWithBrand(filters: LibraryFilters): SQL {
 // runs again for every page, manual or entry it checks, which takes seconds
 // to minutes whenever it underestimates the shop's list (before it has
 // statistics on a freshly imported one, say). A join inside an array can go
-// the same way, which is why modelWordMatches looks titles up in an array of
+// the same way, which is why modelWordsMatch looks titles up in an array of
 // their own rather than joining each model to its entry.
 function manualsMatching(filters: LibraryFilters): SQL | null {
   const conditions: SQL[] = [];
@@ -217,14 +252,14 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
   if (byModel) {
     const model = [
       ...(filters.year === undefined ? [] : [sql`cm.model_year = ${filters.year}`]),
-      ...words.map((word) => modelWordMatches(word)),
+      ...(words.length > 0 ? [modelWordsMatch(words)] : []),
     ];
     const covered = sql`d.file_key = any(${entriesWithModels(model)})`;
     if (filters.year === undefined) {
       // Model alone: an entry whose title has every word matches whatever
       // its models, so one listed without any models matches too.
-      const titled = words.map((word) => sql`d.title_words like ${wordStart(word)}`);
-      conditions.push(sql`(${covered} or (${sql.join(titled, sql` and `)}))`);
+      const titled = titleHasWords(sql`d.title_words`, words);
+      conditions.push(titled ? sql`(${covered} or (${titled}))` : covered);
     } else if (words.length > 0) {
       conditions.push(covered);
     } else {

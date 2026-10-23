@@ -504,6 +504,41 @@ describe("Claude's tools", () => {
     assert.equal(notInTitle.scope?.label, "2023 Scrambler 1000 (40 models)");
   });
 
+  test("find_unit_manuals with a year takes the model named so over its manual's other models", async () => {
+    const shop = await createShop(`dt${suffix}`);
+    const admin = await createUser(shop, "admin", "Di");
+    const rzr = await addManual(admin, "9927000.pdf", ["RZR S 1000 clutch."]);
+    const r900 = await addManual(admin, "9927001.pdf", ["Ranger 900 clutch."]);
+    const r1000 = await addManual(admin, "9927002.pdf", ["Ranger XP 1000 clutch."]);
+    await importModels(admin, [
+      {
+        fileName: "9927000.pdf",
+        brand: "RZR",
+        title: "2017-2020 RZR 900 / S 900 / S 1000 / S4 1000",
+        models: [
+          [2018, "Z18VBE99BW", "RZR S 1000 EPS"],
+          [2018, "Z18VCE87A2", "RZR 900 EPS"],
+          [2018, "Z18VFE99AK", "RZR XP 4 1000"],
+        ],
+      },
+      { fileName: "9927001.pdf", brand: "RGR", title: "2018-2019 RANGER 900 / 1000", models: [[2019, "R19RRE99A1", "RANGER XP 900 EPS"]] },
+      { fileName: "9927002.pdf", brand: "RGR", title: "2018-2019 RANGER XP 1000 (DOHC)", models: [[2019, "R19RSE99A1", "RANGER XP 1000 EPS"]] },
+    ]);
+    // The one model is the unit, not every model the title covers.
+    const one = await findUnitManuals(shop.id, { description: "RZR S 1000", year: 2018 });
+    assert.equal(one.result.models_found, 1);
+    assert.deepEqual(one.scope?.manualIds, [rzr]);
+    assert.equal(one.scope?.label, "2018 RZR S 1000 EPS — Z18VBE99BW");
+    // A year in the name with none given is the year.
+    const named = await findUnitManuals(shop.id, { description: "2018 RZR S 1000" });
+    assert.equal(named.result.models_found, 1);
+    assert.deepEqual(named.scope?.manualIds, [rzr]);
+    // A title naming two sizes doesn't bring the other size's manual in.
+    const ranger = await findUnitManuals(shop.id, { description: "Ranger XP 1000", year: 2019 });
+    assert.deepEqual(ranger.scope?.manualIds, [r1000]);
+    assert.ok(!ranger.scope?.manualIds.includes(r900));
+  });
+
   test("find_unit_manuals says so when nothing matches, and leaves the scope", async () => {
     const lookup = await findUnitManuals(techA.shop.id, { model_number: "X99ZZZ00" });
     assert.equal(lookup.scope, null);

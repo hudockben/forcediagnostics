@@ -6,7 +6,15 @@ import { withShop } from "@/db";
 import { manualPages, manuals } from "@/db/schema";
 import { DIAGNOSE_LIMITS, isUuid, unitLabel, type ScopeView, type UnitSuggestion } from "@/lib/diagnose-rules";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
-import { cleanSearchQuery, likeEscape, modelFilterWords, modelWordMatches, searchManuals, uuidArray } from "@/lib/library";
+import {
+  cleanSearchQuery,
+  isModelYearWord,
+  likeEscape,
+  modelFilterWords,
+  modelWordsMatch,
+  searchManuals,
+  uuidArray,
+} from "@/lib/library";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import { CATALOG_LIMITS, cleanCatalogText, isModelYear } from "@/lib/manual-catalog-rules";
 import { chooseVehicle, vehicleForUnit } from "@/lib/unit-vehicle";
@@ -162,11 +170,13 @@ export async function findUnitManuals(
 ): Promise<UnitLookup> {
   const number = cleanModelNumber(input.model_number);
   const description = cutText(cleanCatalogText(typeof input.description === "string" ? input.description : "") ?? "", 60);
-  const year = isModelYear(Number(input.year)) ? Number(input.year) : null;
-  // The year in the name as well ("2019 RZR XP 1000") is the year asked for,
-  // which the models' own years have to match, not a word their names or
-  // titles need.
   const named = modelFilterWords(description);
+  // A year in the name ("2019 RZR XP 1000") is the year asked for, which the
+  // models' own years have to match, not a word their names or titles need;
+  // when no year is given, the name's year is the year.
+  const givenYear = isModelYear(Number(input.year)) ? Number(input.year) : null;
+  const namedYear = named.find((word) => isModelYearWord(word) && isModelYear(Number(word)));
+  const year = givenYear ?? (namedYear ? Number(namedYear) : null);
   const words = year === null ? named : named.filter((word) => word !== String(year));
   if (!number && words.length === 0) {
     return {
@@ -191,7 +201,13 @@ export async function findUnitManuals(
     }
   }
   if (found.count === 0 && words.length > 0) {
-    found = await modelsWhere(shopId, [...words.map((word) => modelWordMatches(word)), ...yearCondition]);
+    // With a year, the models whose own names have the words are the unit
+    // ("2018 RZR S 1000" is one model); a title that has them ("2017-2020
+    // RZR 900 / S 900 / S 1000 / S4 1000") only counts when none does, as
+    // for older models whose names Polaris shortened. Without a year, both,
+    // so a line's older manuals aren't left out.
+    if (year !== null) found = await modelsWhere(shopId, [modelWordsMatch(words, { titles: false }), ...yearCondition]);
+    if (found.count === 0) found = await modelsWhere(shopId, [modelWordsMatch(words), ...yearCondition]);
     // Not "2019 2019 RZR XP 1000" when the description has the year already.
     how = words.length < named.length ? description : [year, description].filter(Boolean).join(" ");
     byName = true;
