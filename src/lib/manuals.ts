@@ -15,6 +15,7 @@ import {
   manualModelYears,
   manualOtherNames,
 } from "@/lib/manual-catalog";
+import { withoutCopyNumber } from "@/lib/manual-catalog-rules";
 import {
   MAX_MANUAL_BYTES,
   MAX_MANUAL_PAGES,
@@ -178,6 +179,7 @@ async function linkName(
     .values({ shopId: actor.shop.id, manualId: manual.id, fileName })
     .onConflictDoNothing()
     .returning({ fileName: manualFileNames.fileName });
+  await linkWithoutCopyNumber(tx, actor.shop.id, manual.id, fileName);
   let takenFrom: string | null = null;
   if (!added) {
     const owner = await ownerOfName(tx, fileName);
@@ -208,8 +210,16 @@ async function takeOwnName(tx: ShopTransaction, shopId: string, manual: { id: st
     .insert(manualFileNames)
     .values({ shopId, manualId: manual.id, fileName: manual.fileName })
     .onConflictDoNothing();
+  await linkWithoutCopyNumber(tx, shopId, manual.id, manual.fileName);
   const owner = await ownerOfName(tx, manual.fileName);
   return owner === manual.id || (owner !== null && (await claimName(tx, manual.id, owner, manual.fileName)));
+}
+
+// "X (1).pdf" is also known as "X.pdf", the name the model list has, unless
+// some manual already is. Never taken from another manual.
+async function linkWithoutCopyNumber(tx: ShopTransaction, shopId: string, manualId: string, fileName: string) {
+  const plain = withoutCopyNumber(fileName);
+  if (plain) await tx.insert(manualFileNames).values({ shopId, manualId, fileName: plain }).onConflictDoNothing();
 }
 
 // The manual a file's hash belongs to, if it's in the library already, with
@@ -284,6 +294,7 @@ export async function startManualUpload(
       });
       // Its own name, unless another manual (a different file) has it.
       await tx.insert(manualFileNames).values({ shopId: actor.shop.id, manualId: id, fileName }).onConflictDoNothing();
+      await linkWithoutCopyNumber(tx, actor.shop.id, id, fileName);
     });
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;

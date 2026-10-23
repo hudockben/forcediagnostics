@@ -64,6 +64,19 @@ export type CatalogFile = {
 // database works out its own key with lower(); this one groups rows.)
 export const catalogKey = (fileName: string) => fileName.toLowerCase();
 
+// The number a browser adds when it saves a file whose name is taken
+// ("X (1).pdf", or "X(1).pdf" in Firefox). Downloading Polaris's manuals a
+// second time into the same folder gives every file one, and the list only
+// knows "X.pdf". Only one or two digits, so a name like "2020 RZR APEX RC LE
+// (2415113).pdf" is left alone. drizzle/0015_manual_copy_numbers.sql uses the
+// same pattern.
+const COPY_NUMBER = /\s?\(\d{1,2}\)(\.pdf)$/i;
+
+// The name without a browser's copy number, or null when it has none.
+export function withoutCopyNumber(fileName: string): string | null {
+  return COPY_NUMBER.test(fileName) ? fileName.replace(COPY_NUMBER, "$1") : null;
+}
+
 // What the Library calls Polaris's category codes (the list's Brand column),
 // and which kind of vehicle each is, for the Vehicle filter. A code that
 // isn't here shows as it is, under Other.

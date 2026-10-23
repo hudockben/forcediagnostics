@@ -44,6 +44,7 @@ import {
   catalogBatches,
   compareBrands,
   listsBrands,
+  withoutCopyNumber,
   type CatalogFile,
   type CatalogModel,
 } from "../src/lib/manual-catalog-rules";
@@ -767,5 +768,128 @@ describe("file names shop isolation", () => {
       (error: Error & { cause?: { code?: string } }) => error.cause?.code === "23503",
     );
     assert.deepEqual(await namesOf(manualA), ["Isolated.pdf"]);
+  });
+});
+
+describe("browser copy numbers", () => {
+  test("only a browser's one- or two-digit copy number comes off", () => {
+    assert.equal(withoutCopyNumber("9921315_WIRE DIAGRAMS (1).pdf"), "9921315_WIRE DIAGRAMS.pdf");
+    assert.equal(withoutCopyNumber("9942477r02 (12).pdf"), "9942477r02.pdf");
+    // Firefox leaves out the space; the extension can be upper case.
+    assert.equal(withoutCopyNumber("9942508(1).PDF"), "9942508.PDF");
+    assert.equal(withoutCopyNumber("9942508.pdf"), null);
+    // A part number in brackets is part of the name.
+    assert.equal(withoutCopyNumber("2020 RZR APEX RC LE (2415113).pdf"), null);
+    assert.equal(withoutCopyNumber("9923416 - CH 1-5.pdf"), null);
+    assert.equal(withoutCopyNumber("Notes (1).txt"), null);
+  });
+
+  test("a manual added as 'X (1).pdf' is also known as 'X.pdf' and gets its entry", async () => {
+    const plain = `99${suffix}_WIRE DIAGRAMS.pdf`;
+    const id = await addManual(adminB, `99${suffix}_WIRE DIAGRAMS (1).pdf`, ["Wiring for the copy-number test."]);
+    assert.deepEqual((await namesOf(id)).sort(), [plain, `99${suffix}_WIRE DIAGRAMS (1).pdf`].sort());
+    await importEntries(adminB, [
+      entry(plain, [[2012, `R12CN${suffix}`, "RANGER 800 EFI"]], { brand: "RGR", title: "2012 Ranger 800 Wiring Diagrams", modelYears: "2012" }),
+    ]);
+    const listed = (await listManuals(adminB.shop.id)).find((manual) => manual.id === id);
+    assert.equal(listed?.title, "2012 Ranger 800 Wiring Diagrams");
+    assert.deepEqual(listed?.brands, ["RGR"]);
+    assert.deepEqual(
+      (await manualsForModel(adminB.shop.id, `R12CN${suffix}`)).map((manual) => manual.id),
+      [id],
+    );
+    const summary = await catalogSummary(adminB.shop.id);
+    assert.ok(!summary.notListed.some((manual) => manual.id === id), JSON.stringify(summary.notListed));
+    assert.ok(!summary.missingPdfs.some((missing) => missing.fileName === plain), JSON.stringify(summary.missingPdfs));
+  });
+
+  test("the plain name stays with a manual that already has it", async () => {
+    const plain = `98${suffix}.pdf`;
+    const first = await addManual(adminB, plain, ["The original."]);
+    const second = await addManual(adminB, `98${suffix} (1).pdf`, ["A different file under a numbered name."]);
+    assert.equal(await ownerOf(adminB.shop.id, plain), first);
+    assert.deepEqual(await namesOf(second), [`98${suffix} (1).pdf`]);
+    // Choosing the numbered copy of the first file again links only that name.
+    skipped(await startCopy(adminB, first, `98${suffix} (2).pdf`));
+    assert.equal(await ownerOf(adminB.shop.id, plain), first);
+    assert.equal(await ownerOf(adminB.shop.id, `98${suffix} (2).pdf`), first);
+  });
+});
+
+describe("the copy-number migration", () => {
+  test("numbered names also get their plain name, never one another manual has", async () => {
+    const migration = readFileSync(new URL("../drizzle/0015_manual_copy_numbers.sql", import.meta.url), "utf8");
+    const [backfill] = migration
+      .split("--> statement-breakpoint")
+      .map((statement) => statement.replace(/^--.*$/gm, "").trim())
+      .filter((statement) => statement.startsWith("INSERT INTO"));
+    assert.ok(backfill, "the migration has a backfill");
+
+    const shopId = adminA.shop.id;
+    const manual = (fileName: string, createdAt: string, status = "ready") => ({
+      id: randomUUID(),
+      fileName,
+      status,
+      createdAt: new Date(createdAt),
+    });
+    const numbered = manual("9921315_WIRE DIAGRAMS (1).pdf", "2026-10-01T00:00:00Z");
+    const firefox = manual("9942508(1).PDF", "2026-10-01T00:00:01Z");
+    const original = manual("9950200.pdf", "2026-10-01T00:00:02Z");
+    const different = manual("9950200 (1).pdf", "2026-10-01T00:00:03Z");
+    const stalled = manual("9950300 (1).pdf", "2026-09-01T00:00:00Z", "uploading");
+    const ready = manual("9950300 (2).pdf", "2026-10-02T00:00:00Z");
+    const partNumber = manual("2020 RZR APEX RC LE (2415113).pdf", "2026-10-03T00:00:00Z");
+    const all = [numbered, firefox, original, different, stalled, ready, partNumber];
+
+    let names: { manualId: string; fileName: string }[] = [];
+    let again = 0;
+    await systemDb
+      .transaction(async (tx) => {
+        await tx.execute(sql`create temp table manuals (like public.manuals including all) on commit drop`);
+        await tx.execute(
+          sql`create temp table manual_file_names (like public.manual_file_names including all) on commit drop`,
+        );
+        await tx.execute(sql`
+          insert into pg_temp.manuals (id, shop_id, title, file_name, sha256, size_bytes, storage_key, status, page_count, created_at)
+          values ${sql.join(
+            all.map(
+              (m) =>
+                sql`(${m.id}, ${shopId}, ${m.fileName}, ${m.fileName}, ${randomSha()}, 1, ${"shops/x/manuals/x.pdf"}, ${m.status}, 1, ${m.createdAt})`,
+            ),
+            sql`, `,
+          )}
+        `);
+        // Each manual is known by its own name, as 0014 left them.
+        await tx.execute(sql`
+          insert into pg_temp.manual_file_names (shop_id, manual_id, file_name, created_at)
+          select shop_id, id, file_name, created_at from pg_temp.manuals
+        `);
+        await tx.execute(sql.raw(backfill));
+        const read = async () =>
+          (
+            await tx.execute<{ manual_id: string; file_name: string }>(
+              sql`select manual_id, file_name from pg_temp.manual_file_names order by file_key`,
+            )
+          ).rows.map((row) => ({ manualId: row.manual_id, fileName: row.file_name }));
+        names = await read();
+        // Running it again (a retried deploy) changes nothing.
+        await tx.execute(sql.raw(backfill));
+        again = (await read()).length;
+        tx.rollback();
+      })
+      .catch((error) => {
+        if (!(error instanceof TransactionRollbackError)) throw error;
+      });
+    const owner = (fileName: string) => names.find((name) => name.fileName.toLowerCase() === fileName.toLowerCase())?.manualId;
+    assert.equal(owner("9921315_WIRE DIAGRAMS.pdf"), numbered.id);
+    assert.equal(owner("9942508.pdf"), firefox.id);
+    // The plain name already belonged to a different file.
+    assert.equal(owner("9950200.pdf"), original.id);
+    // Two numbered names for one plain name: the ready manual gets it.
+    assert.equal(owner("9950300.pdf"), ready.id);
+    // A part number in brackets isn't a copy number.
+    assert.equal(owner("2020 RZR APEX RC LE.pdf"), undefined);
+    assert.equal(names.length, all.length + 3);
+    assert.equal(again, names.length);
   });
 });
