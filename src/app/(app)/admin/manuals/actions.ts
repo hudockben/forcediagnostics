@@ -9,6 +9,7 @@ import {
   type CatalogFinishResult,
   type CatalogSaveResult,
 } from "@/lib/manual-catalog";
+import { listOcrWork, ocrFileUrl, saveOcrPages, type OcrSaveResult, type OcrWork } from "@/lib/manual-ocr";
 import type { PageText } from "@/lib/manual-rules";
 import {
   confirmManualUpload,
@@ -25,7 +26,8 @@ import { isStorageConfigured, r2Storage } from "@/lib/storage";
 
 // The uploader on System Admin > Manuals calls these for each file, in
 // order (see src/lib/manuals.ts), and for the model list (see
-// src/lib/manual-catalog.ts). Every action re-checks the permission: server
+// src/lib/manual-catalog.ts); the Scanned pages card for OCR (see
+// src/lib/manual-ocr.ts). Every action re-checks the permission: server
 // actions can be called directly, not just from the page.
 
 async function attempt<T>(what: string, run: () => Promise<T | { error: string }>) {
@@ -107,5 +109,27 @@ export async function finishModelList(input: {
       leftOut: Number(input?.leftOut),
       rowsWithoutFile: Number(input?.rowsWithoutFile),
     });
+  });
+}
+
+export async function listScannedPages(): Promise<OcrWork | { error: string }> {
+  return attempt("list scanned pages", async () => {
+    const admin = await requireCapability("settings.manage");
+    return listOcrWork(admin);
+  });
+}
+
+export async function getScannedFileUrl(input: { manualId: string }): Promise<{ url: string } | { error: string }> {
+  return attempt("hand out a manual's file for OCR", async () => {
+    const admin = await requireCapability("settings.manage");
+    if (!isStorageConfigured) return storageMissing;
+    return ocrFileUrl(admin, { manualId: String(input?.manualId ?? "") }, r2Storage);
+  });
+}
+
+export async function saveScannedText(input: { manualId: string; pages: PageText[] }): Promise<OcrSaveResult> {
+  return attempt("save text read by OCR", async () => {
+    const admin = await requireCapability("settings.manage");
+    return saveOcrPages(admin, { manualId: String(input?.manualId ?? ""), pages: input?.pages });
   });
 }

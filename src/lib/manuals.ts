@@ -471,6 +471,8 @@ export type ManualSummary = {
   sizeBytes: number;
   pageCount: number | null;
   pagesWithoutText: number | null;
+  // Scanned pages OCR found text on; null until it has read any.
+  pagesReadByOcr: number | null;
   uploadedByName: string | null;
   createdAt: Date;
 };
@@ -494,6 +496,7 @@ export function listManuals(shopId: string): Promise<ManualSummary[]> {
         sizeBytes: manuals.sizeBytes,
         pageCount: manuals.pageCount,
         pagesWithoutText: manuals.pagesWithoutText,
+        pagesReadByOcr: manuals.pagesReadByOcr,
         uploadedByName: users.name,
         createdAt: manuals.createdAt,
       })

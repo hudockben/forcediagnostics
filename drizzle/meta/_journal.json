@@ -113,6 +113,20 @@
       "when": 1792756318365,
       "tag": "0015_manual_copy_numbers",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1792758541554,
+      "tag": "0016_manual_ocr",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792758546959,
+      "tag": "0017_manual_ocr_grants",
+      "breakpoints": true
     }
   ]
 }

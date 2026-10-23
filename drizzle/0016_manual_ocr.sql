@@ -1,0 +1,3 @@
+ALTER TABLE "manual_pages" ADD COLUMN "ocr_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "manuals" ADD COLUMN "pages_read_by_ocr" integer;--> statement-breakpoint
+CREATE INDEX "manual_pages_to_read" ON "manual_pages" USING btree ("manual_id","page_number") WHERE "manual_pages"."ocr_at" is null and octet_length("manual_pages"."text") < 64 and length("manual_pages"."search_vector") = 0;

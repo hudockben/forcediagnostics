@@ -106,6 +106,14 @@ export function needsPasswordSession(capability: Capability) {
   return PASSWORD_ONLY.has(capability);
 }
 
+// Whether this user, signed in the way they are, may use a capability. Admin
+// areas need a password sign-in, not a PIN (`bay` is set for PIN sessions on
+// a bay tablet; see CurrentUser in src/lib/session.ts).
+export function allows(user: { role: Role; bay: object | null }, capability: Capability) {
+  if (user.bay && needsPasswordSession(capability)) return false;
+  return can(user.role, capability);
+}
+
 // The System Admin sections, in menu order. The tab opens the first one the
 // user may use.
 export const ADMIN_SECTIONS: { href: string; label: string; capability: Capability }[] = [

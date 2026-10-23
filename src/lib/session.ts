@@ -10,7 +10,7 @@ import { bayDevices, sessions, shops, users, type Role } from "@/db/schema";
 import { getAuth } from "@/lib/auth";
 import { BAY_COOKIE, findDeviceByToken, tokenMatches } from "@/lib/bay";
 import { PIN_SESSION_MAX_MS } from "@/lib/bay-pin-plugin";
-import { can, needsPasswordSession, type Capability } from "@/lib/permissions";
+import { allows, type Capability } from "@/lib/permissions";
 
 // The tablet locks itself after 5 idle minutes; the server ends the session
 // a minute later in case the tablet couldn't (asleep, offline, closed). The
@@ -131,12 +131,9 @@ export async function getCurrentUser(): Promise<CurrentUser> {
   return result.user;
 }
 
-// Whether this user, signed in the way they are, may use a capability. Admin
-// areas need a password sign-in, not a PIN.
-export function allows(user: CurrentUser, capability: Capability) {
-  if (user.bay && needsPasswordSession(capability)) return false;
-  return can(user.role, capability);
-}
+// Whether this user, signed in the way they are, may use a capability (see
+// src/lib/permissions.ts).
+export { allows };
 
 // For pages and server actions that need a permission: sends anyone without
 // it back to the Home tab.

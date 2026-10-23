@@ -22,6 +22,8 @@
 
 # pdf.js image decoders, copied by scripts/copy-pdfjs-wasm.mjs
 /public/pdfjs/
+# Tesseract.js worker, engine and English data, copied by scripts/copy-tesseract.mjs
+/public/tesseract/
 
 # misc
 .DS_Store

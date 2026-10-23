@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   check,
@@ -369,7 +370,11 @@ export const manuals = pgTable(
     status: text("status").notNull().$type<ManualStatus>().default("uploading"),
     pageCount: integer("page_count"),
     // Pages with no text layer (usually scanned), which search can't find.
+    // Counted again when OCR has read a manual's scanned pages.
     pagesWithoutText: integer("pages_without_text"),
+    // Scanned pages OCR found text on (see src/lib/manual-ocr.ts); null
+    // until OCR has read any of its pages.
+    pagesReadByOcr: integer("pages_read_by_ocr"),
     uploadedByUserId: text("uploaded_by_user_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -409,6 +414,16 @@ export const manuals = pgTable(
   ],
 );
 
+// A page OCR still has to read: nothing search can find on it (no text
+// layer, or only a stray mark or two) and OCR hasn't read it yet. The short
+// text check comes first because it's cheap: Postgres knows a text's length
+// without reading it, so the index on this doesn't read every page's words
+// when it's built. Queries for these pages must use exactly this condition
+// (manualPageToRead) for Postgres to use that index.
+function pageToRead(page: { ocrAt: AnyPgColumn; text: AnyPgColumn; searchVector: AnyPgColumn }) {
+  return sql`${page.ocrAt} is null and octet_length(${page.text}) < 64 and length(${page.searchVector}) = 0`;
+}
+
 // The text of each page of a manual, for full-text search.
 export const manualPages = pgTable(
   "manual_pages",
@@ -420,9 +435,15 @@ export const manualPages = pgTable(
     searchVector: tsvector("search_vector").generatedAlwaysAs(
       sql`to_tsvector('english', "text")`,
     ),
+    // When OCR read this page (a scanned page with no text layer), even if
+    // it found no words, so it isn't read again. Null for every other page.
+    ocrAt: timestamp("ocr_at", { withTimezone: true }),
   },
   (t) => [
     primaryKey({ name: "manual_pages_pk", columns: [t.manualId, t.pageNumber] }),
+    // The scanned pages OCR still has to read (see pageToRead above), so
+    // finding them never reads the whole table: it only ever holds those.
+    index("manual_pages_to_read").on(t.manualId, t.pageNumber).where(pageToRead(t)),
     // A page can only ever belong to a manual in its own shop.
     foreignKey({
       name: "manual_pages_manual_shop_fk",
@@ -449,6 +470,8 @@ export const manualPages = pgTable(
     }),
   ],
 );
+
+export const manualPageToRead = pageToRead(manualPages);
 
 // Every file name a manual is known by: its own, and the names of
 // byte-identical copies that were added after it (Polaris lists some PDFs

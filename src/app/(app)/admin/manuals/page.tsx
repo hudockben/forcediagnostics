@@ -6,11 +6,13 @@ import { LocalTime } from "@/components/app/local-time";
 import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { catalogSummary, type CatalogSummary } from "@/lib/manual-catalog";
 import { brandLabel, compareBrands } from "@/lib/manual-catalog-rules";
+import { listOcrWork } from "@/lib/manual-ocr";
 import { formatBytes } from "@/lib/manual-rules";
 import { listManuals, type ManualSummary } from "@/lib/manuals";
 import { requireCapability } from "@/lib/session";
 import { STORAGE_ENV_VARS, isStorageConfigured } from "@/lib/storage";
 
+import { ScannedPages } from "./scanned-pages";
 import { ManualUploader } from "./uploader";
 
 export const metadata: Metadata = { title: "Manuals" };
@@ -41,7 +43,26 @@ function ModelListLine({ manual }: { manual: ManualSummary }) {
   return <p className="text-xs text-ink">{parts.join(" · ")}</p>;
 }
 
-function ManualRow({ manual }: { manual: ManualSummary }) {
+// What OCR has done for a manual's scanned pages, and what's still without
+// text. `toRead`: its scanned pages OCR hasn't read yet.
+function ScannedLines({ manual, toRead }: { manual: ManualSummary; toRead: number }) {
+  const read = manual.pagesReadByOcr ?? 0;
+  const without = manual.pagesWithoutText ?? 0;
+  return (
+    <>
+      {read > 0 && <p className="text-xs text-ink-muted">{plural(read, "page", "pages")} read by OCR</p>}
+      {without > 0 && (
+        <p className="text-xs text-trail">
+          {toRead > 0
+            ? `${plural(without, "page", "pages")} not searchable — scanned pages with no text. Scanned pages above can read them; they still show in the viewer.`
+            : `${plural(without, "page", "pages")} still not searchable — no words found on them (blank pages or pictures). They still show in the viewer.`}
+        </p>
+      )}
+    </>
+  );
+}
+
+function ManualRow({ manual, toRead }: { manual: ManualSummary; toRead: number }) {
   const ready = manual.status === "ready";
   return (
     <li className="space-y-1 px-5 py-3 sm:px-6">
@@ -67,12 +88,7 @@ function ManualRow({ manual }: { manual: ManualSummary }) {
       {manual.otherNames.length > 0 && (
         <p className="text-xs break-words text-ink-muted">Also named {manual.otherNames.join(", ")}</p>
       )}
-      {ready && (manual.pagesWithoutText ?? 0) > 0 && (
-        <p className="text-xs text-trail">
-          {plural(manual.pagesWithoutText ?? 0, "page", "pages")} not searchable — scanned pages with no text.
-          They still show in the viewer.
-        </p>
-      )}
+      {ready && <ScannedLines manual={manual} toRead={toRead} />}
       {!ready && (
         <p className="text-xs text-trail">
           Not finished yet. If it isn&apos;t being added above, add {manual.fileName} again to finish it.
@@ -159,7 +175,12 @@ function ModelListCard({ summary }: { summary: CatalogSummary }) {
 
 async function Manuals() {
   const admin = await requireCapability("settings.manage");
-  const [manuals, summary] = await Promise.all([listManuals(admin.shop.id), catalogSummary(admin.shop.id)]);
+  const [manuals, summary, ocr] = await Promise.all([
+    listManuals(admin.shop.id),
+    catalogSummary(admin.shop.id),
+    listOcrWork(admin),
+  ]);
+  const toRead = new Map("error" in ocr ? [] : ocr.manuals.map((manual) => [manual.id, manual.pages.length]));
   const ready = manuals.filter((manual) => manual.status === "ready");
   const pages = ready.reduce((total, manual) => total + (manual.pageCount ?? 0), 0);
   const bytes = ready.reduce((total, manual) => total + manual.sizeBytes, 0);
@@ -196,6 +217,15 @@ async function Manuals() {
         </Notice>
       )}
 
+      {isStorageConfigured && (
+        <Card
+          title="Scanned pages"
+          description="Some manuals are scans: pictures of pages, with no text for search to find. This reads the words on them (OCR) right here in this browser, straight from the shop's storage, so the pages never go anywhere else. It reads English and does best on printed text; drawings, photos and handwriting come out patchy or not at all. Text that came with a PDF is never changed."
+        >
+          <ScannedPages manuals={toRead.size} pages={"error" in ocr ? 0 : ocr.pages} />
+        </Card>
+      )}
+
       <ModelListCard summary={summary} />
 
       <Card title="In the library">
@@ -218,7 +248,7 @@ async function Manuals() {
         ) : (
           <ul className="-mx-5 mt-4 -mb-5 divide-y divide-white/10 border-t border-white/10 sm:-mx-6 sm:-mb-6">
             {manuals.map((manual) => (
-              <ManualRow key={manual.id} manual={manual} />
+              <ManualRow key={manual.id} manual={manual} toRead={toRead.get(manual.id) ?? 0} />
             ))}
           </ul>
         )}

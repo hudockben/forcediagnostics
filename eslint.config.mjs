@@ -14,6 +14,8 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     // pdf.js's decoders, copied in by scripts/copy-pdfjs-wasm.mjs.
     "public/pdfjs/**",
+    // Tesseract.js's worker and engine, copied in by scripts/copy-tesseract.mjs.
+    "public/tesseract/**",
   ]),
 ]);
 

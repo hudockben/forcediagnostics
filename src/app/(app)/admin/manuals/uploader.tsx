@@ -387,12 +387,14 @@ export function ManualUploader() {
         update(id, {
           state: "added",
           progress: 1,
+          // Scanned pages are read afterwards, all together, by the Scanned
+          // pages card: OCR is far slower than adding a file.
           message:
             (finished.pagesWithoutText > 0
-              ? `Added · ${pages}, ${finished.pagesWithoutText} not searchable (scanned)`
+              ? `Added · ${pages}, ${finished.pagesWithoutText} not searchable (scanned). Read them with Scanned pages below.`
               : `Added · ${pages}`) +
             (finished.nameTaken
-              ? `. A different manual is already called ${file.name}, so the model list goes with that one.`
+              ? `${finished.pagesWithoutText > 0 ? "" : "."} A different manual is already called ${file.name}, so the model list goes with that one.`
               : ""),
         });
       } finally {
