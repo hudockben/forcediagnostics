@@ -2,7 +2,7 @@ import type { DrawnSystem, UnitVehicle } from "@/lib/diagnose-zones";
 
 import { buildAtv } from "./atv";
 import { buildGenerator } from "./generator";
-import { camera, model, polygonPath, polylinePath, type Camera, type El, type Model, type P2, type V3 } from "./iso";
+import { camera, model, polygonPath, type Camera, type El, type Model, type P2, type V3 } from "./iso";
 import { buildUtv } from "./utv";
 
 // A unit drawing, ready to render: the line-work in painting order (far to
@@ -23,8 +23,6 @@ export type Drawing = {
   pieces: { zone: DrawnSystem; el: El }[];
   zones: Partial<Record<DrawnSystem, ZoneShape>>;
   ground: string;
-  // A faint grid on the ground under it, for the HUD look.
-  grid: string;
   box: { x: number; y: number; w: number; h: number };
 };
 
@@ -97,16 +95,6 @@ export function drawingFor(vehicle: UnitVehicle): Drawing {
   ];
   const groundPoints = groundCorners.map(m.cam.project);
   const ground = polygonPath(groundPoints);
-  const step = vehicle === "generator" ? 14 : 30;
-  const margin = step * 2;
-  const lines: string[] = [];
-  for (let x = Math.ceil((x0 - margin) / step) * step; x <= x1 + margin; x += step) {
-    lines.push(polylinePath([m.cam.project([x, y0 - margin, 0]), m.cam.project([x, y1 + margin, 0])]));
-  }
-  for (let y = Math.ceil((y0 - margin) / step) * step; y <= y1 + margin; y += step) {
-    lines.push(polylinePath([m.cam.project([x0 - margin, y, 0]), m.cam.project([x1 + margin, y, 0])]));
-  }
-  const grid = lines.join("");
   const pieces = layers.flatMap((layer) => layer.els.map((el) => ({ zone: layer.zone, el })));
   const base = merge(
     pieces.map((piece) => piece.el),
@@ -127,7 +115,6 @@ export function drawingFor(vehicle: UnitVehicle): Drawing {
     pieces,
     zones,
     ground,
-    grid,
     box: {
       x: Math.floor(bounds.minX - pad),
       y: Math.floor(bounds.minY - pad),
@@ -140,7 +127,7 @@ export function drawingFor(vehicle: UnitVehicle): Drawing {
 }
 
 // The line-work without the lit systems, which are drawn once, on top, in
-// their glow (so a lit drawing isn't bigger than an unlit one by more than
+// their colours (so a lit drawing isn't bigger than an unlit one by more than
 // its labels). Kept for the last few sets of lit systems.
 const without = new Map<string, Path[]>();
 

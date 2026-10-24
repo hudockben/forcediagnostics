@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 
 import { Badge, Notice, PageHeading } from "@/components/app/ui";
 import { inputBaseClass, labelClass, primaryLinkClass } from "@/components/hud";
@@ -19,12 +19,13 @@ import {
   type TurnView,
   type UnitSuggestion,
 } from "@/lib/diagnose-rules";
+import { claudeSummary, openTurnIds, techSummary } from "@/lib/diagnose-thread";
 import type { Vehicle } from "@/lib/manual-catalog-rules";
 
 import { Chevron, vehicleOptions } from "../library/search-form";
 import { loadConversationAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
-import { CausesIcon, ChatIcon, ChevronIcon, GlobeIcon, PageIcon, ReplyIcon, SearchIcon } from "./icons";
+import { CausesIcon, ChatIcon, ChevronIcon, GlobeIcon, PageIcon, ReplyIcon, SearchIcon, WorkingIcon } from "./icons";
 import { PlainText } from "./plain-text";
 import { UnitPicker } from "./unit-picker";
 
@@ -80,7 +81,7 @@ function ProgressList({ steps, live }: { steps: ProgressStep[]; live: boolean })
           <li key={`${step.at}-${index}`} className="flex items-start gap-2">
             <span
               aria-hidden
-              className={`mt-2 size-1.5 shrink-0 rounded-full ${current ? "hud-pulse bg-glow" : "bg-glow/40"}`}
+              className={`mt-2 size-1.5 shrink-0 rounded-full ${current ? "bg-glow" : "bg-glow/40"}`}
             />
             <span className={`break-words ${current ? "text-ink" : ""}`}>
               {step.label}
@@ -143,10 +144,10 @@ function TechText({ turn }: { turn: TurnView }) {
   if (opening) {
     return (
       <div className="space-y-2">
-        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-sm leading-6">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm leading-5">
           {opening.rows.map((row) => (
             <Fragment key={row.label}>
-              <dt className="pt-[2px] font-mono text-[11px] tracking-[0.14em] text-glow/80 uppercase">{OPENING_SHORT[row.label]}</dt>
+              <dt className="pt-[1px] text-xs font-medium text-ink-muted">{OPENING_SHORT[row.label]}</dt>
               <dd className="min-w-0 break-words text-ink" data-opening={row.label}>
                 {row.label === "Fault codes" ? (
                   <span className="flex flex-wrap gap-1">
@@ -195,6 +196,31 @@ function QuotedText({ text }: { text: string }) {
   );
 }
 
+// An earlier exchange in one line: the tech's first line and Claude's
+// count of causes and the likeliest, opened with a tap.
+function FoldedTurn({ turn, onOpen }: { turn: TurnView; onOpen: () => void }) {
+  return (
+    <li data-turn={turn.seq} data-status={turn.status} data-folded>
+      <button
+        type="button"
+        aria-expanded={false}
+        onClick={onOpen}
+        className="flex min-h-11 w-full items-center gap-2 rounded-lg border border-white/10 bg-charcoal-900/50 px-3 py-1.5 text-left text-sm transition hover:border-glow/30 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+      >
+        <ChevronIcon className="size-4 shrink-0 -rotate-90 text-ink-muted" />
+        <span className="min-w-0 flex-1 leading-5">
+          <span className="block truncate">
+            <span className="font-medium text-ink/80">{turn.userName || "Tech"}:</span> <span className="text-ink">{techSummary(turn)}</span>
+          </span>
+          <span className="block truncate text-ink-muted">
+            <span className="font-medium text-ink/80">Claude:</span> {claudeSummary(turn)}
+          </span>
+        </span>
+      </button>
+    </li>
+  );
+}
+
 function TurnBlock({
   turn,
   liveText,
@@ -203,6 +229,7 @@ function TurnBlock({
   busy,
   onQuote,
   onShowDiagnosis,
+  onFold,
 }: {
   turn: TurnView;
   liveText: string | null;
@@ -211,18 +238,31 @@ function TurnBlock({
   busy: boolean;
   onQuote: ((question: string) => void) | null;
   onShowDiagnosis: (() => void) | null;
+  // Opened from its one line: folds back.
+  onFold: (() => void) | null;
 }) {
   const running = turn.status === "running";
   return (
     <li className="space-y-3" data-turn={turn.seq} data-status={turn.status}>
-      <div className="ml-auto max-w-[92%] rounded-xl rounded-br-sm border border-glow/20 bg-glow/10 px-3.5 py-2.5 sm:max-w-[82%]">
-        <p className="mb-1 text-xs text-glow/80">{turn.userName || "Tech"}</p>
+      {onFold && (
+        <button
+          type="button"
+          aria-expanded
+          onClick={onFold}
+          className="-mb-1 inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-xs text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        >
+          <ChevronIcon className="size-3.5" />
+          Fold
+        </button>
+      )}
+      <div className="ml-auto max-w-[92%] rounded-xl rounded-br-sm border border-white/10 bg-white/[0.05] px-3.5 py-2.5 sm:max-w-[82%]">
+        <p className="mb-1 text-xs font-medium text-ink-muted">{turn.userName || "Tech"}</p>
         <TechText turn={turn} />
       </div>
 
       <div className="max-w-full rounded-xl rounded-bl-sm border border-white/10 bg-charcoal-900/70 px-3.5 py-2.5 sm:max-w-[92%]">
         <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="font-mono text-[11px] tracking-[0.18em] text-glow/80 uppercase">Claude</span>
+          <span className="text-sm font-semibold text-ink">Claude</span>
           {turn.status === "done" && turn.reply && <ActivityChips progress={turn.progress} />}
         </div>
         {running ? (
@@ -594,6 +634,20 @@ export function DiagnoseChat({
   }
   const bottom = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLTextAreaElement>(null);
+  // Earlier exchanges the tech opened from their one line (by id); the
+  // latest is always open (openTurnIds).
+  const [opened, setOpened] = useState<Set<string>>(() => new Set());
+  // The page takes the screen's width (data-wide-page; see the app layout)
+  // only while it's shown: when Next keeps it hidden after a navigation
+  // (Activity runs layout effects' cleanups then), the marker comes off, so
+  // the page now on screen isn't stretched too.
+  const widePage = useRef<HTMLDivElement>(null);
+  const hasConversation = conversation !== null;
+  useLayoutEffect(() => {
+    const element = widePage.current;
+    element?.setAttribute("data-wide-page", "");
+    return () => element?.removeAttribute("data-wide-page");
+  }, [hasConversation]);
 
   const running = turns.find((turn) => turn.status === "running") ?? null;
   const busy = streaming || running !== null;
@@ -659,7 +713,7 @@ export function DiagnoseChat({
         break;
       case "scope":
         setConversation((old) =>
-          old ? { ...old, scope: event.scope, unit: event.scope.label ?? old.unit, vehicle: event.vehicle } : old,
+          old ? { ...old, scope: event.scope, unit: event.scope.label ?? old.unit, vehicle: event.vehicle, model: event.model } : old,
         );
         break;
       case "end":
@@ -789,6 +843,7 @@ export function DiagnoseChat({
   }
 
   const working = running ? (running.progress.at(-1)?.label ?? "Thinking it over") : null;
+  const latest = openTurnIds(turns);
   // The causes in the reply before the latest, to mark what's new.
   const previousReply = replyTurn ? turns.filter((turn) => turn.status === "done" && turn.reply && turn.seq < replyTurn.seq).at(-1) : undefined;
   const previousTitles = previousReply?.reply ? new Set(previousReply.reply.likelyCauses.map((cause) => cause.title.toLowerCase())) : null;
@@ -805,9 +860,16 @@ export function DiagnoseChat({
   }
 
   // Wide: the conversation's heading and thread on the left, the diagnosis
-  // beside them from the top. Narrow: the heading, the tabs, then one tab.
+  // beside them from the top (from 1280 px, itself two columns: the causes
+  // and checks, and the unit with the manual pictures), using the screen's
+  // whole width (data-wide-page; see the app layout). Narrow: the heading,
+  // the tabs, then one tab.
   return (
-    <div className="max-lg:space-y-4 lg:grid lg:grid-cols-[minmax(0,1fr)_24.5rem] lg:grid-rows-[auto_1fr] lg:gap-x-6 lg:gap-y-4">
+    <div
+      ref={widePage}
+      data-wide-page
+      className="max-lg:space-y-4 lg:grid lg:grid-cols-[minmax(0,1fr)_30rem] lg:grid-rows-[auto_1fr] lg:gap-x-6 lg:gap-y-4 xl:grid-cols-[minmax(19rem,0.78fr)_minmax(0,2fr)]"
+    >
       <header className="flex flex-wrap items-end justify-between gap-x-3 gap-y-1 lg:col-start-1 lg:row-start-1">
         <div className="flex w-full items-center justify-between gap-3 lg:contents">
           <Link href="/diagnose" className="shrink-0 text-sm text-glow/90 hover:text-glow hover:underline lg:hidden">
@@ -847,19 +909,33 @@ export function DiagnoseChat({
       </div>
 
       <section aria-label="Conversation" className={`min-w-0 scroll-mt-20 space-y-4 lg:col-start-1 lg:row-start-2 ${tab === "chat" ? "" : "max-lg:hidden"}`}>
-        <ol className="space-y-5">
-          {turns.map((turn) => (
-            <TurnBlock
-              key={turn.id}
-              turn={turn}
-              liveText={live?.turnId === turn.id ? live.text : null}
-              canRetry={turn.id === lastTurn?.id && (turn.status === "failed" || turn.status === "stopped")}
-              onRetry={() => void send({ conversationId: conversation.id, retryTurnId: turn.id })}
-              busy={busy}
-              onQuote={conversation.full ? null : quote}
-              onShowDiagnosis={turn.id === replyTurn?.id && turn.id === lastTurn?.id ? () => show("diagnosis") : null}
-            />
-          ))}
+        <ol className="space-y-3">
+          {turns.map((turn) =>
+            !latest.has(turn.id) && !opened.has(turn.id) ? (
+              <FoldedTurn key={turn.id} turn={turn} onOpen={() => setOpened((old) => new Set(old).add(turn.id))} />
+            ) : (
+              <TurnBlock
+                key={turn.id}
+                turn={turn}
+                liveText={live?.turnId === turn.id ? live.text : null}
+                canRetry={turn.id === lastTurn?.id && (turn.status === "failed" || turn.status === "stopped")}
+                onRetry={() => void send({ conversationId: conversation.id, retryTurnId: turn.id })}
+                busy={busy}
+                onQuote={conversation.full ? null : quote}
+                onShowDiagnosis={turn.id === replyTurn?.id && turn.id === lastTurn?.id ? () => show("diagnosis") : null}
+                onFold={
+                  latest.has(turn.id)
+                    ? null
+                    : () =>
+                        setOpened((old) => {
+                          const next = new Set(old);
+                          next.delete(turn.id);
+                          return next;
+                        })
+                }
+              />
+            ),
+          )}
         </ol>
         <div ref={bottom} />
 
@@ -907,7 +983,7 @@ export function DiagnoseChat({
         )}
         {working ? (
           <div className="flex items-center gap-3 rounded-xl border border-glow/25 bg-glow/5 py-1 pr-1 pl-4 text-sm" data-testid="working-strip">
-            <span aria-hidden className="hud-pulse size-2 shrink-0 rounded-full bg-glow" />
+            <WorkingIcon className="size-4 text-glow" />
             <span className="min-h-11 min-w-0 flex-1 content-center truncate text-ink">{working}…</span>
             <button type="button" onClick={() => show("chat")} className="min-h-11 shrink-0 rounded-lg px-3 font-medium text-glow hover:bg-glow/10 lg:hidden">
               Open chat
@@ -979,7 +1055,7 @@ function TabButton({
       {children}
       {working && !active && (
         <span data-working className="flex items-center gap-1.5 text-xs text-glow">
-          <span aria-hidden className="hud-pulse size-2 rounded-full bg-glow" />
+          <WorkingIcon className="size-3.5 text-glow" />
           <span className="max-sm:sr-only">Working</span>
         </span>
       )}

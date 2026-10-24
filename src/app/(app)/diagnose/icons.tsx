@@ -120,3 +120,65 @@ export const ChevronIcon = (p: Props) => (
     <path d="m4.5 6.25 3.5 3.5 3.5-3.5" />
   </Icon>
 );
+
+export const ExpandIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M9.5 2.25h4.25V6.5M6.5 13.75H2.25V9.5M13.75 2.25 9 7M2.25 13.75 7 9" />
+  </Icon>
+);
+
+// Solid: the body as it is (a filled block); phantom: the body as an
+// outline with the part inside showing.
+export const SolidIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M2.25 9.5 4 5.75h8L13.75 9.5v2.75H2.25z" fill="currentColor" fillOpacity={0.35} />
+    <circle cx="4.75" cy="12.25" r="1.25" />
+    <circle cx="11.25" cy="12.25" r="1.25" />
+  </Icon>
+);
+
+export const PhantomIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M2.25 9.5 4 5.75h8L13.75 9.5v2.75H2.25z" strokeDasharray="1.6 1.4" />
+    <rect x="6.5" y="7.75" width="3" height="2.25" rx=".5" fill="currentColor" />
+    <circle cx="4.75" cy="12.25" r="1.25" />
+    <circle cx="11.25" cy="12.25" r="1.25" />
+  </Icon>
+);
+
+// Claude at work: a still mark (nothing on the Diagnose screen pulses or
+// spins); the step's words say what it's doing.
+export const WorkingIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="8" cy="8" r="5.75" strokeOpacity={0.35} />
+    <path d="M8 2.25a5.75 5.75 0 0 1 5.75 5.75" />
+    <circle cx="8" cy="8" r="1.5" fill="currentColor" stroke="none" />
+  </Icon>
+);
+
+export const ResetIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M3 8a5 5 0 1 0 1.6-3.7" />
+    <path d="M2.75 2.5v2.75H5.5" />
+  </Icon>
+);
+
+export const BackIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M10 3 5 8l5 5" />
+  </Icon>
+);
+
+export const ZoomInIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="7" cy="7" r="4.25" />
+    <path d="m10.2 10.2 3.6 3.6M5 7h4M7 5v4" />
+  </Icon>
+);
+
+export const ZoomOutIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="7" cy="7" r="4.25" />
+    <path d="m10.2 10.2 3.6 3.6M5 7h4" />
+  </Icon>
+);

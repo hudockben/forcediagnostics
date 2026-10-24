@@ -17,7 +17,7 @@ import {
 } from "@/lib/library";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import { CATALOG_LIMITS, cleanCatalogText, isModelYear } from "@/lib/manual-catalog-rules";
-import { chooseVehicle, vehicleForUnit } from "@/lib/unit-vehicle";
+import { specForUnit, type UnitSpec } from "@/lib/unit-vehicle";
 import { cutText } from "@/lib/manual-rules";
 
 // What Claude's tools can reach in the shop's library, for Diagnose. Every
@@ -64,38 +64,54 @@ export async function describeScope(shopId: string, scope: ManualScope): Promise
   return { label: scope.label, manuals: titles.map(({ id, title }) => ({ id, title })) };
 }
 
-// Which drawing a conversation's unit gets: the model list's brand codes
-// for its model number (RZR, RGR, ATV, GEN, ...); when those don't decide
-// it, the codes of the manuals it's using; failing that, the words in its
-// name. A side-by-side listed under ATV goes by its name or its manuals'
-// titles (vehicleForUnit).
+// Which machine a conversation's unit is: its kind of vehicle (for the
+// drawing) and its line, seats, size and paint (for the 3D unit), from the
+// model list's entries for its model number (brand codes, descriptions,
+// the titles of the manuals listing it), the brand codes and titles of the
+// manuals it's using, and the words in its name. See specForUnit.
+export async function unitMachine(
+  shopId: string,
+  unit: { modelNumber: string | null; manualIds: string[] | null; label: string | null },
+): Promise<{ vehicle: UnitVehicle | null; model: UnitSpec | null }> {
+  if (!unit.modelNumber && !unit.manualIds?.length && !unit.label) return { vehicle: null, model: null };
+  const facts = await withShop(shopId, async (tx) => {
+    const byNumber = unit.modelNumber
+      ? await tx.execute<{ brand: string | null; description: string | null; title: string | null }>(sql`
+          select d.brand, cm.model_description as description, d.title from manual_catalog_models cm
+          join manual_catalog_documents d on d.shop_id = cm.shop_id and d.file_key = cm.file_key
+          where cm.model_number = ${unit.modelNumber.toUpperCase()}
+          order by cm.model_year desc nulls last, cm.model_description
+          limit 50
+        `)
+      : null;
+    const byManual = unit.manualIds?.length
+      ? await tx.execute<{ brand: string | null; title: string | null }>(sql`
+          select distinct d.brand, d.title from manual_file_names n
+          join manual_catalog_documents d on d.shop_id = n.shop_id and d.file_key = n.file_key
+          where n.manual_id = any(${uuidArray(unit.manualIds)})
+          limit 50
+        `)
+      : null;
+    const values = <T,>(rows: (T | null)[] | undefined) => [...new Set((rows ?? []).filter((v): v is T => v !== null && v !== ""))];
+    return {
+      numberBrands: values(byNumber?.rows.map((row) => row.brand)),
+      descriptions: values(byNumber?.rows.map((row) => row.description)),
+      numberTitles: values(byNumber?.rows.map((row) => row.title)),
+      manualBrands: values(byManual?.rows.map((row) => row.brand)),
+      manualTitles: values(byManual?.rows.map((row) => row.title)),
+      label: unit.label,
+    };
+  });
+  const model = specForUnit(facts);
+  return { vehicle: model?.vehicle ?? null, model };
+}
+
+// Which drawing a conversation's unit gets (see unitMachine).
 export async function unitVehicle(
   shopId: string,
   unit: { modelNumber: string | null; manualIds: string[] | null; label: string | null },
 ): Promise<UnitVehicle | null> {
-  if (!unit.modelNumber && !unit.manualIds?.length && !unit.label) return null;
-  const { byNumber, numberTitles, byManual } = await withShop(shopId, async (tx) => {
-    const byNumber = unit.modelNumber
-      ? await tx.execute<{ brand: string; title: string | null }>(sql`
-          select distinct d.brand, d.title from manual_catalog_models cm
-          join manual_catalog_documents d on d.shop_id = cm.shop_id and d.file_key = cm.file_key
-          where cm.model_number = ${unit.modelNumber.toUpperCase()} and d.brand is not null
-        `)
-      : null;
-    const numberBrands = [...new Set(byNumber?.rows.map((row) => row.brand))];
-    const numberTitles = byNumber?.rows.flatMap((row) => (row.title ? [row.title] : [])) ?? [];
-    // The model number's brands decide it: no need to look at the manuals.
-    if (chooseVehicle({ brands: numberBrands, label: null })) return { byNumber: numberBrands, numberTitles, byManual: [] };
-    const byManual = unit.manualIds?.length
-      ? await tx.execute<{ brand: string }>(sql`
-          select distinct d.brand from manual_file_names n
-          join manual_catalog_documents d on d.shop_id = n.shop_id and d.file_key = n.file_key
-          where n.manual_id = any(${uuidArray(unit.manualIds)}) and d.brand is not null
-        `)
-      : null;
-    return { byNumber: numberBrands, numberTitles, byManual: byManual?.rows.map((row) => row.brand) ?? [] };
-  });
-  return vehicleForUnit({ numberBrands: byNumber, manualBrands: byManual, label: unit.label, numberTitles });
+  return (await unitMachine(shopId, unit)).vehicle;
 }
 
 type ModelMatches = {

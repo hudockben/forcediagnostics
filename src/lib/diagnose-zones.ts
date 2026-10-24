@@ -160,9 +160,12 @@ export type CauseState = "open" | "ruled_out" | "confirmed";
 export const GLOWS = ["confirmed", "high", "medium", "low", "ruled_out", "none"] as const;
 export type Glow = (typeof GLOWS)[number];
 
-// muted: a cause is confirmed elsewhere, so this system steps back (no
-// glow or pulse, outline only) and the confirmed part stands out.
-export type ZoneState = { system: CauseSystem; glow: Glow; causes: number[]; muted: boolean };
+// muted: a cause is confirmed elsewhere, so this system steps back (toned
+// down) and the confirmed part stands out. rank: the number its callout
+// carries, the place in the Likely causes list (from 1) of the cause it
+// stands for: the confirmed one, else the first still open; null when
+// every cause there is ruled out.
+export type ZoneState = { system: CauseSystem; glow: Glow; causes: number[]; muted: boolean; rank: number | null };
 
 const LIKELIHOOD_RANK: Record<CauseLikelihood, number> = { high: 3, medium: 2, low: 1 };
 
@@ -184,7 +187,14 @@ export function zoneStates(
   causes.forEach((cause, index) => grouped.set(cause.system, [...(grouped.get(cause.system) ?? []), index]));
   const states = new Map<CauseSystem, ZoneState>();
   for (const [system, indexes] of grouped) {
-    states.set(system, { system, glow: glowFor(indexes.map((index) => causes[index])), causes: indexes, muted: false });
+    const leading = indexes.find((index) => causes[index].status === "confirmed") ?? indexes.find((index) => causes[index].status === "open");
+    states.set(system, {
+      system,
+      glow: glowFor(indexes.map((index) => causes[index])),
+      causes: indexes,
+      muted: false,
+      rank: leading === undefined ? null : leading + 1,
+    });
   }
   if ([...states.values()].some((state) => state.glow === "confirmed")) {
     for (const state of states.values()) state.muted = state.glow === "high" || state.glow === "medium" || state.glow === "low";

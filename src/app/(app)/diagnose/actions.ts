@@ -8,6 +8,7 @@ import type { CauseVerdict, ConversationView, FeedbackEntry, ScopeView, UnitSugg
 import { suggestUnits } from "@/lib/diagnose-tools";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { requireCapability } from "@/lib/session";
+import type { UnitSpec } from "@/lib/unit-vehicle";
 
 // The Diagnose screen's small actions. Sending a message goes through the
 // streaming route instead (src/app/api/diagnose/turn/route.ts).
@@ -54,7 +55,7 @@ export async function changeUnitAction(input: {
   conversationId: string;
   modelNumber?: string;
   wholeLibrary?: boolean;
-}): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null } | Failed> {
+}): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | Failed> {
   const user = await requireCapability("diagnostics.work");
   return attempt("change the unit", () =>
     changeUnit(user, {

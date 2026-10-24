@@ -5,6 +5,7 @@
 // code can use it.
 
 import { inferSystem, listedSystem, type CauseSystem, type UnitVehicle } from "@/lib/diagnose-zones";
+import type { UnitSpec } from "@/lib/unit-vehicle";
 
 // The model behind Diagnose. Change it here only: the prompt, tools and
 // prices all follow from it.
@@ -543,6 +544,8 @@ export type ConversationView = {
   unit: string | null;
   // Which drawing the unit gets, if any.
   vehicle: UnitVehicle | null;
+  // Which machine the 3D unit shows (line, seats, size, paint), if known.
+  model: UnitSpec | null;
   scope: ScopeView;
   feedback: FeedbackEntry[];
   outcome: { title: string; seq: number } | null;
@@ -555,7 +558,7 @@ export type StreamEvent =
   | { type: "start"; conversation: ConversationView; turn: TurnView }
   | { type: "progress"; step: ProgressStep }
   | { type: "reply"; text: string }
-  | { type: "scope"; scope: ScopeView; vehicle: UnitVehicle | null }
+  | { type: "scope"; scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null }
   | { type: "end"; conversation: ConversationView; turn: TurnView };
 
 // The conversation is full; the tech starts a new one for the unit.

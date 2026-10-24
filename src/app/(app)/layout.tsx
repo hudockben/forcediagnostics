@@ -11,11 +11,18 @@ import { BAY_HEARTBEAT_MS, BAY_IDLE_MS, lookupCurrentUser } from "@/lib/session"
 export default function AppLayout({ children }: { children: ReactNode }) {
   return (
     <>
-      <div id="app-shell" className="app-backdrop flex flex-1 flex-col">
+      <div id="app-shell" className="group/shell app-backdrop flex flex-1 flex-col">
         <Suspense fallback={<AppHeaderFallback />}>
           <AppHeader />
         </Suspense>
-        <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-8">{children}</main>
+        {/* A page that needs the room (Diagnose's conversation) marks
+            itself data-wide-page while it's shown (not while Next keeps it
+            hidden after a navigation) and gets the screen's width. */}
+        <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:px-8 has-[[data-wide-page]]:max-w-[118rem] has-[[data-wide-page]]:lg:py-6">{children}</main>
+        {/* Full-screen views (Diagnose's examine view and manual pages)
+            open here: inside the shell, so the bay tablet's lock covers
+            them, and beside the page they hold inert. */}
+        <div id="app-overlays" />
       </div>
       <Suspense fallback={null}>
         <BayLockForPinSessions />

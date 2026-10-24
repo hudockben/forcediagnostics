@@ -105,3 +105,12 @@
     opacity: 0.3;
   }
 }
+
+/* The plate the Diagnose unit is drawn on (the 3D unit and its line
+   drawing): a quiet light neutral, like a figure in a service manual, so
+   the paint reads true and fine dark lines show; a step down from white,
+   so it doesn't glare out of the dark screen on a dim shop tablet. */
+.unit-plate {
+  background: radial-gradient(ellipse 75% 70% at 50% 42%, #e6e8eb 0%, #d9dde1 55%, #c8cdd2 100%);
+  color: #1f2328;
+}

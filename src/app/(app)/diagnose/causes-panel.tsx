@@ -22,12 +22,15 @@ import {
   zoneStates,
   type CauseState,
   type CauseSystem,
-  type Glow,
+  type DrawnSystem,
   type UnitVehicle,
 } from "@/lib/diagnose-zones";
+import type { ViewMode } from "@/lib/unit-3d/look";
+import type { UnitSpec } from "@/lib/unit-vehicle";
 import { drawingFor } from "@/lib/unit-graphic/drawing";
 
 import { changeUnitAction, markCauseAction } from "./actions";
+import { ManualPictures, PageThumbs, manualPages } from "./manual-pictures";
 import {
   BookIcon,
   BulbIcon,
@@ -40,8 +43,10 @@ import {
   UnitIcon,
   WarningIcon,
 } from "./icons";
+import { Unit3D, UnitHeader, UnitKey, isDrawnSystem, unitName } from "./unit-3d";
 import { UnitGraphic } from "./unit-graphic";
 import { UnitPicker } from "./unit-picker";
+import { useHistoryParam } from "./use-history-param";
 
 // The diagnosis at a glance, beside the chat (or on its own tab on a
 // tablet): the unit drawing with its suspect systems lit, Claude's likely
@@ -69,12 +74,12 @@ export function Section({
 }) {
   return (
     <section id={id} aria-label={label} className={`rounded-xl border border-white/10 bg-charcoal-900/70 ${className}`}>
-      <h2 className="flex items-center gap-2 border-b border-white/5 px-4 py-2 font-mono text-[13px] font-medium tracking-[0.16em] text-glow uppercase">
-        {icon}
+      <h2 className="flex items-center gap-2 border-b border-white/[0.06] px-4 py-2.5 text-[15px] leading-5 font-semibold text-ink">
+        <span className="text-ink-muted">{icon}</span>
         <span className="whitespace-nowrap">{label}</span>
         {aside}
         {count !== undefined && (
-          <span className="ml-auto shrink-0 rounded-full bg-white/5 px-2 py-0.5 text-xs tracking-normal text-ink-muted normal-case tabular-nums">
+          <span className="ml-auto shrink-0 rounded-full bg-white/[0.06] px-2 py-0.5 text-xs font-medium text-ink-muted tabular-nums">
             {count}
           </span>
         )}
@@ -303,6 +308,7 @@ function CauseItem({
   onMark,
   onSelectZone,
   onHoverZone,
+  pictures = "inline",
 }: {
   row: CauseRow;
   highlight: boolean;
@@ -310,6 +316,9 @@ function CauseItem({
   onMark: (verdict: CauseVerdict, viaKeyboard: boolean) => void;
   onSelectZone: (system: CauseSystem) => void;
   onHoverZone: (system: CauseSystem | null) => void;
+  // The pictures of the pages it cites: in its row of buttons (the list),
+  // or a gallery of large ones under it (the full-screen sheet).
+  pictures?: "inline" | "large";
 }) {
   const { cause, index, system, status, verdict, isNew } = row;
   const [expanded, setExpanded] = useState(false);
@@ -377,7 +386,7 @@ function CauseItem({
       {...common}
       onClick={() => onSelectZone(system)}
       className={`rounded-lg border p-3 transition ${
-        confirmed ? "border-suspect/60 bg-suspect/10 shadow-[0_0_24px_-8px] shadow-suspect/60" : "border-white/10 bg-forest-950/40"
+        confirmed ? "border-suspect/60 bg-suspect/10" : "border-white/10 bg-forest-950/40"
       } ${status === "ruled_out" ? "opacity-75" : ""} ${ring}`}
     >
       <div className="flex items-start gap-2.5">
@@ -404,12 +413,14 @@ function CauseItem({
               {/* Beside the system chip while there's room for one. */}
               <SourceChips sources={cause.sources} className="min-w-0 flex-1 basis-32" />
             </div>
+            {pictures === "large" && <PageThumbs sources={cause.sources} size="large" />}
           </div>
         </div>
       </div>
-      <div className="mt-2.5 flex flex-wrap gap-2 pl-8" onClick={(event) => event.stopPropagation()}>
+      <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-8" onClick={(event) => event.stopPropagation()}>
         <MarkButton mark="ruled_out" verdict={verdict} pending={pending} onMark={onMark} />
         <MarkButton mark="confirmed" verdict={verdict} pending={pending} onMark={onMark} />
+        {pictures === "inline" && <PageThumbs sources={cause.sources} size="inline" className="ml-auto gap-1.5" />}
         {status === "ruled_out" && (
           <button type="button" aria-expanded onClick={() => setExpanded(false)} className={`${markClass} border-transparent text-ink-muted hover:text-ink`}>
             Less
@@ -422,87 +433,70 @@ function CauseItem({
 
 // --- Unit drawing -------------------------------------------------------------
 
-// The legend shows each state's look on the drawing and its mark on the
-// labels: the likelihood meter, a check, a cross.
-const LEGEND: { glow: Exclude<Glow, "none">; label: string; swatch: string; mark: ReactNode }[] = [
-  { glow: "confirmed", label: "Confirmed", swatch: "border-white bg-[#d93a40]", mark: <CheckIcon className="size-3 text-[#ffb3b6]" /> },
-  { glow: "high", label: "High", swatch: "border-[#ff4d55] bg-[#ff4d55]/45 shadow-[0_0_6px_#ff4d55]", mark: <MiniMeter lit={3} color="bg-[#ff4d55]" /> },
-  {
-    glow: "medium",
-    label: "Medium",
-    swatch: "border-[#ff8a4c] bg-[repeating-linear-gradient(135deg,#ff8a4c_0_1.5px,transparent_1.5px_4px)]",
-    mark: <MiniMeter lit={2} color="bg-[#ff8a4c]" />,
-  },
-  { glow: "low", label: "Low", swatch: "border-dashed border-[#ff6b70]", mark: <MiniMeter lit={1} color="bg-[#ff6b70]" /> },
-  { glow: "ruled_out", label: "Ruled out", swatch: "border-dashed border-ink-muted bg-forest-950", mark: <CrossIcon className="size-3" /> },
-];
-
-function MiniMeter({ lit, color }: { lit: number; color: string }) {
-  return (
-    <span aria-hidden className="flex gap-px">
-      {[1, 2, 3].map((segment) => (
-        <span key={segment} className={`h-2 w-[3px] rounded-[1px] ${segment <= lit ? color : "bg-white/20"}`} />
-      ))}
-    </span>
-  );
-}
-
 function UnitCard({
   vehicle,
+  model,
   rows,
   active,
   onSelect,
   hasReply,
+  examining,
+  onExamine,
+  onCloseExamine,
+  sheet,
 }: {
   vehicle: UnitVehicle;
+  model: UnitSpec | null;
   rows: CauseRow[];
   active: CauseSystem | null;
   onSelect: (system: CauseSystem) => void;
   hasReply: boolean;
+  examining: DrawnSystem | "unit" | null;
+  onExamine: (target: DrawnSystem | "unit") => void;
+  onCloseExamine: () => void;
+  sheet: (system: DrawnSystem) => ReactNode;
 }) {
   const drawing = drawingFor(vehicle);
   const states = [...zoneStates(rows.map((row) => ({ system: row.system, likelihood: row.cause.likelihood, status: row.status }))).values()];
   const drawn = states.filter((state) => state.system !== "other" && drawing.zones[state.system as Exclude<CauseSystem, "other">]);
-  const lit = drawn.filter((state) => state.glow !== "ruled_out").length;
   const offDrawing = states.filter((state) => !drawn.includes(state));
-  const present = new Set(drawn.map((state) => state.glow));
+  const note = drawn.length > 0 ? null : <p className="text-xs text-ink-muted">{hasReply ? "No system singled out yet." : "Flagged systems show here with Claude's first reply."}</p>;
+  const key = (mode: ViewMode | null) => note ?? <UnitKey states={drawn} mode={mode} />;
   return (
-    <Section
-      id="unit-graphic"
-      label="Unit graphic"
-      icon={<UnitIcon />}
-      aside={<span className="truncate text-xs tracking-normal text-ink-muted normal-case max-sm:hidden">· {VEHICLE_DRAWING_NAMES[vehicle]}</span>}
-      count={lit > 0 ? `${lit} ${lit === 1 ? "system" : "systems"}` : undefined}
-      className="max-lg:scroll-mt-20"
-    >
-      <div className={`relative mx-auto ${vehicle === "generator" ? "max-w-[15rem] sm:max-w-[20rem]" : "max-w-[19rem] sm:max-w-[28rem]"}`}>
-        {/* HUD corner marks, as on the sign-in card. */}
-        {["-top-1 -left-1 border-t border-l rounded-tl-lg", "-top-1 -right-1 border-t border-r rounded-tr-lg", "-bottom-1 -left-1 border-b border-l rounded-bl-lg", "-right-1 -bottom-1 border-r border-b rounded-br-lg"].map((corner) => (
-          <span key={corner} aria-hidden className={`pointer-events-none absolute size-3.5 border-glow/40 ${corner}`} />
-        ))}
-        <UnitGraphic vehicle={vehicle} states={drawn} active={active} onSelect={onSelect} />
-      </div>
-      {present.size > 0 ? (
-        <ul aria-label="Legend" className="mt-2 flex flex-wrap justify-center gap-x-2.5 gap-y-1 text-[11px] text-ink-muted">
-          {LEGEND.filter((item) => present.has(item.glow)).map((item) => (
-            <li key={item.glow} data-legend={item.glow} className="flex items-center gap-1">
-              <span aria-hidden className={`inline-block h-2.5 w-4 rounded-sm border ${item.swatch}`} />
-              {item.mark}
-              {item.label}
-            </li>
-          ))}
-        </ul>
+    <section id="unit-graphic" aria-label="Unit graphic" className="@container rounded-xl border border-white/10 bg-charcoal-900/70 pb-3 max-lg:scroll-mt-20">
+      {model ? (
+        <Unit3D
+          model={model}
+          vehicle={vehicle}
+          states={drawn}
+          active={active}
+          onSelect={onSelect}
+          examining={examining}
+          onExamine={onExamine}
+          onCloseExamine={onCloseExamine}
+          sheet={sheet}
+          title={unitName(model)}
+          footer={key}
+        />
       ) : (
-        <p className="mt-1 text-center text-xs text-ink-muted">
-          {hasReply ? "No system singled out yet." : "Lights up with Claude's first reply."}
-        </p>
+        <>
+          <UnitHeader title={VEHICLE_DRAWING_NAMES[vehicle]} model={null} />
+          <div className="px-3 sm:px-4">
+            <div className="unit-plate rounded-lg p-2">
+              <div className={`relative mx-auto ${vehicle === "generator" ? "max-w-[15rem] sm:max-w-[20rem]" : "max-w-[19rem] sm:max-w-[28rem]"}`}>
+                <UnitGraphic vehicle={vehicle} states={drawn} active={active} onSelect={onSelect} />
+              </div>
+            </div>
+          </div>
+          <div className="px-3 pt-2.5 sm:px-4">{key(null)}</div>
+        </>
       )}
       {offDrawing.length > 0 && (
-        <p className="mt-1 text-center text-xs text-ink-muted">
+        <p className="mt-1.5 px-3 text-xs text-ink-muted sm:px-4">
           Not on the drawing: {offDrawing.map((state) => SYSTEM_LABELS[state.system]).join(", ")}
         </p>
       )}
-    </Section>
+    </section>
   );
 }
 
@@ -525,9 +519,9 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
                   title="Not from your manuals — verify before you rely on it"
                   className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail"
                 >
-                  <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-medium tracking-[0.15em] text-trail/80">
+                  <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-semibold tracking-wide text-trail/90 uppercase">
                     <WarningIcon className="size-3" />
-                    VERIFY
+                    Verify
                   </span>
                   <span className="min-w-0 break-words">{check.expected}</span>
                   <span className="sr-only">Not from your manuals — verify</span>
@@ -537,7 +531,7 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
                   data-spec="manual"
                   className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow"
                 >
-                  <span className="text-[10px] font-medium tracking-[0.15em] text-glow/60">SPEC</span>
+                  <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">Spec</span>
                   <span className="min-w-0 break-words">{check.expected}</span>
                 </span>
               ))}
@@ -550,6 +544,7 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
             <SourceChips sources={check.sources} />
           </div>
         )}
+        <PageThumbs sources={check.sources} />
       </div>
     </li>
   );
@@ -566,7 +561,7 @@ function ScopeCard({
   disabled,
 }: {
   conversation: ConversationView;
-  onScope: (scope: ScopeView, unit: string | null, vehicle: UnitVehicle | null) => void;
+  onScope: (scope: ScopeView, unit: string | null, vehicle: UnitVehicle | null, model: UnitSpec | null) => void;
   disabled: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -586,7 +581,7 @@ function ScopeCard({
       setMessage(result.error);
       return;
     }
-    onScope(result.scope, result.unit, result.vehicle);
+    onScope(result.scope, result.unit, result.vehicle, result.model);
     setEditing(false);
     setValue("");
     setPicked(null);
@@ -744,7 +739,7 @@ export function CausesPanel({
         document.querySelector(`li[data-cause][data-zone="${next}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
         return;
       }
-      const drawing = document.querySelector("#unit-graphic svg.ug");
+      const drawing = document.querySelector("#unit-graphic [data-unit3d], #unit-graphic svg.ug");
       if (drawing && !inSight(drawing)) document.getElementById("unit-graphic")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     });
   }
@@ -752,75 +747,155 @@ export function CausesPanel({
   const unsent = conversation.feedback.filter((entry) => entry.sentInSeq === null).length;
   const active = hovered ?? selected;
 
-  return (
-    <div className="space-y-4">
-      {conversation.vehicle && (
-        <UnitCard vehicle={conversation.vehicle} rows={rows} active={active} onSelect={(system) => selectZone(system, "drawing")} hasReply={reply !== null} />
-      )}
+  // The full-screen unit, in the address so Back closes it.
+  const [examineParam, openExamine, closeExamine] = useHistoryParam("examine");
+  const examining: DrawnSystem | "unit" | null = examineParam === null ? null : isDrawnSystem(examineParam) ? examineParam : "unit";
 
-      <Section label="Likely causes" icon={<CausesIcon />} count={rows.length > 0 ? rows.length : undefined}>
-        {!reply || reply.likelyCauses.length === 0 ? (
-          <p className="text-sm leading-6 text-ink-muted">
-            {reply ? "None yet. Tell Claude more about what the unit is doing." : "Claude's list shows here after its first reply."}
-          </p>
-        ) : (
-          <ol className="space-y-2">
-            {ordered.map((row) => (
-              <CauseItem
-                key={`${row.cause.title}-${row.index}`}
-                row={row}
-                highlight={selected === row.system}
-                pending={pending === row.index}
-                onMark={(verdict, viaKeyboard) => void mark(row.index, verdict, viaKeyboard)}
-                onSelectZone={(system) => selectZone(system, "list")}
-                onHoverZone={setHovered}
-              />
-            ))}
-          </ol>
-        )}
-        {unsent > 0 && <p className="mt-3 text-xs text-ink-muted">Claude hears about your marks with your next message.</p>}
+  // The manual pages the reply cites (open causes, then checks), for the
+  // pictures beside the unit on a wide screen: the picked system's only.
+  const citedBy = (system: CauseSystem | null) =>
+    manualPages([
+      ...ordered.filter((row) => row.status !== "ruled_out" && (system === null || row.system === system)).flatMap((row) => row.cause.sources),
+      ...(system === null ? (reply?.nextChecks ?? []).flatMap((check) => check.sources) : []),
+    ]);
+  const gallery = citedBy(selected);
+  const titles = new Map<string, string>([
+    ...conversation.scope.manuals.map((manual): [string, string] => [manual.id, manual.title]),
+    ...citedBy(null).map((source): [string, string] => [source.manualId, source.title]),
+  ]);
+
+  // A system's causes, each with pictures of the manual pages it cites, in
+  // the full-screen view.
+  function sheet(system: DrawnSystem) {
+    const mine = ordered.filter((row) => row.system === system);
+    if (mine.length === 0) return <p className="text-sm text-ink-muted">No causes point here.</p>;
+    return (
+      <div className="space-y-4">
+        <ol className="space-y-2">
+          {mine.map((row) => (
+            <CauseItem
+              key={`${row.cause.title}-${row.index}`}
+              row={row}
+              highlight={false}
+              pending={pending === row.index}
+              onMark={(verdict, viaKeyboard) => void mark(row.index, verdict, viaKeyboard)}
+              onSelectZone={() => {}}
+              onHoverZone={() => {}}
+              pictures="large"
+            />
+          ))}
+        </ol>
         {message && (
-          <p role="status" className="mt-2 text-sm text-trail">
+          <p role="status" className="text-sm text-trail">
             {message}
           </p>
         )}
-      </Section>
+      </div>
+    );
+  }
 
-      {afterCauses}
+  // Wide screens: the causes and checks, and beside them the unit and the
+  // manual pictures. Narrower: the unit above the causes.
+  return (
+    <ManualPictures titles={titles}>
+      <div className="space-y-4 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] xl:items-start xl:gap-4 xl:space-y-0">
+        <div className="space-y-4 xl:sticky xl:top-0 xl:col-start-2 xl:row-start-1">
+          {conversation.vehicle && (
+            <UnitCard
+              vehicle={conversation.vehicle}
+              model={conversation.model ?? null}
+              rows={rows}
+              active={active}
+              onSelect={(system) => selectZone(system, "drawing")}
+              hasReply={reply !== null}
+              examining={examining}
+              onExamine={(target) => {
+                if (target !== "unit") setSelected(target);
+                openExamine(target);
+              }}
+              onCloseExamine={closeExamine}
+              sheet={sheet}
+            />
+          )}
+          {gallery.length > 0 && (
+            <Section
+              label="Manual pictures"
+              icon={<BookIcon />}
+              count={gallery.length}
+              aside={selected ? <span className="truncate text-xs tracking-normal text-ink-muted normal-case">· {SYSTEM_LABELS[selected]}</span> : undefined}
+              className="max-xl:hidden"
+            >
+              <PageThumbs sources={gallery} size="large" />
+            </Section>
+          )}
+        </div>
 
-      {reply && reply.nextChecks.length > 0 && (
-        <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
-          <ol className="space-y-2">
-            {reply.nextChecks.map((check, index) => (
-              <CheckItem key={index} check={check} step={index + 1} />
-            ))}
-          </ol>
-        </Section>
-      )}
+        <div className="space-y-4 xl:col-start-1 xl:row-start-1">
+          <Section label="Likely causes" icon={<CausesIcon />} count={rows.length > 0 ? rows.length : undefined}>
+            {!reply || reply.likelyCauses.length === 0 ? (
+              <p className="text-sm leading-6 text-ink-muted">
+                {reply ? "None yet. Tell Claude more about what the unit is doing." : "Claude's list shows here after its first reply."}
+              </p>
+            ) : (
+              <ol className="space-y-2">
+                {ordered.map((row) => (
+                  <CauseItem
+                    key={`${row.cause.title}-${row.index}`}
+                    row={row}
+                    highlight={selected === row.system}
+                    pending={pending === row.index}
+                    onMark={(verdict, viaKeyboard) => void mark(row.index, verdict, viaKeyboard)}
+                    onSelectZone={(system) => selectZone(system, "list")}
+                    onHoverZone={setHovered}
+                  />
+                ))}
+              </ol>
+            )}
+            {unsent > 0 && <p className="mt-3 text-xs text-ink-muted">Claude hears about your marks with your next message.</p>}
+            {message && (
+              <p role="status" className="mt-2 text-sm text-trail">
+                {message}
+              </p>
+            )}
+          </Section>
 
-      {reply && reply.safetyNotes.length > 0 && (
-        <section aria-label="Safety" className="rounded-xl border border-trail/40 bg-trail/10 px-4 py-3 text-trail">
-          <h2 className="flex items-center gap-2 font-mono text-[13px] font-medium tracking-[0.16em] uppercase">
-            <WarningIcon />
-            Safety
-            <span className="ml-auto rounded-full bg-trail/15 px-2 py-0.5 text-xs tracking-normal tabular-nums">{reply.safetyNotes.length}</span>
-          </h2>
-          <ul className="mt-2 space-y-1.5 text-sm leading-5">
-            {reply.safetyNotes.map((note, index) => (
-              <li key={index} className="flex gap-2">
-                <span aria-hidden className="mt-[0.45rem] size-1.5 shrink-0 rounded-full bg-trail" />
-                <span className="min-w-0 break-words">{note}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+          {afterCauses}
 
-      <ScopeCard
-        conversation={conversation}
-        disabled={busy}
-        onScope={(scope, unit, vehicle) => onConversation({ scope, unit, vehicle })}
-      />
-    </div>
+          {reply && reply.nextChecks.length > 0 && (
+            <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
+              <ol className="space-y-2">
+                {reply.nextChecks.map((check, index) => (
+                  <CheckItem key={index} check={check} step={index + 1} />
+                ))}
+              </ol>
+            </Section>
+          )}
+
+          {reply && reply.safetyNotes.length > 0 && (
+            <section aria-label="Safety" className="rounded-xl border border-trail/40 bg-trail/10 px-4 py-3 text-trail">
+              <h2 className="flex items-center gap-2 text-[15px] leading-5 font-semibold">
+                <WarningIcon />
+                Safety
+                <span className="ml-auto rounded-full bg-trail/15 px-2 py-0.5 text-xs tracking-normal tabular-nums">{reply.safetyNotes.length}</span>
+              </h2>
+              <ul className="mt-2 space-y-1.5 text-sm leading-5">
+                {reply.safetyNotes.map((note, index) => (
+                  <li key={index} className="flex gap-2">
+                    <span aria-hidden className="mt-[0.45rem] size-1.5 shrink-0 rounded-full bg-trail" />
+                    <span className="min-w-0 break-words">{note}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
+          <ScopeCard
+            conversation={conversation}
+            disabled={busy}
+            onScope={(scope, unit, vehicle, model) => onConversation({ scope, unit, vehicle, model })}
+          />
+        </div>
+      </div>
+    </ManualPictures>
   );
 }

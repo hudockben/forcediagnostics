@@ -11,7 +11,8 @@ import { allows, getCurrentUser } from "@/lib/session";
 function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
   return (
     <header className="border-b border-white/10 bg-charcoal-900/60 backdrop-blur-md">
-      <div className="mx-auto flex min-h-16 max-w-5xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 pt-4 sm:px-8">
+      {/* As wide as the page under it (see the app layout). */}
+      <div className="mx-auto flex min-h-16 max-w-5xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 pt-4 group-has-[[data-wide-page]]/shell:max-w-[118rem] sm:px-8">
         <Link
           href="/home"
           className="rounded focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
@@ -20,7 +21,7 @@ function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
         </Link>
         {user}
       </div>
-      <div className="mx-auto min-h-12 max-w-5xl px-4 sm:px-8">{tabs}</div>
+      <div className="mx-auto min-h-12 max-w-5xl px-4 group-has-[[data-wide-page]]/shell:max-w-[118rem] sm:px-8">{tabs}</div>
     </header>
   );
 }

@@ -38,10 +38,11 @@ import {
   findUnitManuals,
   readScopedPage,
   searchScopedPages,
-  unitVehicle,
+  unitMachine,
   type ManualScope,
 } from "@/lib/diagnose-tools";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
+import type { UnitSpec } from "@/lib/unit-vehicle";
 import { cleanLibraryFilters, hasLibraryFilters, listReadyManuals } from "@/lib/library";
 import { VEHICLE_NAMES, brandLabel } from "@/lib/manual-catalog-rules";
 import { cutText } from "@/lib/manual-rules";
@@ -106,20 +107,20 @@ const scopeOf = (conversation: Pick<ConversationRow, "scopeManualIds" | "unitLab
 // What the screen needs to show a conversation's unit: its manuals, and
 // which drawing it gets.
 async function unitOf(shopId: string, conversation: ConversationRow) {
-  const [scope, vehicle] = await Promise.all([
+  const [scope, machine] = await Promise.all([
     describeScope(shopId, scopeOf(conversation)),
-    unitVehicle(shopId, {
+    unitMachine(shopId, {
       modelNumber: conversation.unitModelNumber,
       manualIds: conversation.scopeManualIds,
       label: conversation.unitLabel,
     }),
   ]);
-  return { scope, vehicle };
+  return { scope, ...machine };
 }
 
 function toConversationView(
   conversation: ConversationRow,
-  { scope, vehicle }: { scope: ScopeView; vehicle: UnitVehicle | null },
+  { scope, vehicle, model }: { scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null },
 ): ConversationView {
   return {
     id: conversation.id,
@@ -127,6 +128,7 @@ function toConversationView(
     status: conversation.status,
     unit: conversation.unitLabel,
     vehicle,
+    model,
     scope,
     feedback: conversation.feedback,
     outcome: conversation.outcome ? { title: conversation.outcome.title, seq: conversation.outcome.seq } : null,
@@ -659,11 +661,11 @@ export async function runTurn(
           })
           .where(eq(diagnosisConversations.id, conversation.id)),
       );
-      const [view, vehicle] = await Promise.all([
+      const [view, machine] = await Promise.all([
         describeScope(shopId, scope),
-        unitVehicle(shopId, { modelNumber: lookup.scope.unit?.number ?? null, manualIds: scope.manualIds, label: scope.label }),
+        unitMachine(shopId, { modelNumber: lookup.scope.unit?.number ?? null, manualIds: scope.manualIds, label: scope.label }),
       ]);
-      emit({ type: "scope", scope: view, vehicle });
+      emit({ type: "scope", scope: view, ...machine });
       const count = view.manuals.length;
       return {
         result: lookup.result,
@@ -885,7 +887,7 @@ export async function markCause(
 export async function changeUnit(
   user: CurrentUser,
   input: { conversationId: string; modelNumber?: string; wholeLibrary?: boolean },
-): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null } | { error: string }> {
+): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | { error: string }> {
   if (!isUuid(input.conversationId)) return { error: "That diagnosis isn't in this shop." };
   const shopId = user.shop.id;
   let next: { manualIds: string[] | null; label: string | null; number: string | null; year: number | null };
@@ -928,8 +930,8 @@ export async function changeUnit(
     return row;
   });
   if (!updated) return { error: "That diagnosis isn't in this shop." };
-  const { scope, vehicle } = await unitOf(shopId, updated);
-  return { scope, unit: updated.unitLabel, vehicle };
+  const { scope, vehicle, model } = await unitOf(shopId, updated);
+  return { scope, unit: updated.unitLabel, vehicle, model };
 }
 
 // What a new diagnosis starts with when it carries on from a full one: the

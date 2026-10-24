@@ -35,7 +35,7 @@ import {
   type CauseSystem,
   type DrawnSystem,
 } from "../src/lib/diagnose-zones";
-import { calloutWidth, layoutCallouts, leaderCrossings, segmentHitsRect, segmentsOf, type Callout } from "../src/lib/unit-graphic/callouts";
+import { CIRCLE_AT, calloutWidth, calloutsInside, fitCallouts, layoutCallouts, leaderCrossings, leaderPath, segmentHitsRect, segmentsOf, type Callout } from "../src/lib/unit-graphic/callouts";
 import { baseWithout, drawingFor, type Path } from "../src/lib/unit-graphic/drawing";
 import { sceneFor, type Scene } from "../src/lib/unit-graphic/scene";
 import { UNIT_GRAPHIC_CSS } from "../src/lib/unit-graphic/style";
@@ -189,7 +189,19 @@ describe("how a system glows", () => {
       { system: "fuel", likelihood: "low", status: "ruled_out" },
     ]);
     assert.deepEqual([...states.keys()], ["ignition", "exhaust", "fuel"]);
-    assert.deepEqual(states.get("ignition"), { system: "ignition", glow: "high", causes: [0, 2], muted: false });
+    assert.deepEqual(states.get("ignition"), { system: "ignition", glow: "high", causes: [0, 2], muted: false, rank: 1 });
+    // A callout's number: its first cause still open (the list's numbering),
+    // the confirmed one if any, none when all are ruled out.
+    assert.equal(states.get("exhaust")!.rank, 2);
+    assert.equal(states.get("fuel")!.rank, null);
+    const reordered = zoneStates([
+      { system: "fuel", likelihood: "high", status: "ruled_out" },
+      { system: "fuel", likelihood: "medium", status: "open" },
+      { system: "ignition", likelihood: "low", status: "open" },
+      { system: "ignition", likelihood: "medium", status: "confirmed" },
+    ]);
+    assert.equal(reordered.get("fuel")!.rank, 2);
+    assert.equal(reordered.get("ignition")!.rank, 4);
     assert.equal(states.get("exhaust")!.glow, "medium");
     assert.equal(states.get("fuel")!.glow, "ruled_out");
     assert.equal(states.get("engine"), undefined);
@@ -213,9 +225,9 @@ describe("how a system glows", () => {
         ["charging_starting", "ruled_out", false],
       ],
     );
-    // In the drawing: only the confirmed one glows.
+    // In the drawing: the others are toned down (muted), the confirmed one isn't.
     const scene = sceneFor("utv", [...states.values()]);
-    assert.deepEqual(scene.zones.filter((zone) => zone.halo).map((zone) => zone.system), ["drive_clutch"]);
+    assert.deepEqual(scene.zones.filter((zone) => zone.glow !== "ruled_out" && !zone.muted).map((zone) => zone.system), ["drive_clutch"]);
     assert.ok(zoneStates([{ system: "cooling", likelihood: "high", status: "open" }]).get("cooling")!.muted === false);
   });
 
@@ -301,21 +313,39 @@ function markupOf(scene: Scene) {
     p.c.startsWith("t")
       ? `<path class="${p.c}" d="${p.d}" stroke-width="${p.w}"></path><path class="tc" d="${p.d}" stroke-width="1.23"></path>`
       : `<path class="${p.c}" d="${p.d}"${p.eo ? ' fill-rule="evenodd"' : ""}${extra}></path>`;
-  const { view, drawing } = scene;
+  const { view, drawing, font } = scene;
   const zones = scene.zones
     .map(
       (zone) =>
-        `<g class="ug-z" data-zone="${zone.system}" data-glow="${zone.glow}" data-muted="${zone.muted}" data-active="false" role="button" tabindex="0" aria-pressed="false" aria-label="${zone.system}: 2 causes, medium likelihood. Show in the list.">${zone.halo ? '<g class="h" filter="url(#R1abcdefghij-glow)">' : ""}${zone.paths.map((p) => `<path class="c ${p.c}" d="${p.d}"${p.c === "t" ? ` stroke-width="${p.w}"` : ""}></path>`).join("")}${zone.halo ? "</g>" : ""}</g>`,
+        `<g class="ug-z" data-zone="${zone.system}" data-glow="${zone.glow}" data-muted="${zone.muted}" data-active="false" role="button" tabindex="0" aria-pressed="false" aria-label="${zone.system}: 2 causes, medium likelihood (number 12 in the list). Show in the list.">${zone.paths.map((p) => `<path class="c ${p.c}" d="${p.d}"${p.c === "t" ? ` stroke-width="${p.w}"` : ""}></path>`).join("")}</g>`,
     )
     .join("");
-  const callouts = scene.callouts
-    .map(
-      (c: Callout) =>
-        `<g data-leader="${c.zone}" data-glow="high" data-muted="false"><path class="l n" d="M${c.leader.map(([x, y]) => `${x} ${y}`).join("L")}"></path><circle cx="${c.leader[0][0]}" cy="${c.leader[0][1]}" r="3.54" fill="var(--g)"></circle></g>` +
-        `<g class="ug-co" data-callout="${c.zone}" data-glow="high" data-muted="false" data-active="false" data-focus="false"><rect x="${c.hit.x}" y="${c.hit.y}" width="${c.hit.w}" height="${c.hit.h}" fill="transparent"></rect><rect class="p" x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}" rx="${c.h / 2}"></rect><g data-meter="2"><path class="m" d="M-119.38 97.04h3.29v9.1h-3.29zM-114.28 97.04h3.29v9.1h-3.29z"></path><path class="m0" d="M-109.19 97.04h3.29v9.1h-3.29z"></path></g><text x="${c.x + 28.44}" y="${c.y + 12.64}">${c.text}</text></g>`,
-    )
-    .join("");
-  return `<svg class="ug block h-auto w-full select-none" viewBox="${view.x} ${view.y} ${view.w} ${view.h}" data-vehicle="${drawing.vehicle}" role="group" aria-label="Side-by-side systems" style="--hatch:url(#R1abcdefghij-hatch)"><style>${UNIT_GRAPHIC_CSS}</style><defs>${"x".repeat(1100)}</defs><g role="img" aria-label="${"x".repeat(220)}"><path d="${drawing.grid}"></path><path d="${drawing.ground}"></path><path d="${drawing.ground}"></path>${scene.base.map((p) => path(p)).join("")}</g>${zones}<g class="ug-ld" aria-hidden="true">${callouts}</g></svg>`;
+  // Both sets of callouts are in every drawing (a container query shows
+  // one): the full labels, and the numbered circles alone, which carry only
+  // what their styles need (a bare leader; the tap target, circle and
+  // number). Attributes that are false are left out; the dots on the parts
+  // are drawn once for both.
+  const dots = scene.callouts.map((c) => `<circle class="dot" cx="${c.leader[0][0]}" cy="${c.leader[0][1]}" r="2.53"></circle>`).join("");
+  const leaders = (list: Callout[], size: number, full: boolean) =>
+    list
+      .map((c) => (full ? `<g data-leader="${c.zone}"><path class="l" d="${leaderPath(c, size)}"></path></g>` : `<path class="l" d="${leaderPath(c, size)}"></path>`))
+      .join("");
+  const callouts = (list: Callout[], full: boolean) =>
+    list
+      .map(
+        (c) =>
+          `<g class="ug-co" ${full ? `data-callout="${c.zone}" data-glow="medium" data-rank="12"` : `data-callout-number="${c.zone}"`}><rect x="${c.hit.x}" y="${c.hit.y}" width="${c.hit.w}" height="${c.hit.h}"></rect>` +
+          (full ? `<rect class="p" x="${c.x}" y="${c.y}" width="${c.w}" height="${c.h}"></rect>` : "") +
+          `<circle class="ring n" cx="${c.x + 12.64}" cy="${c.y + 12.64}" r="13.1" fill="#e39b1b" stroke="#a86a00"></circle><text class="num" x="${c.x + 12.64}" y="${c.y + 12.64}"${full ? ' font-size="14.51"' : ""} fill="#1f2328">12</text>` +
+          (full
+            ? `<text class="name" x="${c.x + 30.6}" y="${c.y + 12.64}">${c.text}</text><g data-meter="2"><path class="m" d="M-119.38 97.04h3.29v9.1h-3.29zM-114.28 97.04h3.29v9.1h-3.29z"></path><path class="m0" d="M-109.19 97.04h3.29v9.1h-3.29z"></path></g>`
+            : "") +
+          `</g>`,
+      )
+      .join("");
+  const variant = (list: Callout[], size: number, full: boolean) =>
+    `<g class="${full ? "ug-f" : "ug-c"}" aria-hidden="true"><g class="ug-ld">${leaders(list, size, full)}</g><g font-size="${full ? size : Math.round(size * 82) / 100}">${callouts(list, full)}</g></g>`;
+  return `<svg class="ug block h-auto w-full select-none" viewBox="${view.x} ${view.y} ${view.w} ${view.h}" data-vehicle="${drawing.vehicle}" role="group" aria-label="Side-by-side systems"><style>${UNIT_GRAPHIC_CSS}</style><defs>${"x".repeat(140)}</defs><g role="img" aria-label="${"x".repeat(220)}"><path d="${drawing.ground}" fill="#000" fill-opacity="0.12" filter="url(#R0-soft)"></path>${scene.base.map((p) => path(p)).join("")}</g>${zones}<g class="ug-ld" aria-hidden="true">${dots}</g>${variant(scene.callouts, font, true)}${variant(scene.compact, scene.compactFont, false)}</svg>`;
 }
 
 describe("the drawings", () => {
@@ -345,13 +375,14 @@ describe("the drawings", () => {
     }
   });
 
-  test("each drawing is well under 40 KB of SVG, lit or not: a lit system is drawn once, not over a copy", () => {
+  test("each drawing is under 40 KB of SVG, lit or not and with both sets of callouts: a lit system is drawn once, not over a copy", () => {
     for (const vehicle of ["utv", "atv", "generator"] as const) {
       const unlit = Buffer.byteLength(markupOf(sceneFor(vehicle, [])));
       assert.ok(unlit < 35_000, `${vehicle} unlit: ${unlit} bytes`);
       for (const [name, set] of Object.entries(SETS)) {
         const bytes = Buffer.byteLength(markupOf(sceneFor(vehicle, statesOf(set))));
-        assert.ok(bytes < 38_500, `${vehicle} ${name}: ${bytes} bytes`);
+        // Both sets of callouts included (the full labels and the numbers).
+        assert.ok(bytes < 40_000, `${vehicle} ${name}: ${bytes} bytes`);
       }
     }
     // The lit systems are left out of the line-work, and drawn once over it.
@@ -373,15 +404,18 @@ describe("the drawings", () => {
     assert.deepEqual(sceneFor("utv", statesOf(SETS.overheat)), sceneFor("utv", statesOf(SETS.overheat)));
   });
 
-  test("only the likeliest systems glow; medium is hatched and low an outline (in the styles)", () => {
+  test("nothing glows or moves; high and medium are filled flat, low is a red outline only (in the styles)", () => {
     const scene = sceneFor("utv", statesOf(SETS.overheat));
-    assert.deepEqual(
-      scene.zones.filter((zone) => zone.halo).map((zone) => zone.system),
-      ["cooling", "drive_clutch"],
-    );
-    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=medium\] \.c\.f\{fill:var\(--hatch/);
-    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=low\]\{[^}]*--a:/);
-    assert.match(UNIT_GRAPHIC_CSS, /prefers-reduced-motion:no-preference\)\{\.ug-z\[data-glow=high\] \.h\{animation/);
+    // No halo, glow filter or animation anywhere in the drawing's styles.
+    assert.ok(scene.zones.every((zone) => !("halo" in zone)));
+    assert.doesNotMatch(UNIT_GRAPHIC_CSS, /animation|@keyframes|filter|drop-shadow|blur/);
+    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=high\]\{--g:#b3261e;--o:#16181b/);
+    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=medium\]\{--g:#e39b1b;--o:#16181b/);
+    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=low\]\{--g:none;--o:#c62d23/);
+    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=ruled_out\]\{--g:#9aa0a6/);
+    assert.match(UNIT_GRAPHIC_CSS, /\.ug-z \.c\.f\{fill:var\(--g\)/);
+    // Toned down once another is confirmed.
+    assert.match(UNIT_GRAPHIC_CSS, /\[data-glow=high\]\[data-muted=true\]\{--g:#d6a29c/);
   });
 });
 
@@ -441,6 +475,15 @@ describe("labels for the lit systems", () => {
         assert.ok(scene.callouts.every((c) => c.row <= 1), `${vehicle} ${name} rows`);
       }
     }
+    // Each leader meets its callout at the numbered circle.
+    for (const vehicle of ["utv", "atv", "generator"] as const) {
+      for (const set of Object.values(SETS)) {
+        for (const c of sceneFor(vehicle, statesOf(set)).callouts) {
+          const [ex] = c.leader.at(-1)!;
+          assert.ok(Math.abs(ex - (c.x + c.h * CIRCLE_AT)) < 0.02, `${vehicle} ${c.zone} leader ends at ${ex}, circle at ${c.x + c.h * CIRCLE_AT}`);
+        }
+      }
+    }
     // Five systems on a side-by-side: one row each side.
     assert.ok(sceneFor("utv", statesOf(SETS.overheat)).callouts.every((c) => c.row === 0));
   });
@@ -452,6 +495,72 @@ describe("labels for the lit systems", () => {
     // A crowd: the high ones are in the rows next to the drawing.
     const crowd = sceneFor("utv", statesOf(DRAWN.map((system, i): C => [system, i < 3 ? "high" : "low", "open"])));
     for (const c of crowd.callouts) if (["engine", "fuel", "air_intake"].includes(c.zone)) assert.equal(c.row, 0, c.zone);
+  });
+
+  test("on the 3D unit's plate, callouts never leave it: full labels where they fit, else numbered circles (the key names them)", () => {
+    // Six systems on a RZR 4 as a phone (332 x 221), the 1280 px card
+    // (401 x 301), a tablet (720 x 450) and the 1463 px card (470 x 352)
+    // show them: the anchors where the 3D unit puts them, the machine's
+    // outline filling the plate less a row above and below.
+    const six = ["drive_clutch", "cooling", "fuel", "exhaust", "charging_starting", "electrical"] as const;
+    const plates: [number, number][] = [
+      [332, 221],
+      [401, 301],
+      [470, 352],
+      [720, 450],
+    ];
+    for (const [w, h] of plates) {
+      const row = 13 * 3;
+      const box = { x: 6, y: 6 + row, w: w - 12, h: h - 12 - row * 2 };
+      // Spread over the machine, some high, some low (as the 3D unit's are).
+      const items = six.map((zone, i) => ({ zone, anchor: [box.x + box.w * (0.12 + 0.15 * i), box.y + box.h * (i % 2 ? 0.7 : 0.3)] as const, text: zone.replace("_", " "), rank: 6 - i }));
+      const bounds = { x: 6, y: 6, w: w - 12, h: h - 12 };
+      const { callouts, compact } = fitCallouts(items, box, 13, bounds, { compactOnly: w < 420 });
+      assert.equal(callouts.length, six.length, `${w}`);
+      assert.ok(calloutsInside(callouts, bounds), `${w}x${h}: ${JSON.stringify(callouts.map((c) => [c.zone, c.x, c.y, c.w, c.h]))}`);
+      for (const a of callouts) {
+        // Each tap target is a finger's size, and stays on the plate.
+        assert.ok(a.hit.w >= 40 && a.hit.h >= 36, `${w} ${a.zone} target ${a.hit.w}x${a.hit.h}`);
+        assert.ok(a.hit.x >= -0.5 && a.hit.x + a.hit.w <= w + 0.5, `${w} ${a.zone} target x: ${a.hit.x} ${a.hit.w}`);
+        for (const b of callouts) if (a !== b) assert.ok(a.x + a.w <= b.x + 1e-6 || b.x + b.w <= a.x + 1e-6 || a.y + a.h <= b.y + 1e-6 || b.y + b.h <= a.y + 1e-6, `${w}: ${a.zone} overlaps ${b.zone}`);
+      }
+      // A phone gets numbers; a tablet room for the names.
+      if (w < 420) assert.ok(compact && callouts.every((c) => c.compact), `${w} compact`);
+      if (w >= 720) assert.ok(!compact, `${w} full labels`);
+      // Before: the same six laid out in full with no limit ran off the plate.
+      if (w <= 401) assert.ok(!calloutsInside(layoutCallouts(items, box, 13).callouts, bounds), `${w}: the old layout overflowed`);
+    }
+    // Full screen with a system picked: it keeps its name, the rest are numbers.
+    const box = { x: 40, y: 80, w: 700, h: 400 };
+    const crowd = DRAWN.slice(0, 9).map((zone, i) => ({ zone, anchor: [60 + i * 75, i % 2 ? 420 : 120] as const, text: `${zone} system`, rank: i }));
+    const picked = fitCallouts(crowd, box, 13, { x: 0, y: 0, w: 780, h: 560 }, { keep: "fuel" });
+    assert.ok(calloutsInside(picked.callouts, { x: 0, y: 0, w: 780, h: 560 }));
+    assert.ok(picked.callouts.find((c) => c.zone === "fuel")!.compact !== true);
+    assert.ok(picked.callouts.filter((c) => c.zone !== "fuel").every((c) => c.compact), "the others are numbers");
+    // Never off the plate, even when nothing fits (pulled inside).
+    const tight = fitCallouts(crowd, { x: 10, y: 20, w: 200, h: 60 }, 13, { x: 0, y: 0, w: 220, h: 100 });
+    assert.ok(calloutsInside(tight.callouts, { x: 0, y: 0, w: 220, h: 100 }));
+  });
+
+  test("the no-WebGL drawing has numbered circles for a narrow card, big enough to read on a phone", () => {
+    for (const vehicle of ["utv", "atv", "generator"] as const) {
+      for (const [name, set] of Object.entries(SETS)) {
+        const scene = sceneFor(vehicle, statesOf(set));
+        assert.equal(scene.compact.length, scene.callouts.length, `${vehicle} ${name}`);
+        assert.ok(scene.compact.every((c) => c.compact && Math.abs(c.w - c.h) < 0.01), `${vehicle} ${name}: circles alone`);
+        // The view holds both sets.
+        for (const c of [...scene.callouts, ...scene.compact]) {
+          assert.ok(c.hit.y >= scene.view.y - 0.02 && c.hit.y + c.hit.h <= scene.view.y + scene.view.h + 0.02, `${vehicle} ${name} ${c.zone} in view`);
+        }
+        // On a phone the drawing (its view) is about 330 px wide: the
+        // numbers come out at 11 px or more (the names were 6-7 px).
+        const scale = 330 / scene.view.w;
+        assert.ok(scene.compactFont * 0.82 * scale >= 10.5, `${vehicle} ${name}: number ${(scene.compactFont * 0.82 * scale).toFixed(1)} px`);
+      }
+    }
+    // The CSS shows one set or the other by the card's width.
+    assert.match(UNIT_GRAPHIC_CSS, /\.ug \.ug-c\{display:none\}/);
+    assert.match(UNIT_GRAPHIC_CSS, /@container \(max-width: 450px\)\{\.ug \.ug-f\{display:none\}\.ug \.ug-c\{display:inline\}\}/);
   });
 
   test("no lit systems, no labels, and the drawing keeps its size", () => {

@@ -1,4 +1,4 @@
-import type { PDFDocumentLoadingTask } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFWorker } from "pdfjs-dist";
 
 // The viewer's copy of a manual's PDF, read from storage a part at a time.
 // pdf.js could fetch the parts itself, given the link, but it never asks
@@ -38,7 +38,16 @@ export function openStoragePdf(
     chunkBytes,
     wasmUrl,
     stallMs = STALL_MS,
-  }: { sizeBytes: number; chunkBytes: number; wasmUrl?: string; stallMs?: number },
+    worker,
+  }: {
+    sizeBytes: number;
+    chunkBytes: number;
+    wasmUrl?: string;
+    stallMs?: number;
+    // A pdf.js worker to share with other copies (one worker parses every
+    // manual a page opens, instead of one each).
+    worker?: PDFWorker;
+  },
 ): StoragePdf {
   // Aborted when pdf.js closes the copy.
   const closed = new AbortController();
@@ -71,6 +80,7 @@ export function openStoragePdf(
     // Decoders for scanned-page images (CCITT, JBIG2, JPEG 2000).
     wasmUrl,
     verbosity: pdfjs.VerbosityLevel.ERRORS,
+    ...(worker ? { worker } : {}),
   });
   return { loading, broken };
 }

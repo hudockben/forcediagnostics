@@ -27,7 +27,8 @@
     "react-dom": "19.3.0",
     "server-only": "0.0.1",
     "tesseract.js": "7.0.0",
-    "tesseract.js-core": "7.0.0"
+    "tesseract.js-core": "7.0.0",
+    "three": "0.180.0"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
@@ -35,6 +36,7 @@
     "@types/pg": "8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "0.180.0",
     "drizzle-kit": "0.31.11",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
