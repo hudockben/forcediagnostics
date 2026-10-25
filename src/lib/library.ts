@@ -70,14 +70,19 @@ type FilterParams = Record<string, string | string[] | undefined>;
 
 const param = (value: string | string[] | undefined) => (typeof value === "string" ? value : "");
 
+// The make. Every unit in the list is a Polaris, and Polaris's descriptions
+// only name it in paint colours ("SPORTSMAN 570 - POLARIS PURSUIT CAMO"), so
+// "Polaris Sportsman 570" would otherwise find only the camo models.
+const MAKE_WORDS = new Set(["POLARIS"]);
+
 // "rzr xp-1000" -> ["RZR", "XP", "1000"]: what the Model filter looks for at
 // the start of the words of a model number or description, split the same
-// way as manual_catalog_models.model_words.
+// way as manual_catalog_models.model_words, without the make.
 export function modelFilterWords(model: string) {
   return model
     .toUpperCase()
     .split(/[^A-Z0-9]+/)
-    .filter(Boolean)
+    .filter((word) => word && !MAKE_WORDS.has(word))
     .slice(0, MAX_MODEL_FILTER_WORDS);
 }
 

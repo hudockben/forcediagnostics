@@ -533,6 +533,10 @@ describe("Claude's tools", () => {
     const named = await findUnitManuals(shop.id, { description: "2018 RZR S 1000" });
     assert.equal(named.result.models_found, 1);
     assert.deepEqual(named.scope?.manualIds, [rzr]);
+    // The make in the name changes nothing.
+    const make = await findUnitManuals(shop.id, { description: "2018 Polaris RZR S 1000" });
+    assert.equal(make.result.models_found, 1);
+    assert.deepEqual(make.scope?.manualIds, [rzr]);
     // A title naming two sizes doesn't bring the other size's manual in.
     const ranger = await findUnitManuals(shop.id, { description: "Ranger XP 1000", year: 2019 });
     assert.deepEqual(ranger.scope?.manualIds, [r1000]);

@@ -991,6 +991,9 @@ describe("the model filter and manual titles", () => {
   test("model words match the manual's title as well as its models", async () => {
     assert.deepEqual(await searchIds({ model: "sportsman" }), sorted("spm", "supplement"));
     assert.deepEqual(await searchIds({ model: "Sportsman XP 850" }), sorted("spm"));
+    // The make isn't a model word: every unit is a Polaris.
+    assert.deepEqual(await searchIds({ model: "Polaris Sportsman XP 850" }), sorted("spm"));
+    assert.deepEqual(await searchIds({ year: 2009, model: "POLARIS SPORTSMAN" }), sorted("spm"));
     assert.deepEqual(await searchIds({ model: "spm xp 850" }), sorted("spm"));
     assert.deepEqual(await searchIds({ model: "ranger 500" }), sorted("rgr"));
     assert.deepEqual(await listIds({ model: "sportsman xp 850" }), sorted("spm"));
