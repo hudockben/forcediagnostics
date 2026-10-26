@@ -23,6 +23,11 @@ type PageRef = { manualId: string; page: number; title: string };
 
 const PageViewContext = createContext<((page: PageRef) => void) | null>(null);
 
+// Opens a page full screen (the part sheet's large page).
+export function usePageView() {
+  return use(PageViewContext);
+}
+
 // The manual pages among some sources, once each.
 export function manualPages(sources: SourceView[]): ManualSource[] {
   const seen = new Set<string>();
@@ -44,11 +49,19 @@ export function manualPages(sources: SourceView[]): ManualSource[] {
 export function ManualPictures({ children, titles }: { children: ReactNode; titles: Map<string, string> }) {
   const [value, open, close] = useHistoryParam("manual-page");
   const mounted = useMounted();
+  // The titles of manuals opened from outside the reply's (a part's page
+  // found by search), for the page view's header.
+  const [opened, setOpened] = useState<Map<string, string>>(() => new Map());
   useEffect(() => holdManuals(), []);
   const match = value ? /^([0-9a-f-]{36}):(\d{1,5})$/i.exec(value) : null;
-  const page = match ? { manualId: match[1], page: Number(match[2]), title: titles.get(match[1]) ?? "Manual" } : null;
+  const page = match ? { manualId: match[1], page: Number(match[2]), title: titles.get(match[1]) ?? opened.get(match[1]) ?? "Manual" } : null;
   return (
-    <PageViewContext value={(ref) => open(`${ref.manualId}:${ref.page}`)}>
+    <PageViewContext
+      value={(ref) => {
+        if (!titles.has(ref.manualId) && opened.get(ref.manualId) !== ref.title) setOpened((old) => new Map(old).set(ref.manualId, ref.title));
+        open(`${ref.manualId}:${ref.page}`);
+      }}
+    >
       {children}
       {page && mounted && createPortal(<PageView page={page} onClose={close} />, overlayRoot())}
     </PageViewContext>
@@ -75,16 +88,15 @@ export function PageThumbs({ sources, size = "small", className = "" }: { source
 
 const SIZES = { inline: { width: 36, css: "w-9" }, small: { width: 60, css: "w-[60px]" }, large: { width: 104, css: "w-[104px]" } } as const;
 
-function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) {
-  const openPage = use(PageViewContext);
+// A page's picture at a width, drawn once its element is near the screen;
+// retry draws a failed one again.
+export function usePagePicture(manualId: string, page: number, width: number) {
   const element = useRef<HTMLButtonElement>(null);
   const [visible, setVisible] = useState(false);
   const [tries, setTries] = useState(0);
   const [state, setState] = useState<{ url: string; key: string } | { failed: string } | null>(null);
-  const { width, css } = SIZES[size];
-  const key = `${source.manualId}:${source.page}:${width}:${tries}`;
+  const key = `${manualId}:${page}:${width}:${tries}`;
 
-  // Drawn once it's near the screen.
   useEffect(() => {
     const el = element.current;
     if (!el || visible) return;
@@ -101,7 +113,7 @@ function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) 
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    pagePicture(source.manualId, source.page, width).then(
+    pagePicture(manualId, page, width).then(
       (url) => !cancelled && setState({ url, key }),
       (error) => {
         console.error("Couldn't draw a manual page", error);
@@ -111,10 +123,17 @@ function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) 
     return () => {
       cancelled = true;
     };
-  }, [visible, source.manualId, source.page, width, key]);
+  }, [visible, manualId, page, width, key]);
 
   const url = state && "url" in state && state.key === key ? state.url : null;
-  const failed = state && "failed" in state && state.failed === key;
+  const failed = !!state && "failed" in state && state.failed === key;
+  return { element, url, failed, retry: () => setTries((n) => n + 1) };
+}
+
+function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) {
+  const openPage = use(PageViewContext);
+  const { width, css } = SIZES[size];
+  const { element, url, failed, retry } = usePagePicture(source.manualId, source.page, width);
   const inline = size === "inline";
   return (
     <figure className={`${css} ${inline ? "relative" : "space-y-1"}`}>
@@ -125,7 +144,7 @@ function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) 
         data-ready={url ? "true" : "false"}
         aria-label={`Picture of manual page ${source.page}: ${source.title}. Open it.`}
         title={`${source.title}, page ${source.page}`}
-        onClick={() => (failed ? setTries((n) => n + 1) : openPage?.({ manualId: source.manualId, page: source.page, title: source.title }))}
+        onClick={() => (failed ? retry() : openPage?.({ manualId: source.manualId, page: source.page, title: source.title }))}
         className="relative block aspect-[17/22] w-full overflow-hidden rounded-md border border-white/15 bg-white/[0.06] transition hover:border-white/40 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
       >
         {url ? (

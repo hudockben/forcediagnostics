@@ -24,23 +24,30 @@ import { partSheet } from "../src/lib/diagnose-part-sheet";
 import {
   MAX_PARTS,
   PART_NAMES,
+  cardOf,
+  cardSettled,
   causesIn,
   isContentsPage,
   isDrawnSystem,
+  largePage,
   mentionsPart,
   numberedSteps,
+  otherPages,
+  partLibraryHref,
   partNames,
   partOfCause,
   partSearchText,
   rankPages,
+  samePage,
   type PageCandidate,
+  type PartPage,
   type PartSheet,
 } from "../src/lib/diagnose-parts";
 import type { DiagnosisReply } from "../src/lib/diagnose-rules";
 import { CAUSE_SYSTEMS, type DrawnSystem } from "../src/lib/diagnose-zones";
 import { finishCatalogImport, saveCatalogBatch } from "../src/lib/manual-catalog";
 import { PAGE_FACTS_LIMITS, readPageFacts, savedPageFacts } from "../src/lib/manual-facts";
-import { FACTS_NUDGE, FACTS_TOOL_NAME, PAGE_FACTS_MODEL, type PageAsk, type PageRef } from "../src/lib/manual-facts-rules";
+import { FACTS_NUDGE, FACTS_TOOL_NAME, PAGE_FACTS_MODEL, type FactsState, type PageAsk, type PageRef } from "../src/lib/manual-facts-rules";
 import { confirmManualUpload, finishManual, saveManualPages, startManualUpload, storageKeyFor } from "../src/lib/manuals";
 import type { CurrentUser } from "../src/lib/session";
 import type { FileStorage } from "../src/lib/storage";
@@ -448,6 +455,39 @@ describe("ranking a part's pages", () => {
     const ranked = rankPages(pages, "Starter solenoid", 4);
     assert.equal(ranked.length, 4);
     assert.equal(new Set(ranked.map((page) => `${page.manualId}:${page.page}`)).size, 4);
+  });
+});
+
+describe("the sheet on the screen", () => {
+  const manualId = "0f6e3a52-58c4-4c39-9d4e-6f7b3c0d9a11";
+  const page = (n: number, cited = false): PartPage => ({ manualId, page: n, title: "2021 Ranger XD 1500 Service Manual", cited });
+  const pages = [page(10, true), page(11), page(4)];
+
+  test("the large page: the one picked among the part's pages, else the best; the others under it", () => {
+    assert.equal(largePage({ pages }, null), pages[0]);
+    assert.equal(largePage({ pages }, { manualId: manualId.toUpperCase(), page: 11 }), pages[1], "the manual's id in any case");
+    // A page that isn't the part's (picked for another part) isn't drawn large.
+    assert.equal(largePage({ pages }, { manualId, page: 99 }), pages[0]);
+    assert.equal(largePage({ pages: [] }, null), null);
+    assert.deepEqual(otherPages({ pages }, pages[1]), [pages[0], pages[2]]);
+    assert.ok(samePage({ manualId, page: 4 }, { manualId: manualId.toUpperCase(), page: 4 }) && !samePage({ manualId, page: 4 }, { manualId, page: 5 }));
+  });
+
+  test("the card the sheet brings is only the large page's; settled cards aren't asked for again", () => {
+    const facts = { page: { manualId, page: 10 }, state: { status: "unread" } as const };
+    assert.deepEqual(cardOf({ facts }, pages[0]), { status: "unread" });
+    assert.equal(cardOf({ facts }, pages[1]), null);
+    assert.equal(cardOf({ facts: null }, pages[0]), null);
+    const ready: FactsState = { status: "ready", facts: { title: "", steps: [{ n: 1, text: "Raise dump bed." }], torques: [], tools: [], cautions: [], notes: [] } };
+    assert.ok(cardSettled(ready) && cardSettled({ status: "empty" }));
+    // No key, the day's readings used, a failed read: not asked again now.
+    for (const reason of ["setup", "limit", "error"] as const) assert.ok(cardSettled({ status: "unavailable", reason }));
+    assert.ok(!cardSettled({ status: "unread" }) && !cardSettled({ status: "reading" }));
+  });
+
+  test("a part with no page: the Library's search for it", () => {
+    assert.equal(partLibraryHref("Starter solenoid"), "/library?q=Starter%20solenoid");
+    assert.equal(partLibraryHref("  Regulator/rectifier "), "/library?q=Regulator%2Frectifier");
   });
 });
 

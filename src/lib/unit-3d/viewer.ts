@@ -795,14 +795,19 @@ export class UnitViewer {
     return { width: this.width, height: this.height, points, box: { x: box.minX, y: box.minY, w: box.maxX - box.minX, h: box.maxY - box.minY } };
   }
 
-  // The system under a point on the canvas (CSS pixels), among those given.
-  pick(x: number, y: number, among: Set<DrawnSystem>): DrawnSystem | null {
-    if (!this.unit) return null;
+  // The system under a point on the canvas (CSS pixels): the nearest part
+  // of any system (the wheels a wheels/tires flag doesn't point at count as
+  // wheels/tires). The body's panels aren't a system: a tap goes through
+  // them to the part behind, as it does through the see-through body of
+  // phantom view.
+  pick(x: number, y: number): DrawnSystem | null {
+    if (!this.unit || this.width < 1 || this.height < 1) return null;
     const ray = new THREE.Raycaster();
     ray.setFromCamera(new THREE.Vector2((x / this.width) * 2 - 1, -(y / this.height) * 2 + 1), this.camera);
-    const meshes = [...this.unit.byZone].filter(([zone]) => among.has(zone)).flatMap(([, list]) => list);
-    const hit = ray.intersectObjects(meshes, false)[0];
-    return hit ? ((hit.object.userData.group as DrawnSystem) ?? null) : null;
+    const meshes = this.unit.meshes.filter(({ group }) => group !== "shell").map(({ mesh }) => mesh);
+    const group = ray.intersectObjects(meshes, false)[0]?.object.userData.group as DrawnSystem | "running" | undefined;
+    if (!group) return null;
+    return group === "running" ? "wheels_tires" : group;
   }
 
   // The systems lit (for tests).

@@ -19,14 +19,16 @@ import { UnitGraphic } from "./unit-graphic";
 // something is flagged) the body keeps its paint but turns see-through and
 // the suspect parts inside are drawn solid in flat colours, called out with
 // numbered circles (the causes' numbers in the list). Still on the
-// diagnosis screen, where tapping a callout or a part picks that system
-// (its causes are highlighted in the list); Expand opens it full screen to
+// diagnosis screen, where tapping a callout picks that system (its causes
+// are highlighted in the list) and tapping any part, flagged or not, opens
+// the full-screen view on its system; Expand opens it on the whole unit to
 // spin, zoom and pan, where tapping a system flies to it and opens its
-// causes and manual pictures. three.js is only loaded here (a dynamic
-// import); until it's ready, and wherever WebGL isn't there or fails, the
-// line drawing shows instead, in the same box, so nothing jumps. One WebGL
-// context serves both views: the canvas moves into the full-screen view and
-// back.
+// sheet: its parts with their manual pages, and its causes. three.js is
+// only loaded here (a dynamic import); until it's ready, and wherever WebGL
+// isn't there or fails, the line drawing shows instead, in the same box, so
+// nothing jumps, and a system tapped on it opens the same sheet full screen
+// on its own. One WebGL context serves both views: the canvas moves into
+// the full-screen view and back.
 
 export const DRAWN_SYSTEMS = CAUSE_SYSTEMS.filter((system): system is DrawnSystem => system !== "other");
 export const isDrawnSystem = (value: unknown): value is DrawnSystem => DRAWN_SYSTEMS.includes(value as DrawnSystem);
@@ -276,9 +278,14 @@ export function Unit3D({
   // Phantom by default once something is flagged; the tech's choice after
   // that; always solid when nothing is (the switch is hidden then).
   const mode: ViewMode = modeByDefault(states) === "solid" ? "solid" : (modeChoice ?? "phantom");
-  // Never full screen without the 3D unit (an address with ?examine on a
-  // device without WebGL).
+  // The 3D unit full screen only where there is one; without it (no WebGL,
+  // or the GPU took it away) a system's sheet opens on its own, and the
+  // whole unit (an address with ?examine=unit) not at all.
   const open = examining !== null && (status === "ready" || status === "loading");
+  const sheetOnly = examining !== null && examining !== "unit" && (status === "fallback" || status === "lost") ? examining : null;
+  const [hover] = useState(hoverPicker);
+  useEffect(() => () => hover.stop(), [hover]);
+  const pick: Pick = (x, y) => viewer.current?.pick(x, y) ?? null;
   const modelKey = `${model.line}|${model.seats}|${model.size}|${model.sixWheels}|${model.paint.key}`;
   const statesKey = JSON.stringify(states.map((state) => [state.system, state.glow, state.muted]));
   // Reduced motion, for a viewer being made, and changed on the live one
@@ -428,7 +435,6 @@ export function Unit3D({
   const shown = status === "ready";
   const hasLit = states.some((state) => isLit(state.glow));
   const summary = unitSummary(unitName(model), states);
-  const withCauses = new Set(states.map((state) => state.system as DrawnSystem));
 
   return (
     <>
@@ -469,7 +475,7 @@ export function Unit3D({
             <div className="absolute inset-0 flex items-center justify-center p-1">
               {/* The drawing fits the box (its own shape, centred). */}
               <div className={`relative size-full [&_svg.ug]:size-full ${vehicle === "generator" ? "max-w-[22rem]" : ""}`}>
-                <UnitGraphic vehicle={vehicle} states={states} active={active} onSelect={onSelect} />
+                <UnitGraphic vehicle={vehicle} states={states} active={active} onSelect={onSelect} onOpen={onExamine} />
               </div>
             </div>
           )}
@@ -483,13 +489,16 @@ export function Unit3D({
             onPointerUp={(event) => {
               const at = tapEnd(event);
               if (!at || !viewer.current) return;
-              // A tap on a flagged part picks its system (Expand is the way
-              // into full screen).
-              const system = viewer.current.pick(at.x, at.y, withCauses);
-              if (system) onSelect(system);
+              // A tap on any part opens the full-screen view on its system
+              // (a callout, over the canvas, picks its system instead).
+              const system = viewer.current.pick(at.x, at.y);
+              if (system) onExamine(system);
             }}
+            onPointerMove={(event) => shown && hover.move(event, pick)}
+            onPointerLeave={(event) => hover.leave(event)}
           />
           {shown && !open && <Callouts store={frames} states={states} active={active} onPick={onSelect} action="Show its causes" />}
+          {shown && !open && <HoverLabel picker={hover} />}
         </div>
       </div>
       {footer && <div className="px-3 pt-2.5 sm:px-4">{footer(shown ? mode : null)}</div>}
@@ -515,9 +524,14 @@ export function Unit3D({
             frames={frames}
             ready={shown}
             summary={summary}
-            withCauses={withCauses}
+            hover={hover}
             sheet={sheet}
           />,
+          overlayRoot(),
+        )}
+      {sheetOnly &&
+        createPortal(
+          <SheetView title={title} system={sheetOnly} state={states.find((state) => state.system === sheetOnly)} sheet={sheet} onClose={onCloseExamine} />,
           overlayRoot(),
         )}
     </>
@@ -553,6 +567,77 @@ export function holdPage(focus: HTMLElement | null) {
     for (const [element, inert] of held.inert) (element as HTMLElement).inert = inert;
     held = null;
   };
+}
+
+// On a mouse, the part under the pointer (a finger has no hover): the
+// cursor says it can be tapped, its system's name sits by the pointer, and
+// data-hover on the canvas's box says which. One raycast a frame at most,
+// none while a button is down (turning the machine), and nothing redrawn.
+// Made once per unit, like the frame store.
+type Pick = (x: number, y: number) => DrawnSystem | null;
+function hoverPicker() {
+  let label: HTMLSpanElement | null = null;
+  let frame = 0;
+  let at: { host: HTMLElement; x: number; y: number; pick: Pick } | null = null;
+
+  function show(host: HTMLElement, system: DrawnSystem | null, x = 0, y = 0) {
+    host.style.cursor = system ? "pointer" : "";
+    if (system) host.dataset.hover = system;
+    else delete host.dataset.hover;
+    if (!label) return;
+    if (!system) {
+      label.hidden = true;
+      return;
+    }
+    label.textContent = SYSTEM_LABELS[system];
+    label.hidden = false;
+    const left = x + 14 + label.offsetWidth > host.clientWidth ? x - 10 - label.offsetWidth : x + 14;
+    label.style.transform = `translate(${Math.round(Math.max(0, left))}px, ${Math.round(Math.min(host.clientHeight - label.offsetHeight, y + 16))}px)`;
+  }
+
+  return {
+    setLabel(element: HTMLSpanElement | null) {
+      label = element;
+    },
+    move(event: ReactPointerEvent<HTMLElement>, pick: Pick) {
+      const host = event.currentTarget;
+      if (event.pointerType !== "mouse" || event.buttons !== 0) {
+        at = null;
+        show(host, null);
+        return;
+      }
+      const rect = host.getBoundingClientRect();
+      at = { host, x: event.clientX - rect.left, y: event.clientY - rect.top, pick };
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        if (at) show(at.host, at.pick(at.x, at.y), at.x, at.y);
+      });
+    },
+    leave(event: ReactPointerEvent<HTMLElement>) {
+      at = null;
+      show(event.currentTarget, null);
+    },
+    stop() {
+      cancelAnimationFrame(frame);
+      frame = 0;
+      at = null;
+    },
+  };
+}
+type HoverPicker = ReturnType<typeof hoverPicker>;
+
+// The hovered system's name, on the light plate.
+function HoverLabel({ picker }: { picker: HoverPicker }) {
+  return (
+    <span
+      ref={(element) => picker.setLabel(element)}
+      hidden
+      aria-hidden
+      data-hover-label
+      className="pointer-events-none absolute top-0 left-0 z-[1] rounded bg-white/90 px-1.5 py-0.5 text-xs font-medium whitespace-nowrap text-[#1f2328] shadow-sm ring-1 ring-black/10"
+    />
+  );
 }
 
 // A tap (not a drag) on the canvas, in its own pixels.
@@ -758,7 +843,7 @@ function Examine({
   frames,
   ready,
   summary,
-  withCauses,
+  hover,
   sheet,
 }: {
   model: UnitSpec;
@@ -777,7 +862,7 @@ function Examine({
   frames: FrameStore;
   ready: boolean;
   summary: string;
-  withCauses: Set<DrawnSystem>;
+  hover: HoverPicker;
   sheet: (system: DrawnSystem) => ReactNode;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
@@ -874,12 +959,15 @@ function Examine({
               onPointerUp={(event) => {
                 const at = tapEnd(event);
                 if (!at || !viewer.current) return;
-                const hit = viewer.current.pick(at.x, at.y, withCauses);
+                const hit = viewer.current.pick(at.x, at.y);
                 if (hit) onPick(hit);
               }}
+              onPointerMove={(event) => ready && hover.move(event, (x, y) => viewer.current?.pick(x, y) ?? null)}
+              onPointerLeave={(event) => hover.leave(event)}
               onContextMenu={(event) => event.preventDefault()}
             />
             {ready && <Callouts store={frames} states={states} active={system ?? active} onPick={onPick} keep={system} full action="Examine" />}
+            {ready && <HoverLabel picker={hover} />}
             {!ready && <p className="absolute inset-x-0 top-6 text-center text-sm text-[#5f656b]">Loading the 3D unit…</p>}
           </div>
           <div data-examine-tools className="relative flex shrink-0 items-center gap-2 px-2 pt-1 pb-2">
@@ -919,26 +1007,116 @@ function Examine({
           </div>
         </div>
         {system && (
-          <aside
-            data-sheet={system}
-            aria-label={`${SYSTEM_LABELS[system]}: causes and manual pages`}
-            className="flex max-h-[52%] min-h-0 flex-col border-t border-white/10 bg-charcoal-900 lg:landscape:max-h-none lg:landscape:w-[26rem] lg:landscape:border-t-0 lg:landscape:border-l"
-          >
-            <div className="flex items-center gap-2.5 border-b border-white/10 px-4 py-2">
-              {state && <NumberMark glow={state.glow} muted={state.muted} rank={state.rank} size={22} />}
-              {state?.glow === "confirmed" && <ConfirmedMark size={16} />}
-              <div className="min-w-0 flex-1">
-                <h2 className="truncate text-[15px] font-semibold text-ink">{SYSTEM_LABELS[system]}</h2>
-                {state && <p className="text-xs text-ink-muted">{state.glow === "confirmed" ? "Confirmed" : glowWords(state.glow).replace(/^./, (c) => c.toUpperCase())}</p>}
-              </div>
-              <button type="button" onClick={onUnit} aria-label="Close the system" className={`${toolClass} border-transparent bg-transparent`}>
-                <CrossIcon />
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">{sheet(system)}</div>
-          </aside>
+          <SystemSheet
+            system={system}
+            state={state}
+            sheet={sheet}
+            onClose={onUnit}
+            // Below the unit on a phone or a portrait tablet; beside it on a
+            // wide screen, wider from 1280 so a part's manual page and what
+            // it says sit side by side.
+            className="max-h-[52%] border-t border-white/10 lg:landscape:max-h-none lg:landscape:w-[26rem] lg:landscape:border-t-0 lg:landscape:border-l xl:landscape:w-[min(44rem,48vw)]"
+          />
         )}
       </div>
+    </div>
+  );
+}
+
+// A system's sheet: its number, name and how likely it is, then what the
+// diagnosis screen gives it (its parts with their manual pages, and its
+// causes). Beside the unit in the examine view, or full screen on its own
+// where there's no 3D unit.
+function SystemSheet({
+  system,
+  state,
+  sheet,
+  onClose,
+  className = "",
+}: {
+  system: DrawnSystem;
+  state: ZoneState | undefined;
+  sheet: (system: DrawnSystem) => ReactNode;
+  // Back to the whole unit (the examine view); none on its own.
+  onClose?: () => void;
+  className?: string;
+}) {
+  return (
+    <aside data-sheet={system} aria-label={`${SYSTEM_LABELS[system]}: parts, manual pages and causes`} className={`flex min-h-0 flex-col bg-charcoal-900 ${className}`}>
+      <div className="flex items-center gap-2.5 border-b border-white/10 px-4 py-2">
+        {state && <NumberMark glow={state.glow} muted={state.muted} rank={state.rank} size={22} />}
+        {state?.glow === "confirmed" && <ConfirmedMark size={16} />}
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-[15px] font-semibold text-ink">{SYSTEM_LABELS[system]}</h2>
+          <p className="text-xs text-ink-muted">
+            {!state ? "No causes point here" : state.glow === "confirmed" ? "Confirmed" : glowWords(state.glow).replace(/^./, (c) => c.toUpperCase())}
+          </p>
+        </div>
+        {onClose && (
+          <button type="button" onClick={onClose} aria-label="Close the system" className={`${toolClass} border-transparent bg-transparent`}>
+            <CrossIcon />
+          </button>
+        )}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3">{sheet(system)}</div>
+    </aside>
+  );
+}
+
+// Where there's no 3D unit to examine (no WebGL, the GPU took it away, or
+// a unit the 3D models don't cover), a system tapped on the drawing opens
+// its sheet full screen on its own: in the address like the examine view
+// (?examine=<system>), so Back or Esc closes it, the page behind held, and
+// the focus back where it was.
+export function SheetView({
+  title,
+  system,
+  state,
+  sheet,
+  onClose,
+}: {
+  title: string;
+  system: DrawnSystem;
+  state: ZoneState | undefined;
+  sheet: (system: DrawnSystem) => ReactNode;
+  onClose: () => void;
+}) {
+  const closeButton = useRef<HTMLButtonElement>(null);
+  // What had the focus when it opened (a system on the drawing), as first
+  // rendered: by the time effects run the focus may be on Back already.
+  const [from] = useState(() => (document.activeElement instanceof HTMLElement || document.activeElement instanceof SVGElement ? document.activeElement : null));
+  useEffect(() => {
+    const release = holdPage(closeButton.current);
+    return () => {
+      release();
+      requestAnimationFrame(() => from?.isConnected && from.focus({ preventScroll: true }));
+    };
+  }, [from]);
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${SYSTEM_LABELS[system]} of the ${title}`}
+      data-sheet-view={system}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+      className="fixed inset-0 z-[35] flex flex-col bg-charcoal-900 text-ink"
+    >
+      <header className="flex items-center gap-2 border-b border-white/10 bg-charcoal-900 px-3 py-2">
+        <button ref={closeButton} type="button" data-examine-close onClick={onClose} className={toolClass}>
+          <BackIcon />
+          Back
+        </button>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold">{title}</p>
+          <p className="truncate text-xs text-ink-muted">Parts and manual pages</p>
+        </div>
+      </header>
+      <SystemSheet system={system} state={state} sheet={sheet} className="mx-auto w-full max-w-5xl flex-1" />
     </div>
   );
 }

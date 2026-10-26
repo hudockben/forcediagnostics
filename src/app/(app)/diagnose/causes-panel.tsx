@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, useId, useRef, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 
 import { causeSteps, howToCheckQuestion, specText, type CauseStep } from "@/lib/diagnose-cause-steps";
 import { SOURCE_LEVEL_LABELS, evidenceParts, sourceLevel } from "@/lib/diagnose-evidence";
@@ -55,7 +55,8 @@ import {
   WarningIcon,
   WrenchIcon,
 } from "./icons";
-import { Unit3D, UnitHeader, UnitKey, isDrawnSystem, unitName } from "./unit-3d";
+import { PartSheetSection } from "./part-sheet";
+import { SheetView, Unit3D, UnitHeader, UnitKey, isDrawnSystem, overlayRoot, unitName, useMounted } from "./unit-3d";
 import { UnitGraphic } from "./unit-graphic";
 import { UnitPicker } from "./unit-picker";
 import { useHistoryParam } from "./use-history-param";
@@ -620,9 +621,12 @@ function UnitCard({
   sheet: (system: DrawnSystem) => ReactNode;
 }) {
   const drawing = drawingFor(vehicle);
+  const mounted = useMounted();
   const states = [...zoneStates(rows.map((row) => ({ system: row.system, likelihood: row.cause.likelihood, status: row.status }))).values()];
   const drawn = states.filter((state) => state.system !== "other" && drawing.zones[state.system as Exclude<CauseSystem, "other">]);
   const offDrawing = states.filter((state) => !drawn.includes(state));
+  // Without a 3D model, a system tapped on the drawing opens its sheet on its own.
+  const sheetOnly = !model && mounted && examining !== null && examining !== "unit" ? examining : null;
   const note = drawn.length > 0 ? null : <p className="text-xs text-ink-muted">{hasReply ? "No system singled out yet." : "Flagged systems show here with Claude's first reply."}</p>;
   const key = (mode: ViewMode | null) => note ?? <UnitKey states={drawn} mode={mode} />;
   return (
@@ -647,11 +651,22 @@ function UnitCard({
           <div className="px-3 sm:px-4">
             <div className="unit-plate rounded-lg p-2">
               <div className={`relative mx-auto ${vehicle === "generator" ? "max-w-[15rem] sm:max-w-[20rem]" : "max-w-[19rem] sm:max-w-[28rem]"}`}>
-                <UnitGraphic vehicle={vehicle} states={drawn} active={active} onSelect={onSelect} />
+                <UnitGraphic vehicle={vehicle} states={drawn} active={active} onSelect={onSelect} onOpen={onExamine} />
               </div>
             </div>
           </div>
           <div className="px-3 pt-2.5 sm:px-4">{key(null)}</div>
+          {sheetOnly &&
+            createPortal(
+              <SheetView
+                title={VEHICLE_DRAWING_NAMES[vehicle]}
+                system={sheetOnly}
+                state={drawn.find((state) => state.system === sheetOnly)}
+                sheet={sheet}
+                onClose={onCloseExamine}
+              />,
+              overlayRoot(),
+            )}
         </>
       )}
       {offDrawing.length > 0 && (
@@ -1522,14 +1537,24 @@ export function CausesPanel({
     ...citedBy(null).map((source): [string, string] => [source.manualId, source.title]),
   ]);
 
-  // A system's causes, each with its steps and pictures of the manual pages
-  // it cites, in the full-screen view. Asking how to check one closes the
-  // view, so the message box is there to see.
+  // A system's sheet in the full-screen view: its parts with their manual
+  // pages (From the manual), then its causes, each with its steps and
+  // pictures of the manual pages it cites. Asking how to check one closes
+  // the view, so the message box is there to see.
   function sheet(system: DrawnSystem) {
     const mine = ordered.filter((row) => row.system === system);
-    if (mine.length === 0) return <p className="text-sm text-ink-muted">No causes point here.</p>;
     return (
-      <div className="space-y-4">
+      <div className="space-y-5">
+        <PartSheetSection key={system} conversationId={conversation.id} system={system} version={replyTurnId} />
+        {mine.length === 0 ? <p className="text-sm text-ink-muted">No causes point here.</p> : causesOf(mine)}
+      </div>
+    );
+  }
+
+  function causesOf(mine: CauseRow[]) {
+    return (
+      <section aria-label="Causes here" data-sheet-causes className="space-y-3">
+        <h3 className="text-xs font-semibold tracking-wide text-ink-muted uppercase">Causes</h3>
         <ol className="space-y-2">
           {mine.map((row) => {
             const ask = askFor(row);
@@ -1563,7 +1588,7 @@ export function CausesPanel({
             {message}
           </p>
         )}
-      </div>
+      </section>
     );
   }
 
@@ -1584,7 +1609,8 @@ export function CausesPanel({
               hasReply={reply !== null}
               examining={examining}
               onExamine={(target) => {
-                if (target !== "unit") setSelected(target);
+                // The list behind highlights the system's causes, if it has any.
+                if (target !== "unit" && rows.some((row) => row.system === target)) setSelected(target);
                 openExamine(target);
               }}
               onCloseExamine={closeExamine}

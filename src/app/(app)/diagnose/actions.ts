@@ -4,8 +4,6 @@ import { DrizzleQueryError } from "drizzle-orm";
 import { unstable_rethrow } from "next/navigation";
 
 import { changeUnit, getConversation, markCause, markStep, requestStop, type ConversationDetail } from "@/lib/diagnose";
-import { partSheet } from "@/lib/diagnose-part-sheet";
-import type { PartSheet } from "@/lib/diagnose-parts";
 import type {
   CauseVerdict,
   ConversationView,
@@ -19,12 +17,12 @@ import type {
 import type { StepState } from "@/lib/diagnose-step-checks";
 import { previewVin, suggestUnits } from "@/lib/diagnose-tools";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
-import type { PageRef } from "@/lib/manual-facts-rules";
 import { requireCapability } from "@/lib/session";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 
 // The Diagnose screen's small actions. Sending a message goes through the
-// streaming route instead (src/app/api/diagnose/turn/route.ts).
+// streaming route instead (src/app/api/diagnose/turn/route.ts), and the
+// part sheet through its own (src/app/api/diagnose/part-sheet/route.ts).
 
 type Failed = { error: string };
 
@@ -129,27 +127,4 @@ export async function loadConversationAction(id: string): Promise<ConversationDe
   const user = await requireCapability("diagnostics.work");
   const result = await attempt("load the diagnosis", () => getConversation(user, String(id ?? "")));
   return result ?? { error: "That diagnosis isn't in this shop." };
-}
-
-// The part sheet for a system of the unit the tech tapped: its parts, the
-// manual pages that show the one picked (or the first), and the large
-// page's card. With a page, that page's card, read the first time anyone
-// opens it (a few seconds, once); the same people can as can see the
-// diagnosis.
-export async function partSheetAction(input: {
-  conversationId: string;
-  system: string;
-  part?: string;
-  page?: PageRef | null;
-}): Promise<PartSheet | Failed> {
-  const user = await requireCapability("diagnostics.work");
-  const page = input?.page && typeof input.page === "object" ? { manualId: String(input.page.manualId ?? ""), page: Number(input.page.page) } : null;
-  return attempt("open the part", () =>
-    partSheet(user, {
-      conversationId: String(input?.conversationId ?? ""),
-      system: String(input?.system ?? ""),
-      part: typeof input?.part === "string" ? input.part : undefined,
-      page,
-    }),
-  );
 }

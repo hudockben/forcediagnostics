@@ -326,6 +326,36 @@ export type PartSheet = {
   facts: { page: PageRef; state: FactsState } | null;
 };
 
+// --- On the screen --------------------------------------------------------------
+
+export const samePage = (a: PageRef, b: PageRef) => a.manualId.toLowerCase() === b.manualId.toLowerCase() && a.page === b.page;
+
+// The page drawn large: the one the tech picked among the part's pages,
+// else the best.
+export function largePage(sheet: Pick<PartSheet, "pages">, picked: PageRef | null): PartPage | null {
+  return (picked && sheet.pages.find((page) => samePage(page, picked))) || sheet.pages[0] || null;
+}
+
+// The part's other pages, best first, for the small pictures under it.
+export function otherPages(sheet: Pick<PartSheet, "pages">, large: PageRef): PartPage[] {
+  return sheet.pages.filter((page) => !samePage(page, large));
+}
+
+// A page's card as the sheet brought it: only the large page's, the first
+// time (null for any other page, which is asked for on its own).
+export function cardOf(sheet: Pick<PartSheet, "facts">, page: PageRef): FactsState | null {
+  return sheet.facts && samePage(sheet.facts.page, page) ? sheet.facts.state : null;
+}
+
+// Whether asking about a page's card again now would change nothing: read,
+// read with nothing on it, or not readable now (no API key, the day's
+// readings used, a failed read tried again only later). "unread" and
+// "reading" are worth asking again.
+export const cardSettled = (state: FactsState) => state.status === "ready" || state.status === "empty" || state.status === "unavailable";
+
+// The Library's search for a part, for a unit with no page for it.
+export const partLibraryHref = (part: string) => `/library?q=${encodeURIComponent(part.replace(/\s+/g, " ").trim())}`;
+
 // --- Ranking a part's pages -----------------------------------------------------
 
 // Words a service procedure's page has in its headings and boxes
