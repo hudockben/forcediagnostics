@@ -48,6 +48,21 @@ export type Likelihood = (typeof LIKELIHOODS)[number];
 export const CAUSE_STATUSES = ["open", "ruled_out", "confirmed"] as const;
 export type CauseStatus = (typeof CAUSE_STATUSES)[number];
 
+// Claude's confidence in a cause (0-100: how likely it is behind the
+// symptoms, given everything so far; the causes needn't add up to 100) sets
+// its likelihood, so the heat bar, the unit's glow and callouts and the %
+// never disagree: high from 60, medium from 30, low under that. The prompt
+// gives Claude the same bands.
+export const CONFIDENCE_BANDS = { high: 60, medium: 30 } as const;
+export const likelihoodFor = (confidence: number): Likelihood =>
+  confidence >= CONFIDENCE_BANDS.high ? "high" : confidence >= CONFIDENCE_BANDS.medium ? "medium" : "low";
+
+// What Claude says a cause's confidence rests on: what the tech reported,
+// the fault codes, the results of checks the tech has done, the manual pages
+// and web pages it cites, and its own experience of these machines.
+export const BASED_ON = ["tech_report", "fault_codes", "step_results", "manual", "web", "experience"] as const;
+export type BasedOn = (typeof BASED_ON)[number];
+
 // How much work a check is, or confirming or ruling out a cause, the way an
 // experienced tech tiers it: a quick look (minutes, no tools or teardown),
 // a test (a meter, gauge, scan tool or Digital Wrench, or a road test), or
@@ -85,6 +100,11 @@ export type Cause = {
   // How much work it is to confirm or rule out. Replies saved before causes
   // carried it don't have it (no chip shows).
   checkEffort?: Effort;
+  // Claude's confidence (a whole number, 0-100) and what it rests on, once
+  // each, in BASED_ON's order. Replies saved before causes carried them have
+  // neither, and show no %.
+  confidence?: number;
+  basedOn?: BasedOn[];
 };
 
 export type Check = {
@@ -428,6 +448,22 @@ export function checkSources(raw: unknown, seen: SeenSources): { sources: Source
 const pick = <T extends string>(value: unknown, allowed: readonly T[], otherwise: T): T =>
   allowed.includes(value as T) ? (value as T) : otherwise;
 
+// A confidence as Claude sent it, rounded and held to 0-100, or null when
+// it isn't a number. The tools stream their input, so the API doesn't hold
+// Claude to the schema's integer (and strict tools can't give a minimum or
+// maximum anyway): "72", "72%" and 71.6 are all 72.
+export function confidenceOf(value: unknown): number | null {
+  const number = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value.trim().replace(/%$/, "")) : NaN;
+  return Number.isFinite(number) ? Math.min(100, Math.max(0, Math.round(number))) : null;
+}
+
+// What a confidence rests on: the values on the list (case, spaces and
+// dashes aside), once each, in BASED_ON's order; anything else is dropped.
+export function basedOnOf(value: unknown): BasedOn[] {
+  const given = new Set((Array.isArray(value) ? value : []).map((item) => (typeof item === "string" ? item.trim().toLowerCase().replace(/[\s-]+/g, "_") : "")));
+  return BASED_ON.filter((item) => given.has(item));
+}
+
 // Words that say how much work a check is, for a tier Claude didn't give or
 // gave as something else (the tools stream their input, so the API doesn't
 // hold Claude to the enum). Teardown is taking something apart, or off, or
@@ -517,18 +553,23 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
       dropped += checked.dropped;
       const title = tidyText(cause.title, 160);
       const why = tidyText(cause.why, 1000);
+      const confidence = confidenceOf(cause.confidence);
       return {
         title,
         // The tools stream their input (eager_input_streaming), so the API
         // doesn't hold Claude to the enum: a missing or unlisted system is
         // worked out from the cause's words, like an older reply's.
         system: listedSystem(cause.system) ?? inferSystem(title, why),
-        likelihood: pick(cause.likelihood, LIKELIHOODS, "medium"),
+        // The confidence's band when there is one (the bar and the % must
+        // agree), Claude's own likelihood otherwise. The causes keep Claude's
+        // order: checks and the tech refer to them by their numbers.
+        likelihood: confidence !== null ? likelihoodFor(confidence) : pick(cause.likelihood, LIKELIHOODS, "medium"),
         why,
         status: pick(cause.status, CAUSE_STATUSES, "open"),
         sources: checked.sources.length > 0 ? checked.sources : [{ type: "general" as const }],
         // Likewise worked out from the words when it isn't one of the three.
         checkEffort: listedEffort(cause.check_effort) ?? inferEffort(title, why),
+        ...(confidence !== null ? { confidence, basedOn: basedOnOf(cause.based_on) } : {}),
       };
     });
   const likelyCauses: Cause[] = causes.filter((cause) => cause.title);

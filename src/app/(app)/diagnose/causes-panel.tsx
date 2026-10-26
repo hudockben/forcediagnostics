@@ -5,6 +5,7 @@ import { Fragment, useState, type FocusEvent, type PointerEvent, type ReactNode 
 import { flushSync } from "react-dom";
 
 import { causeSteps, howToCheckQuestion, specText, type CauseStep } from "@/lib/diagnose-cause-steps";
+import { SOURCE_LEVEL_LABELS, evidenceParts, sourceLevel, type SourceLevel } from "@/lib/diagnose-evidence";
 import {
   EFFORT_LABELS,
   checkGroups,
@@ -58,9 +59,10 @@ import { useHistoryParam } from "./use-history-param";
 
 // The diagnosis at a glance, beside the chat (or on its own tab on a
 // tablet): the unit drawing with its suspect systems lit, safety notes,
-// Claude's likely causes, each with the checks that confirm or rule it out
-// (with their specs) and the tech's "Ruled out" / "This was it", and the
-// unit and manuals in use.
+// Claude's likely causes (each with its confidence and what that rests on),
+// each with the checks that confirm or rule it out (with their specs and
+// where those come from) and the tech's "Ruled out" / "This was it", and
+// the unit and manuals in use.
 
 // --- Pieces ----------------------------------------------------------------------
 
@@ -160,13 +162,25 @@ const METER: Record<Cause["likelihood"], { lit: number; color: string }> = {
   low: { lit: 1, color: "bg-ink-muted" },
 };
 
-function LikelihoodMeter({ likelihood }: { likelihood: Cause["likelihood"] }) {
+// Likelihood as a three-segment heat bar on the title's first line, and
+// while the cause is open, Claude's confidence right after it (the bar is
+// set from it, so the two agree). The % has a fixed width, so the bars line
+// up down the list. A reply saved before causes carried a confidence has
+// the bar alone.
+function LikelihoodMeter({ likelihood, confidence }: { likelihood: Cause["likelihood"]; confidence?: number }) {
   const { lit, color } = METER[likelihood];
   return (
-    <span role="img" aria-label={`Likelihood: ${likelihood}`} title={`Likelihood: ${likelihood}`} data-likelihood={likelihood} className="flex shrink-0 gap-0.5 pt-2">
-      {[1, 2, 3].map((segment) => (
-        <span key={segment} className={`h-2 w-3.5 rounded-[2px] ${segment <= lit ? color : "bg-white/10"}`} />
-      ))}
+    <span className="flex h-6 shrink-0 items-center gap-1.5">
+      <span role="img" aria-label={`Likelihood: ${likelihood}`} title={`Likelihood: ${likelihood}`} data-likelihood={likelihood} className="flex gap-0.5">
+        {[1, 2, 3].map((segment) => (
+          <span key={segment} className={`h-2 w-3.5 rounded-[2px] ${segment <= lit ? color : "bg-white/10"}`} />
+        ))}
+      </span>
+      {confidence !== undefined && (
+        <span data-confidence={confidence} title={`Claude's confidence: ${confidence}%`} className="w-8 text-right text-xs leading-none font-semibold text-ink/90 tabular-nums">
+          {confidence}%<span className="sr-only"> confidence</span>
+        </span>
+      )}
     </span>
   );
 }
@@ -432,6 +446,10 @@ function CauseItem({
   }
 
   const confirmed = status === "confirmed";
+  // Claude's confidence and what it rests on, while the cause is open (a
+  // confirmed one says so already, and a ruled-out one has been checked).
+  const confidence = status === "open" && typeof cause.confidence === "number" ? cause.confidence : undefined;
+  const evidence = confidence !== undefined ? evidenceParts(cause) : [];
   return (
     <li
       {...common}
@@ -454,8 +472,25 @@ function CauseItem({
               {cause.title}
             </p>
             {isNew && <NewTag />}
-            <LikelihoodMeter likelihood={cause.likelihood} />
+            <LikelihoodMeter likelihood={cause.likelihood} confidence={confidence} />
           </div>
+          {/* One quiet line under the title: what the % rests on. On a
+              narrow phone a long one wraps between its parts, never inside
+              one, and no line starts with a dot. */}
+          {evidence.length > 0 && (
+            <p data-evidence className="-mt-1.5 text-xs leading-5 text-ink-muted">
+              <span className="sr-only">Claude&apos;s {confidence}% rests on: </span>
+              {evidence.map((part, index) => (
+                <Fragment key={part}>
+                  <span className="whitespace-nowrap">
+                    {part}
+                    {index < evidence.length - 1 && " ·"}
+                  </span>
+                  {index < evidence.length - 1 && " "}
+                </Fragment>
+              ))}
+            </p>
+          )}
           <div onClick={(event) => event.stopPropagation()} className="space-y-2">
             <WhyLine text={cause.why} lead={status === "open" && cause.checkEffort ? <EffortLead effort={cause.checkEffort} /> : undefined} />
             <div data-cause-chips className="flex flex-wrap items-start gap-2">
@@ -592,39 +627,66 @@ function AlsoChecks({ refs }: { refs: CauseRef[] }) {
   );
 }
 
-// A check's expected reading or spec: teal SPEC from the shop's manuals, or
-// amber and dashed VERIFY, never the manual spec's teal, so a number Claude
-// gave from general knowledge doesn't pass for one.
+// Where a step's spec or procedure comes from (sourceLevel): the shop's
+// manuals (teal), a web source (white), or general knowledge, to verify
+// first (amber and dashed, never the manuals' teal, so a number Claude gave
+// from memory doesn't pass for one). A spec carries it as its chip's label:
+// MANUAL, or VERIFY for one with no manual page behind it (from the web
+// too: the web is for patterns, not specs).
 function SpecChip({ check }: { check: Check }) {
-  if (check.expected) {
-    return check.unverifiedSpec ? (
-      <span
-        data-spec="unverified"
-        title="Not from your manuals — verify before you rely on it"
-        className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail"
-      >
-        <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-semibold tracking-wide text-trail/90 uppercase">
-          <WarningIcon className="size-3" />
-          Verify
-        </span>
-        <span className="min-w-0 break-words">{specText(check.expected)}</span>
-        <span className="sr-only">Not from your manuals — verify</span>
-      </span>
-    ) : (
+  if (!check.expected) return null;
+  if (sourceLevel(check) === "manual") {
+    return (
       <span
         data-spec="manual"
+        data-source-level="manual"
+        title={SOURCE_LEVEL_LABELS.manual.detail}
         className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow"
       >
-        <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">Spec</span>
+        <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">{SOURCE_LEVEL_LABELS.manual.label}</span>
         <span className="min-w-0 break-words">{specText(check.expected)}</span>
       </span>
     );
   }
-  if (!check.unverifiedSpec) return null;
+  const web = check.sources.some((source) => source.type === "web");
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-trail/15 px-2 py-1 text-xs font-medium text-trail">
-      <WarningIcon className="size-3.5" />
-      Not from your manuals — verify
+    <span
+      data-spec="unverified"
+      data-source-level="general"
+      title={`${web ? "From the web, not your manuals" : "Not from your manuals"} — verify before you rely on it`}
+      className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail"
+    >
+      <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-semibold tracking-wide text-trail/90 uppercase">
+        <WarningIcon className="size-3" />
+        Verify
+      </span>
+      <span className="min-w-0 break-words">{specText(check.expected)}</span>
+      <span className="sr-only">Not from your manuals — verify</span>
+    </span>
+  );
+}
+
+const LEVEL_TAG: Record<SourceLevel, string> = {
+  manual: "border-glow/45 text-glow",
+  web: "border-white/25 text-ink/85",
+  general: "border-dashed border-trail/70 text-trail",
+};
+
+// A step without a spec says where its procedure comes from in a small tag
+// at the end of its words, in the colours of a spec chip at that level, so
+// the level costs no row of its own (a short tag at a line's end).
+function LevelTag({ check }: { check: Check }) {
+  if (check.expected) return null;
+  const level = sourceLevel(check);
+  const { label, detail } = SOURCE_LEVEL_LABELS[level];
+  return (
+    <span
+      data-source-level={level}
+      title={detail}
+      className={`ml-1.5 inline-flex h-5 items-center rounded border px-1.5 align-[1px] text-[10px] leading-none font-semibold tracking-wide whitespace-nowrap uppercase ${LEVEL_TAG[level]}`}
+    >
+      <span className="sr-only">Source: </span>
+      {label}
     </span>
   );
 }
@@ -632,8 +694,10 @@ function SpecChip({ check }: { check: Check }) {
 // A next check of a reply saved before checks said which causes they're
 // for, in its list of its own: its step (numbered on across the tiers, and
 // called a step so it isn't taken for a cause's number), what to do, and its
-// spec and sources.
+// spec and sources, with where they come from as a cause's steps have it
+// (so no General chip: its tag says so).
 function CheckItem({ check, step }: { check: Check; step: number }) {
+  const sources = check.sources.filter((source) => source.type !== "general");
   return (
     <li data-step={step} className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
       <span className="flex w-8 shrink-0 flex-col items-center pt-0.5 leading-none" aria-label={`Step ${step}`}>
@@ -645,11 +709,14 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
         </span>
       </span>
       <div className="min-w-0 flex-1 space-y-2">
-        <p className="text-sm leading-6 break-words text-ink">{check.action}</p>
-        {(check.expected || check.unverifiedSpec || check.sources.length > 0) && (
+        <p className="text-sm leading-6 break-words text-ink">
+          {check.action}
+          <LevelTag check={check} />
+        </p>
+        {(check.expected || sources.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
             <SpecChip check={check} />
-            <SourceChips sources={check.sources} />
+            <SourceChips sources={sources} />
           </div>
         )}
         <PageThumbs sources={check.sources} />
@@ -720,13 +787,15 @@ function TierTag({ tier }: { tier: Effort }) {
 
 // One step of a cause's "How to check", or of Start here: its number in the
 // card (a list's "1." rather than a square, so it isn't taken for a
-// cause's number), its tier, what to do, then in one row that wraps (so a
-// short step takes one line) its spec, the manual pages and web pages it
-// cites, the other causes it also settles, and pictures of the pages that
-// the card doesn't show already (small, at the row's end; under it in the
-// full-screen sheet). No "General" chip: most steps would have one, a row
-// each, and it cites nothing (a spec from general knowledge says so in its
-// VERIFY chip; the cause's own chips still say where its idea came from).
+// cause's number), its tier, what to do and, without a spec, where that
+// comes from (Manual, Web or General, at the end of its words), then in one
+// row that wraps (so a short step takes one line) its spec (labelled MANUAL
+// or VERIFY), the manual pages and web pages it cites, the other causes it
+// also settles, and pictures of the pages that the card doesn't show
+// already (small, at the row's end; under it in the full-screen sheet). No
+// "General" chip: most steps would have one, a row each, and it cites
+// nothing (the step's tag or VERIFY chip says so; the cause's own chips
+// still say where its idea came from).
 function StepItem({
   step,
   number,
@@ -755,6 +824,7 @@ function StepItem({
           </span>
           {tier && <TierTag tier={tier} />}
           {check.action}
+          <LevelTag check={check} />
         </p>
         <SpecChip check={check} />
         <SourceChips sources={check.sources.filter((source) => source.type !== "general")} />

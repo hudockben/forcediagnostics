@@ -1155,7 +1155,10 @@ export async function carryOver(user: CurrentUser, id: string) {
   if (reply?.likelyCauses.length) {
     lines.push(
       "Likely causes so far:",
-      ...reply.likelyCauses.map((cause) => `- ${cause.title} (${cause.status === "open" ? cause.likelihood : cause.status.replace("_", " ")})`),
+      ...reply.likelyCauses.map(
+        (cause) =>
+          `- ${cause.title} (${cause.status !== "open" ? cause.status.replace("_", " ") : typeof cause.confidence === "number" ? `${cause.likelihood}, ${cause.confidence}%` : cause.likelihood})`,
+      ),
     );
   }
   if (reply?.nextChecks.length) lines.push("Checks that were next:", ...reply.nextChecks.map((check) => `- ${check.action}`));

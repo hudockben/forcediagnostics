@@ -210,7 +210,7 @@ describe("the prompt and submit_diagnosis", () => {
     assert.match(String(checks.items!.properties!.causes.description), /^The number of every likely cause this check confirms or rules out .*An empty list only for a check that isn't about any one cause/);
   });
 
-  test("the schema's shape is as before, so every stored reply still fits it", () => {
+  test("the checks' shape is as before; a cause also has its confidence and what it rests on", () => {
     const input = submitSchema();
     assert.deepEqual(input.required, ["reply", "likely_causes", "next_checks", "safety_notes", "questions_for_tech"]);
     const item = input.properties!.next_checks.items!;
@@ -220,7 +220,7 @@ describe("the prompt and submit_diagnosis", () => {
     assert.deepEqual(item.properties!.causes.type, "array");
     assert.deepEqual(item.properties!.causes.items, { type: "integer" });
     const causeItem = input.properties!.likely_causes.items!;
-    assert.deepEqual(causeItem.required, ["title", "system", "likelihood", "why", "status", "check_effort", "sources"]);
+    assert.deepEqual(causeItem.required, ["title", "system", "confidence", "likelihood", "based_on", "why", "status", "check_effort", "sources"]);
   });
 
   test("the system prompt and tools are the same on every request (they're cached)", () => {

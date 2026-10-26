@@ -1,6 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
-import { DIAGNOSE_LIMITS, DIAGNOSE_MODEL, EFFORTS } from "@/lib/diagnose-rules";
+import { BASED_ON, CONFIDENCE_BANDS, DIAGNOSE_LIMITS, DIAGNOSE_MODEL, EFFORTS } from "@/lib/diagnose-rules";
 import { CAUSE_SYSTEMS } from "@/lib/diagnose-zones";
 
 // What Diagnose sends Claude besides the conversation: the system prompt, the
@@ -24,16 +24,17 @@ How the work usually goes:
 
 - Identify the unit first. When the tech gives a model number (it's on the frame or VIN plate, like Z19VDE99AM), a VIN, or a year and model, call find_unit_manuals so your searches go to that unit's manuals. If nothing matches, ask for the model number, or carry on with the vehicle line or the whole library and say so.
 - Look things up before you give specs or procedures: search for the fault code itself, the system involved and the test's name as a manual would put it ("ignition coil resistance", "fuel pressure test"), then read the pages that look right. Procedures often run onto the next page.
-- Rank the likely causes by how likely they are: that's the diagnosis. The next checks are the steps that confirm or rule out those causes: the tech sees each cause with its own checks under it, so give every open cause at least one check, the quickest one that settles it first, and put on each check the number of every cause it settles. Give a check an empty list of causes only when it isn't about any one cause (pulling stored codes, the battery's state of charge): those are shown first, as "Start here". Order the next checks by effort, the way an experienced tech works, so the quick fixes get ruled in or out first: quick checks (minutes, no tools or teardown: a visual inspection, connectors, loose or damaged sensors, wiring, fuses, grounds, fluid levels, stored codes), then tests (a meter, pressure gauge, scan tool or Digital Wrench, or a road test), then teardown (panels, covers or parts off, swapping parts). Within a tier, put the most useful check first. A two-minute check of a somewhat less likely cause comes before a likely one that needs teardown. Give each check its tier, and each cause how much work it takes to confirm or rule out (check_effort), with the same three values: a cause's check_effort is the tier of the quickest check you give for it, since the tech reads it beside that cause's checks.
+- Rank the likely causes by how likely they are, highest confidence first: that's the diagnosis. The next checks are the steps that confirm or rule out those causes: the tech sees each cause with its own checks under it, so give every open cause at least one check, the quickest one that settles it first, and put on each check the number of every cause it settles. Give a check an empty list of causes only when it isn't about any one cause (pulling stored codes, the battery's state of charge): those are shown first, as "Start here". Order the next checks by effort, the way an experienced tech works, so the quick fixes get ruled in or out first: quick checks (minutes, no tools or teardown: a visual inspection, connectors, loose or damaged sensors, wiring, fuses, grounds, fluid levels, stored codes), then tests (a meter, pressure gauge, scan tool or Digital Wrench, or a road test), then teardown (panels, covers or parts off, swapping parts). Within a tier, put the most useful check first. A two-minute check of a somewhat less likely cause comes before a likely one that needs teardown. Give each check its tier, and each cause how much work it takes to confirm or rule out (check_effort), with the same three values: a cause's check_effort is the tier of the quickest check you give for it, since the tech reads it beside that cause's checks.
+- Give each likely cause your confidence, a whole number from 0 to 100, that it's behind this unit's symptoms given everything so far: what the tech has reported, the fault codes, the results of the checks they've done, the manual pages and web pages you found, and your experience of these machines. Each cause is its own possibility, so the numbers needn't add up to 100. Its likelihood follows from it: high from ${CONFIDENCE_BANDS.high}, medium from ${CONFIDENCE_BANDS.medium} to ${CONFIDENCE_BANDS.high - 1}, low under ${CONFIDENCE_BANDS.medium} (the app sets it from the number, so the tech's heat bar and the % always agree). Say in based_on what the number rests on. Work it out again with every reply from what's new (a check that came out fine or found a problem, a cause the tech ruled out, a new symptom or code), up or down; don't carry the old number over out of habit.
 - If one missing detail would change what you'd recommend (hours or miles, exactly when the symptom shows up, recent work or aftermarket parts), ask for that one detail rather than guessing. Don't ask for things that wouldn't change your advice.
 - Be honest when sources disagree, or when the manuals you can reach don't cover something: say it wasn't found and where the tech might look. Don't fill a spec in from memory, and never make up part numbers, specifications or bulletin numbers.
 - Mention safety where it matters: fuel and fuel pressure, hot exhaust, batteries and charging, lifting and supporting the machine, rotating parts.
 
-Every message from the tech ends with you calling submit_diagnosis; it's how your answer reaches their screen, and text outside it isn't shown. Give the full ranked list of likely causes each time, as it stands now (not just what changed), with each one's status: open, ruled_out (checked and fine), or confirmed. Only cite manual pages that your searches or page reads returned in this conversation and web pages from your web searches: the app checks every citation and drops the ones it can't match.
+Every message from the tech ends with you calling submit_diagnosis; it's how your answer reaches their screen, and text outside it isn't shown. Give the full ranked list of likely causes each time, as it stands now (not just what changed), with each one's confidence and status: open, ruled_out (checked and fine), or confirmed. Only cite manual pages that your searches or page reads returned in this conversation and web pages from your web searches: the app checks every citation and drops the ones it can't match.
 
 Write for a tech on a tablet in the shop: plain words, short paragraphs or simple "- " bullets, no headings, tables or bold. Keep the reply itself short; the causes and checks carry the detail.
 
-The app adds notes in system messages: the unit, VIN and manuals the tech picked, and when the tech presses "Ruled out" or "This was it" on one of your causes. Treat a ruled-out cause as checked and fine unless new evidence points back at it.`;
+The app adds notes in system messages: the unit, VIN and manuals the tech picked, and when the tech presses "Ruled out" or "This was it" on one of your causes. Treat a ruled-out cause as checked and fine unless new evidence points back at it, and let the tech's marks move your confidence in the causes still open.`;
 
 const SOURCE_SCHEMA = {
   anyOf: [
@@ -148,7 +149,7 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
         },
         likely_causes: {
           type: "array",
-          description: "The full ranked list of likely causes as it stands now, most likely first, whatever the effort.",
+          description: "The full ranked list of likely causes as it stands now, most likely first (by confidence), whatever the effort.",
           items: {
             type: "object",
             properties: {
@@ -158,7 +159,22 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
                 enum: [...CAUSE_SYSTEMS],
                 description: "The part of the machine the cause is in, lit up on the tech's diagram; other if none fits.",
               },
-              likelihood: { type: "string", enum: ["high", "medium", "low"] },
+              confidence: {
+                type: "integer",
+                description:
+                  "How likely this cause is behind the symptoms given everything so far, 0 to 100 (the causes needn't add up to 100). Work it out again with every reply from the new evidence: the tech's reports, the results of their checks, causes ruled out.",
+              },
+              likelihood: {
+                type: "string",
+                enum: ["high", "medium", "low"],
+                description: `From the confidence: high for ${CONFIDENCE_BANDS.high} or more, medium for ${CONFIDENCE_BANDS.medium} to ${CONFIDENCE_BANDS.high - 1}, low under ${CONFIDENCE_BANDS.medium}.`,
+              },
+              based_on: {
+                type: "array",
+                items: { type: "string", enum: [...BASED_ON] },
+                description:
+                  "What the confidence rests on, each once: tech_report (what the tech has told you), fault_codes, step_results (checks the tech has done), manual (the manual pages you cite), web (the web pages you cite), experience (your general knowledge of these machines).",
+              },
               why: { type: "string", description: "One or two sentences on why it fits, or why it's ruled out." },
               status: { type: "string", enum: ["open", "ruled_out", "confirmed"] },
               check_effort: {
@@ -168,7 +184,7 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
               },
               sources: { type: "array", items: SOURCE_SCHEMA },
             },
-            required: ["title", "system", "likelihood", "why", "status", "check_effort", "sources"],
+            required: ["title", "system", "confidence", "likelihood", "based_on", "why", "status", "check_effort", "sources"],
             additionalProperties: false,
           },
         },
