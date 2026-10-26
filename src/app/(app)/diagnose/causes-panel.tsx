@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 
 import {
   EFFORT_LABELS,
@@ -819,6 +820,22 @@ function inSight(element: Element) {
   return rect.top >= top - 1 && rect.bottom <= bottom + 1;
 }
 
+// Where an element is on screen now, and a way to put it back there after
+// what's above it changes height: the page (or, beside the chat, the
+// diagnosis pane) scrolls by however far it moved. The browser's own scroll
+// anchoring can't be left to it: it may hold on to a cause that just moved.
+function holdOnScreen(element: Element | null) {
+  if (!element) return () => {};
+  const top = element.getBoundingClientRect().top;
+  return () => {
+    const moved = element.getBoundingClientRect().top - top;
+    if (Math.abs(moved) < 1) return;
+    const pane = document.getElementById("diagnosis-pane");
+    if (pane?.contains(element) && pane.scrollHeight > pane.clientHeight) pane.scrollBy(0, moved);
+    else window.scrollBy(0, moved);
+  };
+}
+
 export function CausesPanel({
   conversation,
   reply,
@@ -866,11 +883,14 @@ export function CausesPanel({
       setMessage(result.error);
       return;
     }
-    onConversation(result);
     // The cause may have moved (ruled out sinks, confirmed rises). The page
-    // stays where it is for a tap; from the keyboard, the focus (and the
-    // view) follows the cause.
+    // stays where it is for a tap, though the key under the drawing above
+    // the list can change height (a ruled-out system joins it); from the
+    // keyboard, the focus (and the view) follows the cause.
+    const hold = viaKeyboard ? () => {} : holdOnScreen(document.getElementById("likely-causes"));
+    flushSync(() => onConversation(result));
     requestAnimationFrame(() => {
+      hold();
       const button =
         document.querySelector<HTMLButtonElement>(`li[data-cause="${index}"] button[data-mark="${pressed ?? "ruled_out"}"]`) ??
         document.querySelector<HTMLButtonElement>(`li[data-cause="${index}"] button`);
@@ -1003,7 +1023,7 @@ export function CausesPanel({
         </div>
 
         <div className="space-y-4 xl:col-start-1 xl:row-start-1">
-          <Section label="Likely causes" icon={<CausesIcon />} count={rows.length > 0 ? rows.length : undefined}>
+          <Section id="likely-causes" label="Likely causes" icon={<CausesIcon />} count={rows.length > 0 ? rows.length : undefined}>
             {!reply || reply.likelyCauses.length === 0 ? (
               <p className="text-sm leading-6 text-ink-muted">
                 {reply ? "None yet. Tell Claude more about what the unit is doing." : "Claude's list shows here after its first reply."}
