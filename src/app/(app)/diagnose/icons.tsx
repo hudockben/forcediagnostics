@@ -182,3 +182,24 @@ export const ZoomOutIcon = (p: Props) => (
     <path d="m10.2 10.2 3.6 3.6M5 7h4" />
   </Icon>
 );
+
+// How much work a check is: a quick look, a test with a meter, teardown.
+export const QuickIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="8" cy="9" r="5.25" />
+    <path d="M8 9V6.25M6.5 1.75h3M12.4 4.6l.9-.9" />
+  </Icon>
+);
+
+export const MeterIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M2.25 11.5a5.75 5.75 0 0 1 11.5 0" />
+    <path d="M8 11.5 10.75 7M2.25 13.75h11.5" />
+  </Icon>
+);
+
+export const WrenchIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M10.6 2.1a3.4 3.4 0 0 0-3.9 4.5L2.3 11a1.5 1.5 0 0 0 2.1 2.1l4.4-4.4a3.4 3.4 0 0 0 4.5-3.9l-2 2-1.9-.4-.4-1.9z" />
+  </Icon>
+);

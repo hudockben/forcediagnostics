@@ -47,6 +47,7 @@ import { cleanLibraryFilters, hasLibraryFilters, listReadyManuals } from "@/lib/
 import { VEHICLE_NAMES, brandLabel } from "@/lib/manual-catalog-rules";
 import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
+import { checkVin, vinMatchesModelNumber, vinModelCode, vinYears } from "@/lib/vin";
 
 // Diagnose's conversations: starting one, each tech message (a turn) and
 // Claude's work on it, the tech's feedback on causes, and the shop's usage.
@@ -127,6 +128,7 @@ function toConversationView(
     title: conversation.title,
     status: conversation.status,
     unit: conversation.unitLabel,
+    vin: conversation.unitVin,
     vehicle,
     model,
     scope,
@@ -284,6 +286,8 @@ export async function monthStats(shopId: string): Promise<MonthStats> {
 // What the quick form or the free-typed box sends to start a conversation.
 export type StartInput = {
   modelNumber?: string;
+  // Optional; checked like the quick form checks it (src/lib/vin.ts).
+  vin?: string;
   vehicle?: string;
   brand?: string;
   year?: string;
@@ -321,6 +325,34 @@ function scopeNote(label: string | null, manualTitles: string[], how: string) {
   return `${how}: ${label}. Searches and page reads use ${manualTitles.length === 1 ? "its manual" : `its ${manualTitles.length} manuals`}: ${list}${manualTitles.length > 12 ? "; …" : ""}.`;
 }
 
+// What Claude is told about the VIN the tech gave: what it decoded to, and
+// whether it found the unit or agrees with the model number.
+function vinNote(
+  vin: { vin: string; checkDigitOk: boolean },
+  how: { found: string | null; modelNumber: string | null; carried?: boolean },
+) {
+  const code = vinModelCode(vin.vin);
+  const lines = [`The tech gave the unit's VIN: ${vin.vin}.`];
+  if (how.carried) {
+    // Carried over with the unit from the earlier diagnosis.
+  } else if (how.found) {
+    lines.push(`Its model code ${code} (characters 4-8) and model year (character 10) match ${how.found} in the shop's model list.`);
+  } else if (how.modelNumber) {
+    lines.push(
+      vinMatchesModelNumber(vin.vin, how.modelNumber)
+        ? `Its model code ${code} and model year agree with model number ${how.modelNumber}.`
+        : `Its model code ${code} (characters 4-8) and model year (character 10, ${vinYears(vin.vin).join(" or ") || "not a year code"}) don't agree with model number ${how.modelNumber} (characters 4-8 and 2-3), so one of them may be off: ask the tech.`,
+    );
+  } else {
+    lines.push(
+      `Its model code ${code} (characters 4-8) with model year ${vinYears(vin.vin).join(" or ") || "unknown"} (character 10) doesn't match a model number in the shop's model list, so it didn't identify the unit.`,
+    );
+  }
+  if (!vin.checkDigitOk) lines.push("Its check digit (character 9) doesn't match the rest, so a character may be off.");
+  lines.push("You can use the VIN, for example to look up recalls or service bulletins on the web.");
+  return lines.join(" ");
+}
+
 // Works out a new conversation's unit, manuals, title and first message.
 async function planStart(user: CurrentUser, start: StartInput) {
   const shopId = user.shop.id;
@@ -331,16 +363,28 @@ async function planStart(user: CurrentUser, start: StartInput) {
   if (!complaint && !message && codes.length === 0) {
     return { error: "Say what the unit is doing (the complaint), or type a message.", status: 400 } as Problem;
   }
+  const vinCheck = checkVin(str(start.vin, 40));
+  if (vinCheck.status === "partial" || vinCheck.status === "invalid") return { error: vinCheck.message, status: 400 } as Problem;
+  let vin = vinCheck.status === "ok" ? { vin: vinCheck.vin, checkDigitOk: vinCheck.checkDigitOk } : null;
 
   let unit: { modelNumber: string | null; year: number | null; label: string } | null = null;
   let manualIds: string[] | null = null;
   let notes: string[] = [];
+  let vinFound: string | null = null;
+  let vinCarried = false;
   const modelNumber = str(start.modelNumber, 64);
+  const year = str(start.year, 4);
+  let model = str(start.model, 60);
+  // A year typed into Model ("2023 Sportsman 570") is the year when none
+  // was picked, as find_unit_manuals reads it, rather than a word no model
+  // name has.
+  const typedYear = model.match(/(?:^|\s)((?:19|20)\d\d)(?=\s|$)/)?.[1];
+  if (typedYear && (!year || year === typedYear)) model = model.replace(typedYear, " ").replace(/\s+/g, " ").trim();
   const filters = cleanLibraryFilters({
     vehicle: str(start.vehicle, 40),
     brand: str(start.brand, 40),
-    year: str(start.year, 4),
-    model: str(start.model, 60),
+    year: year || typedYear || "",
+    model,
   });
 
   if (start.from && isUuid(start.from)) {
@@ -351,31 +395,28 @@ async function planStart(user: CurrentUser, start: StartInput) {
       unit = { modelNumber: earlier.unitModelNumber, year: earlier.unitYear, label: earlier.unitLabel };
       manualIds = earlier.scopeManualIds;
     }
-  }
-  if (!unit && modelNumber) {
-    const lookup = await findUnitManuals(shopId, { model_number: modelNumber });
-    if (lookup.scope) {
-      unit = {
-        modelNumber: lookup.scope.unit?.number ?? modelNumber.toUpperCase(),
-        year: lookup.scope.unit?.year ?? null,
-        label: lookup.scope.label ?? modelNumber.toUpperCase(),
-      };
-      manualIds = lookup.scope.manualIds;
-    } else if (lookup.listed) {
-      // In the model list, but no manual for it is in the library.
-      const listed = lookup.listed;
-      const name = [listed.year, listed.description].filter(Boolean).join(" ");
-      notes.push(
-        `The tech entered model number ${listed.number}${name ? `, a ${name}` : ""}. It's in the shop's model list, but the shop has no manual for it: searches use the whole library.`,
-      );
-      unit = { modelNumber: listed.number, year: listed.year, label: unitLabel(listed) };
-    } else {
-      notes.push(
-        `The tech entered model number ${modelNumber.toUpperCase()}, which isn't in the shop's model list. Searches use the whole library.`,
-      );
-      unit = { modelNumber: modelNumber.toUpperCase(), year: null, label: modelNumber.toUpperCase() };
+    const carried = earlier?.unitVin ? checkVin(earlier.unitVin) : null;
+    if (carried?.status === "ok" && !vin) {
+      vin = { vin: carried.vin, checkDigitOk: carried.checkDigitOk };
+      vinCarried = unit !== null;
     }
-  } else if (!unit && hasLibraryFilters(filters)) {
+  }
+  // By model number (or a name typed in its box), then by VIN.
+  const lookup = !unit && (modelNumber || vin) ? await findUnitManuals(shopId, { model_number: modelNumber, vin: vin?.vin }) : null;
+  if (lookup?.scope) {
+    unit = {
+      modelNumber: lookup.scope.unit?.number ?? null,
+      year: lookup.scope.unit?.year ?? null,
+      label: lookup.scope.label ?? modelNumber.toUpperCase(),
+    };
+    manualIds = lookup.scope.manualIds;
+    if (lookup.vin?.found) {
+      vinFound = lookup.scope.label;
+      // The VIN found it after the model number typed didn't.
+      if (modelNumber) notes.push(`The tech also typed "${modelNumber}" as the model number, which isn't in the shop's model list.`);
+    }
+  }
+  if (!unit && hasLibraryFilters(filters)) {
     const found = await listReadyManuals(shopId, filters);
     // "2019 RZR XP 1000", "2019 Ranger", or "UTVs (side-by-sides)".
     const line = filters.brand ? brandLabel(filters.brand) : filters.vehicle ? VEHICLE_NAMES[filters.vehicle] : "";
@@ -384,19 +425,37 @@ async function planStart(user: CurrentUser, start: StartInput) {
     if (found.length > 0) manualIds = found.map((manual) => manual.id);
     else notes.push(`No manuals in the shop's library match ${label}. Searches use the whole library.`);
   }
+  if (!unit && lookup?.listed && (!modelNumber || lookup.listed.number === modelNumber.toUpperCase().replace(/\s+/g, ""))) {
+    // In the model list, but no manual for it is in the library.
+    const listed = lookup.listed;
+    const name = [listed.year, listed.description].filter(Boolean).join(" ");
+    notes.push(
+      `The tech entered ${modelNumber ? `model number ${listed.number}` : `a VIN that matches model number ${listed.number}`}${name ? `, a ${name}` : ""}. It's in the shop's model list, but the shop has no manual for it: searches use the whole library.`,
+    );
+    unit = { modelNumber: listed.number, year: listed.year, label: unitLabel(listed) };
+  } else if (!unit && modelNumber) {
+    const found = Number(lookup?.result.models_found) || 0;
+    notes.push(
+      found > 0
+        ? `The tech entered "${modelNumber}", which matches ${found} models in the shop's model list, with too many manuals to narrow the search to. Searches use the whole library.`
+        : `The tech entered ${/\s/.test(modelNumber) ? `"${modelNumber}"` : `model number ${modelNumber.toUpperCase()}`}, which isn't in the shop's model list. Searches use the whole library.`,
+    );
+    unit = { modelNumber: null, year: null, label: /\s/.test(modelNumber) ? modelNumber : modelNumber.toUpperCase() };
+  }
 
   if (manualIds !== null && unit) {
     const scope = await describeScope(shopId, { manualIds, label: unit.label });
     manualIds = scope.manuals.map((manual) => manual.id);
-    notes = [scopeNote(unit.label, scope.manuals.map((manual) => manual.title), "The tech picked the unit")];
+    notes = [scopeNote(unit.label, scope.manuals.map((manual) => manual.title), "The tech picked the unit"), ...(vinFound ? notes : [])];
   } else if (notes.length === 0) {
     notes.push(scopeNote(null, [], ""));
   }
+  if (vin) notes.push(vinNote(vin, { found: vinFound, modelNumber: vinFound ? null : (unit?.modelNumber ?? null), carried: vinCarried }));
 
-  const techText = startMessage({ unit: unit?.label ?? null, complaint, faultCodes: codes, checked, more: message });
+  const techText = startMessage({ unit: unit?.label ?? null, vin: vin?.vin ?? null, complaint, faultCodes: codes, checked, more: message });
   const subject = complaint || message.split("\n")[0] || codes.join(", ");
   const title = cutText([unit?.label.split(" — ")[0], subject].filter(Boolean).join(" — "), 120);
-  return { unit, manualIds, notes, techText, title };
+  return { unit, vin: vin?.vin ?? null, manualIds, notes, techText, title };
 }
 
 // The messages a turn adds before Claude's reply: the tech's text, then the
@@ -515,6 +574,7 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
           unitModelNumber: plan.unit?.modelNumber ?? null,
           unitYear: plan.unit?.year ?? null,
           unitLabel: plan.unit?.label ?? null,
+          unitVin: plan.vin,
           scopeManualIds: plan.manualIds,
           webSearch: webSearchEnabled(),
           pendingNotes: plan.notes,
@@ -645,12 +705,17 @@ export async function runTurn(
   const tools: ToolHandler = async (name, input) => {
     if (name === TOOL_NAMES.findUnit) {
       const lookup = await findUnitManuals(shopId, input);
-      const asked = [input.model_number, input.year, input.description].filter((v) => typeof v === "string" || typeof v === "number").join(" ");
+      const asked = [input.model_number, input.vin, input.year, input.description]
+        .filter((v) => (typeof v === "string" && v.trim() !== "") || typeof v === "number")
+        .join(" ");
       if (!lookup.scope) return { result: lookup.result, progress: { kind: "unit", label: `Looking up the unit: ${asked}` } };
       scope.manualIds = lookup.scope.manualIds;
       scope.label = lookup.scope.label;
       scopeChanged = true;
-      await withShop(shopId, (tx) =>
+      // A VIN that found the unit is the unit's from now on; a lookup by
+      // model number or name leaves the VIN the tech gave alone.
+      const vin = lookup.vin?.found ? lookup.vin.vin : undefined;
+      const [updated] = await withShop(shopId, (tx) =>
         tx
           .update(diagnosisConversations)
           .set({
@@ -658,14 +723,16 @@ export async function runTurn(
             unitLabel: scope.label,
             unitModelNumber: lookup.scope!.unit?.number ?? null,
             unitYear: lookup.scope!.unit?.year ?? null,
+            ...(vin ? { unitVin: vin } : {}),
           })
-          .where(eq(diagnosisConversations.id, conversation.id)),
+          .where(eq(diagnosisConversations.id, conversation.id))
+          .returning({ unitVin: diagnosisConversations.unitVin }),
       );
       const [view, machine] = await Promise.all([
         describeScope(shopId, scope),
         unitMachine(shopId, { modelNumber: lookup.scope.unit?.number ?? null, manualIds: scope.manualIds, label: scope.label }),
       ]);
-      emit({ type: "scope", scope: view, ...machine });
+      emit({ type: "scope", scope: view, ...machine, vin: updated?.unitVin ?? null });
       const count = view.manuals.length;
       return {
         result: lookup.result,
@@ -883,39 +950,67 @@ export async function markCause(
 }
 
 // The tech changes the unit (or goes back to the whole library) between
-// messages. Claude is told with the next message.
+// messages, by model number or VIN. Claude is told with the next message.
+// The VIN goes with the unit: a VIN sets it; a model number its VIN doesn't
+// agree with clears it; the whole library leaves it (the unit is the same,
+// only the manuals change).
 export async function changeUnit(
   user: CurrentUser,
   input: { conversationId: string; modelNumber?: string; wholeLibrary?: boolean },
-): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | { error: string }> {
+): Promise<
+  { scope: ScopeView; unit: string | null; vin: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | { error: string }
+> {
   if (!isUuid(input.conversationId)) return { error: "That diagnosis isn't in this shop." };
   const shopId = user.shop.id;
   let next: { manualIds: string[] | null; label: string | null; number: string | null; year: number | null };
-  let note: string;
+  let notes: string[];
+  // A VIN typed in: the unit's VIN from now on.
+  let newVin: { vin: string; checkDigitOk: boolean } | null = null;
   if (input.wholeLibrary) {
     next = { manualIds: null, label: null, number: null, year: null };
-    note = "The tech switched to the shop's whole library: searches and page reads can use any manual now.";
+    notes = ["The tech switched to the shop's whole library: searches and page reads can use any manual now."];
   } else {
-    const number = str(input.modelNumber, 64);
-    if (!number) return { error: "Type the model number (on the frame or VIN plate)." };
-    const lookup = await findUnitManuals(shopId, { model_number: number });
-    if (!lookup.scope) return { error: `${number.toUpperCase()} isn't in the shop's model list, or has no manuals in the library.` };
+    const typed = str(input.modelNumber, 64);
+    if (!typed) return { error: "Type the model number or the VIN (on the frame or VIN plate)." };
+    const vinCheck = checkVin(typed);
+    // The last few digits of a VIN, which say nothing about the model.
+    if (vinCheck.status === "partial" && /^\d+$/.test(vinCheck.vin)) return { error: vinCheck.message };
+    if (vinCheck.status === "ok") newVin = { vin: vinCheck.vin, checkDigitOk: vinCheck.checkDigitOk };
+    const lookup = await findUnitManuals(shopId, newVin ? { vin: newVin.vin } : { model_number: typed });
+    if (!lookup.scope) {
+      return {
+        error: newVin
+          ? "That VIN doesn't match a model in the shop's model list, or its model has no manuals in the library."
+          : `${typed.toUpperCase()} isn't in the shop's model list, or has no manuals in the library.`,
+      };
+    }
     next = {
       manualIds: lookup.scope.manualIds,
       label: lookup.scope.label,
-      number: lookup.scope.unit?.number ?? number.toUpperCase(),
+      number: lookup.scope.unit?.number ?? null,
       year: lookup.scope.unit?.year ?? null,
     };
     const titles = (await describeScope(shopId, lookup.scope)).manuals.map((manual) => manual.title);
-    note = scopeNote(next.label, titles, "The tech changed the unit");
+    notes = [scopeNote(next.label, titles, "The tech changed the unit")];
+    if (newVin) notes.push(vinNote(newVin, { found: next.label, modelNumber: null }));
   }
   const updated = await withShop(shopId, async (tx) => {
     const [conversation] = await tx
-      .select({ pendingNotes: diagnosisConversations.pendingNotes })
+      .select({ pendingNotes: diagnosisConversations.pendingNotes, unitVin: diagnosisConversations.unitVin })
       .from(diagnosisConversations)
       .where(eq(diagnosisConversations.id, input.conversationId))
       .for("update");
     if (!conversation) return null;
+    const oldVin = conversation.unitVin;
+    const unitVin = newVin
+      ? newVin.vin
+      : oldVin && next.number && !vinMatchesModelNumber(oldVin, next.number)
+        ? null
+        : oldVin;
+    const vinNotes =
+      oldVin && unitVin === null
+        ? [`The VIN ${oldVin} is for another model than ${next.number}, so it no longer goes with the unit.`]
+        : [];
     const [row] = await tx
       .update(diagnosisConversations)
       .set({
@@ -923,7 +1018,8 @@ export async function changeUnit(
         unitLabel: next.label,
         unitModelNumber: next.number,
         unitYear: next.year,
-        pendingNotes: [...conversation.pendingNotes, note],
+        unitVin,
+        pendingNotes: [...conversation.pendingNotes, ...notes, ...vinNotes],
       })
       .where(eq(diagnosisConversations.id, input.conversationId))
       .returning();
@@ -931,7 +1027,7 @@ export async function changeUnit(
   });
   if (!updated) return { error: "That diagnosis isn't in this shop." };
   const { scope, vehicle, model } = await unitOf(shopId, updated);
-  return { scope, unit: updated.unitLabel, vehicle, model };
+  return { scope, unit: updated.unitLabel, vin: updated.unitVin, vehicle, model };
 }
 
 // What a new diagnosis starts with when it carries on from a full one: the

@@ -10,7 +10,16 @@ import { TransactionRollbackError, and, eq, sql } from "drizzle-orm";
 
 import { enterShop, systemDb, withShop } from "../src/db";
 import { auditLog, manualCatalogDocuments, manualFileNames, manualPages, manuals, shops, users } from "../src/db/schema";
-import { SEARCH_LIMIT, cleanSearchQuery, listReadyManuals, searchManuals, searchQuery } from "../src/lib/library";
+import {
+  SEARCH_LIMIT,
+  cleanSearchQuery,
+  countQuery,
+  listReadyManuals,
+  searchManuals,
+  searchQuery,
+  searchTerms,
+  type MostWords,
+} from "../src/lib/library";
 import {
   MAX_PAGES_PER_BATCH,
   MAX_PAGE_TEXT_LENGTH,
@@ -465,6 +474,8 @@ describe("searching the library", () => {
     let yearPlan = "";
     let vehiclePlans: string[] = [];
     let scopedPlans: string[] = [];
+    let fallbackPlans: string[] = [];
+    let countPlans: string[] = [];
     await systemDb
       .transaction(async (tx) => {
         const [big] = await tx
@@ -532,6 +543,16 @@ describe("searching the library", () => {
         ];
         // Diagnose's scope for a unit, alone and with a filter.
         scopedPlans = [await explain({}, [big.id]), await explain({ vehicle: "ATV" }, [big.id])];
+        // Diagnose's second try with fewer words (pages with most of them),
+        // and its count of the pages outside the unit's manuals.
+        const most: MostWords = { terms: ["'fuel'", "'pump'", "'relay'"], excluded: "!'wire'", atLeast: 2 };
+        const plain = async (query: ReturnType<typeof sql>) =>
+          (await tx.execute<{ "QUERY PLAN": string }>(sql`explain (verbose) ${query}`)).rows.map((row) => row["QUERY PLAN"]).join("\n");
+        fallbackPlans = [
+          await plain(searchQuery("", 8, {}, [big.id], most)),
+          await plain(searchQuery("", 8, {}, undefined, most)),
+        ];
+        countPlans = [await plain(countQuery("fuel pump", [big.id])), await plain(countQuery("", [big.id], most))];
         tx.rollback();
       })
       .catch((error) => {
@@ -559,6 +580,15 @@ describe("searching the library", () => {
       assert.match(narrowed, /Bitmap Index Scan on manual_pages_search/, narrowed);
       assert.match(narrowed, /CASE WHEN .*manual_id = ANY .* THEN ts_rank_cd\(/, narrowed);
     }
+    // The second try and the count find their pages with the index too, and
+    // the second try only counts and ranks the pages in the scope.
+    assert.equal(fallbackPlans.length + countPlans.length, 4);
+    for (const fallback of [...fallbackPlans, ...countPlans]) {
+      assert.match(fallback, /Bitmap Index Scan on manual_pages_search/, fallback);
+      assert.doesNotMatch(fallback, /Seq Scan on public\.manual_pages\b/, fallback);
+    }
+    assert.match(fallbackPlans[0], /CASE WHEN .*manual_id = ANY .* THEN ts_rank_cd\(/, fallbackPlans[0]);
+
     // Model's words look titles up as arrays of their own, never by joining
     // entries to their models, which Postgres can loop over once per entry
     // before it has statistics on a freshly imported list.
@@ -708,5 +738,17 @@ describe("manual library shop isolation", () => {
         statement,
       );
     }
+  });
+});
+
+describe("searching again with fewer words", () => {
+  test("a search's words and phrases, once each; OR isn't one, -words stay out", () => {
+    assert.deepEqual(searchTerms('speed sensor "wire harness" -ground or VSS Speed'), {
+      terms: ["speed", "sensor", '"wire harness"', "VSS"],
+      excluded: ["-ground"],
+    });
+    assert.deepEqual(searchTerms('"unclosed phrase'), { terms: ['"unclosed phrase"'], excluded: [] });
+    assert.equal(searchTerms("a b c d e f g h i j").terms.length, 8);
+    assert.deepEqual(searchTerms("   "), { terms: [], excluded: [] });
   });
 });

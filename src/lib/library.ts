@@ -2,7 +2,7 @@ import "server-only";
 
 import { and, asc, count, eq, isNotNull, sql, type SQL } from "drizzle-orm";
 
-import { withShop } from "@/db";
+import { withShop, type ShopTransaction } from "@/db";
 import { manualCatalogDocuments, manualCatalogModels, manualFileNames, manuals } from "@/db/schema";
 import { entryOfName, manualBrands, manualDisplayTitle, manualModelYears, modelsOfName } from "@/lib/manual-catalog";
 import {
@@ -291,6 +291,11 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
   )`;
 }
 
+// For a search tried again with fewer words (see searchManualsWithMost):
+// each word's or phrase's tsquery (as text, from websearch_to_tsquery), any
+// excluded words' tsquery, and how many of the words a page needs.
+export type MostWords = { terms: string[]; excluded: string | null; atLeast: number };
+
 // The search itself, apart from searchManuals so tests can check its plan.
 // Matches come from ready_manual_pages rather than manual_pages: under
 // row-level security the GIN index can't be used and every search would read
@@ -307,41 +312,109 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
 // tsvector, which is most of the time a word on most pages takes. So the
 // filters are a CASE in the CTE's select list, where they can't steer how
 // the pages are found, and a page they leave out gets no rank.
-export function searchQuery(q: string, limit: number, filters: LibraryFilters = {}, manualIds?: string[]) {
+//
+// With most, the query is at least atLeast of the words (excluded words
+// still out), written out as a tsquery the index answers like any other
+// (see mostTsquery); pages with more of the words come first, then by rank,
+// and only the pages the filters keep are counted and ranked.
+export function searchQuery(
+  q: string,
+  limit: number,
+  filters: LibraryFilters = {},
+  manualIds?: string[],
+  most?: MostWords,
+) {
   const matching = manualsMatching(filters);
   const conditions = [
     ...(matching ? [sql`v.manual_id = any(${matching})`] : []),
     ...(manualIds ? [sql`v.manual_id = any(${uuidArray(manualIds)})`] : []),
   ];
-  const rank = sql`ts_rank_cd(v.search_vector, query.tsq, 1)`;
+  const kept = (value: SQL) =>
+    conditions.length > 0 ? sql`case when ${sql.join(conditions, sql` and `)} then ${value} end` : value;
+  // Ranked and highlighted by any of the words, with most.
+  const rank = sql`ts_rank_cd(v.search_vector, ${most ? sql`query.words` : sql`query.tsq`}, 1)`;
+  const query = most
+    ? sql`select (${mostTsquery(most)})::tsquery as tsq, (${anyTsquery(most)})::tsquery as words,
+        array[${sql.join(most.terms.map((term) => sql`${term}::tsquery`), sql`, `)}] as terms`
+    : sql`select websearch_to_tsquery('english', ${q}) as tsq`;
+  const matched = sql`(select count(*) from unnest(query.terms) t where v.search_vector @@ t)::int`;
   return sql`
-    with query as (select websearch_to_tsquery('english', ${q}) as tsq),
+    with query as (${query}),
     matches as materialized (
-      select v.manual_id, v.page_number,
-        ${conditions.length > 0 ? sql`case when ${sql.join(conditions, sql` and `)} then ${rank} end` : rank} as rank
+      select v.manual_id, v.page_number, ${kept(rank)} as rank${most ? sql`, ${kept(matched)} as matched` : sql``}
       from ready_manual_pages v
       cross join query
       where v.search_vector @@ query.tsq
     ),
     top as materialized (
-      select manual_id, page_number, rank
+      select manual_id, page_number, rank${most ? sql`, matched` : sql``}
       from matches
       where rank is not null
-      order by rank desc, manual_id, page_number
+      order by ${most ? sql`matched desc, ` : sql``}rank desc, manual_id, page_number
       limit ${limit}
     )
     -- Snippets are slow to build, so only for the pages that made the cut.
     -- (manuals isn't aliased: the model-list details refer to it by name.)
     select top.manual_id, ${manualDisplayTitle} as title, ${manualBrands} as brands,
       ${manualModelYears} as model_years, top.page_number, manuals.page_count, top.rank::float8 as rank,
-      ts_headline('english', p.text, query.tsq, ${HEADLINE_OPTIONS}) as snippet
+      ts_headline('english', p.text, ${most ? sql`query.words` : sql`query.tsq`}, ${HEADLINE_OPTIONS}) as snippet${
+        most
+          ? sql`,
+      array(select i - 1 from generate_subscripts(query.terms, 1) i where p.search_vector @@ query.terms[i]) as has`
+          : sql``
+      }
     from top
     join manual_pages p on p.manual_id = top.manual_id and p.page_number = top.page_number
     join manuals on manuals.id = top.manual_id
     cross join query
-    order by top.rank desc, title, top.page_number
+    order by ${most ? sql`top.matched desc, ` : sql``}top.rank desc, title, top.page_number
   `;
 }
+
+// The ways to pick k of n things, as lists of indexes.
+function combinations(n: number, k: number): number[][] {
+  if (k === 0) return [[]];
+  if (n < k) return [];
+  return [...combinations(n - 1, k - 1).map((rest) => [...rest, n - 1]), ...combinations(n - 1, k)];
+}
+
+const withoutExcluded = (query: string, most: MostWords) => (most.excluded ? `(${query}) & (${most.excluded})` : query);
+
+// At least atLeast of the words, without the excluded ones, as one tsquery:
+// every way to pick that many, each ANDed, ORed together ("(a & b) | (a &
+// c) | (b & c)"). The GIN index answers it like any search, so pages with
+// too few of the words are never read; at most 8 words and half of them,
+// 70 picks. The parts are Postgres's own tsquery text, so this parses back.
+function mostTsquery(most: MostWords) {
+  const picks = combinations(most.terms.length, Math.min(Math.max(most.atLeast, 1), most.terms.length));
+  return withoutExcluded(picks.map((pick) => `(${pick.map((i) => `(${most.terms[i]})`).join(" & ")})`).join(" | "), most);
+}
+
+// Any of the words, without the excluded ones, for ranking and highlighting.
+const anyTsquery = (most: MostWords) => withoutExcluded(most.terms.map((term) => `(${term})`).join(" | "), most);
+
+type SearchRow = {
+  manual_id: string;
+  title: string;
+  brands: string[];
+  model_years: string | null;
+  page_number: number;
+  page_count: number;
+  rank: number;
+  snippet: string;
+  has?: number[];
+};
+
+const toHit = (row: SearchRow): SearchHit => ({
+  manualId: row.manual_id,
+  title: row.title,
+  brands: sortBrands(row.brands),
+  modelYears: row.model_years,
+  pageNumber: row.page_number,
+  pageCount: row.page_count,
+  rank: row.rank,
+  snippet: parseSnippet(row.snippet),
+});
 
 // Searches ready manuals, only those matching the filters if any are set.
 // Supports what people type into web search: plain words (all must match),
@@ -355,28 +428,137 @@ export async function searchManuals(
 ): Promise<SearchHit[]> {
   const q = cleanSearchQuery(query);
   if (!q || manualIds?.length === 0) return [];
-  const result = await withShop(shopId, (tx) =>
-    tx.execute<{
-      manual_id: string;
-      title: string;
-      brands: string[];
-      model_years: string | null;
-      page_number: number;
-      page_count: number;
-      rank: number;
-      snippet: string;
-    }>(searchQuery(q, limit, filters, manualIds)),
-  );
-  return result.rows.map((row) => ({
-    manualId: row.manual_id,
-    title: row.title,
-    brands: sortBrands(row.brands),
-    modelYears: row.model_years,
-    pageNumber: row.page_number,
-    pageCount: row.page_count,
-    rank: row.rank,
-    snippet: parseSnippet(row.snippet),
-  }));
+  const result = await withShop(shopId, (tx) => tx.execute<SearchRow>(searchQuery(q, limit, filters, manualIds)));
+  return result.rows.map(toHit);
+}
+
+const MAX_SEARCH_TERMS = 8;
+
+// "speed sensor \"wire harness\" -ground or vss" -> terms ["speed", "sensor",
+// "\"wire harness\"", "vss"], excluded ["-ground"]: a search's words and
+// quoted phrases, once each (whatever the case), as websearch_to_tsquery
+// reads them, for trying it again with fewer of them. OR isn't a word.
+export function searchTerms(query: string): { terms: string[]; excluded: string[] } {
+  const terms: string[] = [];
+  const excluded: string[] = [];
+  const seen = new Set<string>();
+  for (const [, minus, body] of cleanSearchQuery(query).matchAll(/(-?)("[^"]*"?|[^\s"]+)/g)) {
+    const phrase = body.startsWith('"');
+    const words = body.replace(/"/g, "").trim();
+    if (!words || (!phrase && !minus && words.toLowerCase() === "or")) continue;
+    const term = phrase ? `"${words}"` : words;
+    const key = `${minus}${term.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (minus) excluded.push(`-${term}`);
+    else if (terms.length < MAX_SEARCH_TERMS) terms.push(term);
+  }
+  return { terms, excluded };
+}
+
+export type MostHit = SearchHit & { has: string[] };
+
+// A search's words for trying it with fewer (see searchTerms), as Postgres
+// reads each one, leaving out the ones it drops from searches ("the", "of"):
+// the words kept, and what searchQuery needs. Null with fewer than two.
+async function mostWords(tx: ShopTransaction, query: string): Promise<{ words: string[]; most: MostWords } | null> {
+  const { terms, excluded } = searchTerms(query);
+  if (terms.length < 2) return null;
+  const parsed = await tx.execute<{ term: string; tsq: string }>(sql`
+    select t.term, websearch_to_tsquery('english', t.term)::text as tsq
+    from unnest(array[${sql.join(terms.map((term) => sql`${term}`), sql`, `)}]::text[]) with ordinality t(term, i)
+    where numnode(websearch_to_tsquery('english', t.term)) > 0
+    order by t.i
+  `);
+  if (parsed.rows.length < 2) return null;
+  const notWords = excluded.length
+    ? (
+        await tx.execute<{ tsq: string }>(sql`
+          select websearch_to_tsquery('english', ${excluded.join(" ")})::text as tsq
+          where numnode(websearch_to_tsquery('english', ${excluded.join(" ")})) > 0
+        `)
+      ).rows[0]
+    : undefined;
+  return {
+    words: parsed.rows.map((row) => row.term),
+    most: {
+      terms: parsed.rows.map((row) => row.tsq),
+      excluded: notWords?.tsq ?? null,
+      atLeast: Math.ceil(parsed.rows.length / 2),
+    },
+  };
+}
+
+// When no page has every word of a search: the pages with most of them (at
+// least half, rounded up), those with more first, each with the words it
+// has. Empty for a search of one word, which there's no fewer of.
+export async function searchManualsWithMost(
+  shopId: string,
+  query: string,
+  limit = SEARCH_LIMIT,
+  manualIds?: string[],
+): Promise<{ hits: MostHit[]; words: string[] }> {
+  if (manualIds?.length === 0) return { hits: [], words: [] };
+  return withShop(shopId, async (tx) => {
+    const found = await mostWords(tx, cleanSearchQuery(query));
+    if (!found) return { hits: [], words: [] };
+    const result = await tx.execute<SearchRow>(searchQuery("", limit, {}, manualIds, found.most));
+    return {
+      words: found.words,
+      hits: result.rows.map((row) => ({
+        ...toHit(row),
+        has: (row.has ?? []).map((index) => found.words[index]).filter((word): word is string => Boolean(word)),
+      })),
+    };
+  });
+}
+
+// The pages of the shop's ready manuals that match a search, counted by
+// manual (most first), leaving out the manuals given (Diagnose's unit
+// scope): what the search would find in the rest of the library. With most,
+// the pages with most of its words, as searchManualsWithMost counts them.
+export function countQuery(q: string, leaveOut: string[], most?: MostWords) {
+  return sql`
+    with query as (select ${most ? sql`(${mostTsquery(most)})::tsquery` : sql`websearch_to_tsquery('english', ${q})`} as tsq),
+    matches as materialized (
+      select v.manual_id
+      from ready_manual_pages v
+      cross join query
+      where v.search_vector @@ query.tsq
+    ),
+    counted as (
+      select manual_id, count(*)::int as pages
+      from matches
+      where not (manual_id = any(${uuidArray(leaveOut)}))
+      group by manual_id
+    )
+    select counted.manual_id, counted.pages, ${manualDisplayTitle} as title
+    from counted
+    join manuals on manuals.id = counted.manual_id
+    order by counted.pages desc, title
+  `;
+}
+
+export async function countMatchesElsewhere(
+  shopId: string,
+  query: string,
+  leaveOut: string[],
+  { most = false } = {},
+): Promise<{ pages: number; manuals: { manualId: string; title: string; pages: number }[] }> {
+  const q = cleanSearchQuery(query);
+  if (!q) return { pages: 0, manuals: [] };
+  const rows = await withShop(shopId, async (tx) => {
+    const words = most ? await mostWords(tx, q) : null;
+    if (most && !words) return [];
+    const result = await tx.execute<{ manual_id: string; pages: number; title: string }>(
+      countQuery(q, leaveOut, words?.most),
+    );
+    return result.rows;
+  });
+  return {
+    pages: rows.reduce((sum, row) => sum + row.pages, 0),
+    manuals: rows.map((row) => ({ manualId: row.manual_id, title: row.title, pages: row.pages })),
+  };
 }
 
 // Brand codes in the order the Library shows them (see compareBrands).

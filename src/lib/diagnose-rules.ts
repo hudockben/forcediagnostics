@@ -48,6 +48,20 @@ export type Likelihood = (typeof LIKELIHOODS)[number];
 export const CAUSE_STATUSES = ["open", "ruled_out", "confirmed"] as const;
 export type CauseStatus = (typeof CAUSE_STATUSES)[number];
 
+// How much work a check is, or confirming or ruling out a cause, the way an
+// experienced tech tiers it: a quick look (minutes, no tools or teardown),
+// a test (a meter, gauge, scan tool or Digital Wrench, or a road test), or
+// teardown (panels, covers or parts off, swapping parts). The causes stay
+// ranked by likelihood; the checks go quick, then test, then teardown.
+export const EFFORTS = ["quick", "test", "teardown"] as const;
+export type Effort = (typeof EFFORTS)[number];
+
+export const EFFORT_LABELS: Record<Effort, { heading: string; detail: string; chip: string }> = {
+  quick: { heading: "Quick checks", detail: "minutes, no tools", chip: "Quick check" },
+  test: { heading: "Tests", detail: "meter or scan tool", chip: "Needs a test" },
+  teardown: { heading: "Teardown", detail: "parts off", chip: "Teardown" },
+};
+
 // Where a piece of advice comes from, after the server has checked it: a
 // page of one of the shop's manuals, a web page from Claude's searches, or
 // Claude's own general knowledge.
@@ -65,9 +79,15 @@ export type Cause = {
   why: string;
   status: CauseStatus;
   sources: SourceView[];
+  // How much work it is to confirm or rule out. Replies saved before causes
+  // carried it don't have it (no chip shows).
+  checkEffort?: Effort;
 };
 
 export type Check = {
+  // Quick, test or teardown. Replies saved before checks carried it don't
+  // have it: their checks show as one list, in Claude's order.
+  tier?: Effort;
   action: string;
   // Expected values and specs ("0.6-0.8 ohms primary"); blank when none.
   expected: string;
@@ -231,6 +251,7 @@ const tidyText = (value: unknown, max: number) =>
 // would have typed it.
 export function startMessage(input: {
   unit?: string | null;
+  vin?: string | null;
   complaint?: string;
   faultCodes?: string[];
   checked?: string;
@@ -238,6 +259,7 @@ export function startMessage(input: {
 }) {
   const lines = [
     input.unit ? `Unit: ${input.unit}` : null,
+    input.vin ? `VIN: ${input.vin}` : null,
     input.complaint?.trim() ? `Complaint: ${input.complaint.trim()}` : null,
     input.faultCodes?.length ? `Fault codes: ${input.faultCodes.join(", ")}` : null,
     input.checked?.trim() ? `Already checked: ${input.checked.trim()}` : null,
@@ -247,10 +269,10 @@ export function startMessage(input: {
 }
 
 // The quick form's first message read back as labelled rows (the reverse
-// of startMessage): its leading "Unit: …", "Complaint: …", "Fault codes: …"
-// and "Already checked: …" lines, and whatever follows. Null when the
-// message doesn't start that way.
-export const OPENING_LABELS = ["Unit", "Complaint", "Fault codes", "Already checked"] as const;
+// of startMessage): its leading "Unit: …", "VIN: …", "Complaint: …",
+// "Fault codes: …" and "Already checked: …" lines, and whatever follows.
+// Null when the message doesn't start that way.
+export const OPENING_LABELS = ["Unit", "VIN", "Complaint", "Fault codes", "Already checked"] as const;
 export type OpeningRow = { label: (typeof OPENING_LABELS)[number]; value: string };
 
 export function openingRows(text: string): { rows: OpeningRow[]; more: string } | null {
@@ -258,7 +280,7 @@ export function openingRows(text: string): { rows: OpeningRow[]; more: string } 
   const rows: OpeningRow[] = [];
   let i = 0;
   for (; i < lines.length; i++) {
-    const match = /^(Unit|Complaint|Fault codes|Already checked): (.+)$/.exec(lines[i]);
+    const match = /^(Unit|VIN|Complaint|Fault codes|Already checked): (.+)$/.exec(lines[i]);
     if (!match) break;
     rows.push({ label: match[1] as OpeningRow["label"], value: match[2].trim() });
   }
@@ -394,6 +416,56 @@ export function checkSources(raw: unknown, seen: SeenSources): { sources: Source
 const pick = <T extends string>(value: unknown, allowed: readonly T[], otherwise: T): T =>
   allowed.includes(value as T) ? (value as T) : otherwise;
 
+// Words that say how much work a check is, for a tier Claude didn't give or
+// gave as something else (the tools stream their input, so the API doesn't
+// hold Claude to the enum). Teardown words win over test words, and test
+// words over quick ones: "unplug the connector and measure the resistance"
+// is a test, "pull the clutch cover and check the belt" teardown.
+const TEARDOWN_WORDS =
+  /\b(remov\w*|take (?:off|out|apart)|pull (?:the |off |out )|disassembl\w*|tear ?down|teardown|split (?:the )?case|swap\w*|install (?:a )?(?:new|known)|known[- ]good|(?:clutch|stator|valve|side|cvt|outer) cover|cylinder head|crankcase|drain and|panels? off|(?:side|body|access|floor|seat) panels?|seat off|body ?work|parts off)\b/i;
+const TEST_WORDS =
+  /\b(meter|multimeter|dvom|ohms?|volts?|voltage|resistance|continuity|amps?|amperage|current draw|pressure (?:test|gauge)|(?:vacuum|fuel|pressure) gauge|gauge set|compression|leak[- ]?down|scan tool|digital wrench|live data|data stream|oscilloscope|back ?prob\w*|load test|road test|test ride|test drive|measur\w*|vacuum|smoke test|test light|noid)\b/i;
+const QUICK_WORDS =
+  /\b(look\w*|inspect\w*|visual\w*|connectors?|plugged|unplugged|loose|wiggle|fuses?|grounds?|wiring|harness|chaf\w*|corro\w*|damaged?|broken wire|fluid|oil level|coolant level|levels?|stored codes?|codes? on the (?:gauge|cluster|display|dash)|battery terminals?|cap|clamp|hose)\b/i;
+
+export function inferEffort(...texts: string[]): Effort {
+  const text = texts.join(" ");
+  if (TEARDOWN_WORDS.test(text)) return "teardown";
+  if (TEST_WORDS.test(text)) return "test";
+  if (QUICK_WORDS.test(text)) return "quick";
+  return "test";
+}
+
+// A tier as Claude sent it, if it's one of the three (case, spaces and a
+// few spellings aside: "Quick check", "tear down", "tests"), else null.
+export function listedEffort(value: unknown): Effort | null {
+  if (typeof value !== "string") return null;
+  const key = value.toLowerCase().replace(/[^a-z]/g, "");
+  if (key === "quick" || key === "quickcheck" || key === "quickchecks") return "quick";
+  if (key === "test" || key === "tests" || key === "needsatest") return "test";
+  if (key === "teardown" || key === "teardowns") return "teardown";
+  return null;
+}
+
+// The next checks as the screen lists them: under their tiers, quick
+// first, numbered on across the tiers (step). Null for a reply saved before
+// checks had tiers, which is one list in Claude's order.
+export function checkGroups<T extends { tier?: Effort }>(checks: T[]) {
+  if (checks.length === 0 || !checks.every((check) => check.tier)) return null;
+  const tiers = EFFORTS.map((effort) => checks.filter((check) => check.tier === effort));
+  return EFFORTS.map((effort, tier) => {
+    const before = tiers.slice(0, tier).reduce((sum, list) => sum + list.length, 0);
+    return { effort, items: tiers[tier].map((check, index) => ({ check, step: before + index + 1 })) };
+  }).filter((group) => group.items.length > 0);
+}
+
+// Checks grouped by tier, quick first, in Claude's order within each.
+export const byEffort = <T extends { tier?: Effort }>(checks: T[]) =>
+  checks
+    .map((check, index) => ({ check, index }))
+    .sort((a, b) => EFFORTS.indexOf(a.check.tier ?? "test") - EFFORTS.indexOf(b.check.tier ?? "test") || a.index - b.index)
+    .map(({ check }) => check);
+
 const strings = (value: unknown, count: number, max: number) =>
   (Array.isArray(value) ? value : []).map((item) => tidyText(item, max)).filter(Boolean).slice(0, count);
 
@@ -433,6 +505,8 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
         why,
         status: pick(cause.status, CAUSE_STATUSES, "open"),
         sources: checked.sources.length > 0 ? checked.sources : [{ type: "general" as const }],
+        // Likewise worked out from the words when it isn't one of the three.
+        checkEffort: listedEffort(cause.check_effort) ?? inferEffort(title, why),
       };
     })
     .filter((cause) => cause.title);
@@ -443,8 +517,10 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
       const checked = checkSources(check.sources, seen);
       dropped += checked.dropped;
       const expected = tidyText(check.expected, 400);
+      const action = tidyText(check.action, 600);
       return {
-        action: tidyText(check.action, 600),
+        tier: listedEffort(check.tier) ?? inferEffort(action, expected),
+        action,
         expected,
         sources: checked.sources,
         unverifiedSpec: expected !== "" && !checked.sources.some((source) => source.type === "manual"),
@@ -454,7 +530,9 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
   return {
     reply: tidyText(value.reply, 6000),
     likelyCauses,
-    nextChecks,
+    // Quick checks, then tests, then teardown, as the prompt asks; Claude's
+    // order within each tier.
+    nextChecks: byEffort(nextChecks),
     safetyNotes: strings(value.safety_notes, 6, 400),
     questions: strings(value.questions_for_tech, 4, 300),
     partial: false,
@@ -542,6 +620,8 @@ export type ConversationView = {
   title: string;
   status: ConversationStatus;
   unit: string | null;
+  // The unit's VIN, if the tech gave one.
+  vin: string | null;
   // Which drawing the unit gets, if any.
   vehicle: UnitVehicle | null;
   // Which machine the 3D unit shows (line, seats, size, paint), if known.
@@ -558,7 +638,7 @@ export type StreamEvent =
   | { type: "start"; conversation: ConversationView; turn: TurnView }
   | { type: "progress"; step: ProgressStep }
   | { type: "reply"; text: string }
-  | { type: "scope"; scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null }
+  | { type: "scope"; scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null; vin: string | null }
   | { type: "end"; conversation: ConversationView; turn: TurnView };
 
 // The conversation is full; the tech starts a new one for the unit.

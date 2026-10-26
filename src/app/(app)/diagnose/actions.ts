@@ -55,7 +55,9 @@ export async function changeUnitAction(input: {
   conversationId: string;
   modelNumber?: string;
   wholeLibrary?: boolean;
-}): Promise<{ scope: ScopeView; unit: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | Failed> {
+}): Promise<
+  { scope: ScopeView; unit: string | null; vin: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | Failed
+> {
   const user = await requireCapability("diagnostics.work");
   return attempt("change the unit", () =>
     changeUnit(user, {

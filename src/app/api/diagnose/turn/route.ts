@@ -27,6 +27,7 @@ function readRequest(body: unknown): TurnRequest {
     start: start
       ? {
           modelNumber: text(start.modelNumber),
+          vin: text(start.vin),
           vehicle: text(start.vehicle),
           brand: text(start.brand),
           year: text(start.year),

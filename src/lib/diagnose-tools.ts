@@ -8,17 +8,29 @@ import { DIAGNOSE_LIMITS, isUuid, unitLabel, type ScopeView, type UnitSuggestion
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import {
   cleanSearchQuery,
+  countMatchesElsewhere,
   isModelYearWord,
   likeEscape,
   modelFilterWords,
   modelWordsMatch,
   searchManuals,
+  searchManualsWithMost,
   uuidArray,
+  type SearchHit,
 } from "@/lib/library";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import { CATALOG_LIMITS, cleanCatalogText, isModelYear } from "@/lib/manual-catalog-rules";
 import { specForUnit, type UnitSpec } from "@/lib/unit-vehicle";
 import { cutText } from "@/lib/manual-rules";
+import {
+  checkVin,
+  normalizeVin,
+  sharedModelName,
+  vinMatchesModelNumber,
+  vinModelCode,
+  vinModelNumberPatterns,
+  vinYears,
+} from "@/lib/vin";
 
 // What Claude's tools can reach in the shop's library, for Diagnose. Every
 // function runs inside withShop, so only the shop's own manuals are visible,
@@ -34,9 +46,12 @@ export type UnitModel = { year: number | null; number: string | null; descriptio
 export type UnitLookup = {
   // Set when the lookup found the unit's manuals: the scope to use from now on.
   scope: (ManualScope & { manualIds: string[]; unit: UnitModel | null }) | null;
-  // Set when the model number is in the model list but no manual for it is
-  // in the library (its PDF wasn't added, or isn't ready).
+  // Set when the model number (or the VIN's) is in the model list but no
+  // manual for it is in the library (its PDF wasn't added, or isn't ready).
   listed?: UnitModel & { number: string };
+  // A VIN that was looked up (17 characters, upper case), and whether it
+  // found the unit.
+  vin?: { vin: string; found: boolean; checkDigitOk: boolean };
   // What Claude gets back.
   result: Record<string, unknown>;
 };
@@ -122,7 +137,11 @@ type ModelMatches = {
   manualIds: string[];
   // The newest few, to show.
   shown: UnitModel[];
+  // Every one's description, once each (up to 50).
+  descriptions: string[];
 };
+
+const NO_MODELS: ModelMatches = { count: 0, units: 0, manualIds: [], shown: [], descriptions: [] };
 
 // Models from the model list that meet the conditions (on cm) and have a
 // ready manual. The manuals are every matching model's, not just those of
@@ -132,7 +151,13 @@ type ModelMatches = {
 // its label claims them all. One statement, so the model list is read once.
 async function modelsWhere(shopId: string, conditions: SQL[]): Promise<ModelMatches> {
   const result = await withShop(shopId, (tx) =>
-    tx.execute<{ count: number; units: number; manual_ids: string[] | null; shown: UnitModel[] | null }>(sql`
+    tx.execute<{
+      count: number;
+      units: number;
+      manual_ids: string[] | null;
+      shown: UnitModel[] | null;
+      descriptions: string[] | null;
+    }>(sql`
       with found as materialized (
         select cm.model_year as year, cm.model_number as number, cm.model_description as description, n.manual_id
         from manual_catalog_models cm
@@ -147,27 +172,36 @@ async function modelsWhere(shopId: string, conditions: SQL[]): Promise<ModelMatc
         (select array_agg(distinct manual_id) from found) as manual_ids,
         (select json_agg(s order by s.year desc nulls last, s.number, s.description) from (
           select * from models order by year desc nulls last, number, description limit ${MODELS_SHOWN}
-        ) s) as shown
+        ) s) as shown,
+        (select array_agg(d.description order by d.description) from (
+          select distinct description from models where description is not null order by description limit 50
+        ) d) as descriptions
     `),
   );
   const [row] = result.rows;
-  return { count: row.count, units: row.units, manualIds: row.manual_ids ?? [], shown: row.shown ?? [] };
+  return {
+    count: row.count,
+    units: row.units,
+    manualIds: row.manual_ids ?? [],
+    shown: row.shown ?? [],
+    descriptions: row.descriptions ?? [],
+  };
 }
 
-// A model number in the model list, whether or not the shop has a manual for
-// it: the newest entry.
-async function listedModel(shopId: string, number: string, conditions: SQL[]) {
+// A model in the model list, whether or not the shop has a manual for it:
+// the newest entry that meets the condition (on cm).
+async function listedModel(shopId: string, condition: SQL) {
   const result = await withShop(shopId, (tx) =>
-    tx.execute<{ year: number | null; description: string | null }>(sql`
-      select cm.model_year as year, cm.model_description as description
+    tx.execute<{ year: number | null; number: string; description: string | null }>(sql`
+      select cm.model_year as year, cm.model_number as number, cm.model_description as description
       from manual_catalog_models cm
-      where ${sql.join([sql`cm.model_number = ${number}`, ...conditions], sql` and `)}
-      order by cm.model_year desc nulls last, cm.model_description
+      where cm.model_number is not null and ${condition}
+      order by cm.model_year desc nulls last, cm.model_number, cm.model_description
       limit 1
     `),
   );
   const [row] = result.rows;
-  return row ? { year: row.year, number, description: row.description } : null;
+  return row ? { year: row.year, number: row.number, description: row.description } : null;
 }
 
 const cleanModelNumber = (value: unknown) => {
@@ -176,18 +210,30 @@ const cleanModelNumber = (value: unknown) => {
 };
 
 // find_unit_manuals: finds the unit in the shop's model list, by model
-// number (exactly, or failing that its start), or by year and model name
-// (words of the model's number or description or its manual's title, the
-// way the Library's Model filter matches them).
+// number (exactly), by VIN (its model code and year: see src/lib/vin.ts),
+// by the start of a model number, or by year and model name (words of the
+// model's number or description or its manual's title, the way the
+// Library's Model filter matches them). A "model number" that reads as a
+// name ("2023 Sportsman 570", "RZR XP 1000") is looked up as one, and a VIN
+// given as the model number as a VIN.
 // When the manuals of every model it finds are few enough to be a narrowing
 // (one unit, or at most a vehicle line), they become the conversation's
 // scope.
 export async function findUnitManuals(
   shopId: string,
-  input: { model_number?: unknown; description?: unknown; year?: unknown },
+  input: { model_number?: unknown; vin?: unknown; description?: unknown; year?: unknown },
 ): Promise<UnitLookup> {
-  const number = cleanModelNumber(input.model_number);
-  const description = cutText(cleanCatalogText(typeof input.description === "string" ? input.description : "") ?? "", 60);
+  const rawNumber = cutText(cleanCatalogText(typeof input.model_number === "string" ? input.model_number : "") ?? "", 60);
+  const rawVin = typeof input.vin === "string" ? cutText(input.vin, 40) : "";
+  const numberIsVin = normalizeVin(rawVin) === "" && checkVin(rawNumber).status === "ok";
+  const vinCheck = checkVin(numberIsVin ? rawNumber : rawVin);
+  const vin = vinCheck.status === "ok" ? vinCheck : null;
+  const number = numberIsVin ? "" : cleanModelNumber(rawNumber);
+  // A model number is one word of letters and digits, with both in it.
+  const isModelNumber = number !== "" && /\d/.test(number) && /[A-Z]/.test(number);
+  const numberIsName = !numberIsVin && rawNumber !== "" && (/\s/.test(rawNumber) || !isModelNumber);
+  const givenDescription = typeof input.description === "string" ? input.description : "";
+  const description = cutText(cleanCatalogText(givenDescription.trim() || (numberIsName ? rawNumber : "")) ?? "", 60);
   const named = modelFilterWords(description);
   // A year in the name ("2019 RZR XP 1000") is the year asked for, which the
   // models' own years have to match, not a word their names or titles need;
@@ -196,27 +242,48 @@ export async function findUnitManuals(
   const namedYear = named.find((word) => isModelYearWord(word) && isModelYear(Number(word)));
   const year = givenYear ?? (namedYear ? Number(namedYear) : null);
   const words = year === null ? named : named.filter((word) => word !== String(year));
-  if (!number && words.length === 0) {
+  const vinProblem = vinCheck.status === "partial" || vinCheck.status === "invalid" ? `${vinCheck.message} ` : "";
+  if (!isModelNumber && !vin && words.length === 0) {
     return {
       scope: null,
       result: {
         found: false,
-        message: "Give a model number (on the frame or VIN plate), or a model name with or without the year.",
+        message: `${vinProblem}Give a model number (on the frame or VIN plate), the 17-character VIN, or a model name with or without the year.`,
       },
     };
   }
 
   const yearCondition = year === null ? [] : [sql`cm.model_year = ${year}`];
-  let found: ModelMatches = { count: 0, units: 0, manualIds: [], shown: [] };
+  let found: ModelMatches = NO_MODELS;
   let how = "";
   let byName = false;
-  if (number) {
-    found = await modelsWhere(shopId, [sql`cm.model_number = ${number}`, ...yearCondition]);
+  let byNumber = false;
+  // The model year a VIN that found the unit means (character 10's code
+  // repeats every 30 years: the model list says which).
+  let vinYear: number | null = null;
+  let vinTried = false;
+  if (isModelNumber) {
+    // A model number is one model of one year: a year given with it
+    // (often the year the unit was sold) doesn't rule it out.
+    found = await modelsWhere(shopId, [sql`cm.model_number = ${number}`]);
     how = `model number ${number}`;
-    if (found.count === 0 && number.length >= 4) {
-      found = await modelsWhere(shopId, [sql`cm.model_number like ${`${likeEscape(number)}%`}`, ...yearCondition]);
-      how = `model numbers starting ${number}`;
+    byNumber = found.count > 0;
+  }
+  if (found.count === 0 && vin) {
+    vinTried = true;
+    for (const candidate of vinModelNumberPatterns(vin.vin)) {
+      const byVin = await modelsWhere(shopId, [sql`cm.model_number like ${candidate.pattern}`]);
+      if (byVin.count > 0) {
+        found = byVin;
+        vinYear = candidate.year;
+        how = `VIN ${vin.vin}`;
+        break;
+      }
     }
+  }
+  if (found.count === 0 && isModelNumber && !numberIsName && number.length >= 4) {
+    found = await modelsWhere(shopId, [sql`cm.model_number like ${`${likeEscape(number)}%`}`, ...yearCondition]);
+    how = `model numbers starting ${number}`;
   }
   if (found.count === 0 && words.length > 0) {
     // With a year, the models whose own names have the words are the unit
@@ -231,34 +298,84 @@ export async function findUnitManuals(
     byName = true;
   }
 
-  const listed = found.count === 0 && number ? await listedModel(shopId, number, yearCondition) : null;
-  if (listed) {
-    const name = [listed.year, listed.description].filter(Boolean).join(" ");
-    return {
-      scope: null,
-      listed,
-      result: {
-        found: true,
-        narrowed: false,
-        models: [{ model_number: listed.number, year: listed.year, description: listed.description }],
-        manuals_found: 0,
-        message: `${listed.number}${name ? ` (${name})` : ""} is in the shop's model list, but the shop has no manual for it. Searches still use the same manuals as before. Look it up again by year and model name to use a closely related model's manuals, or work with the whole library and say so.`,
-      },
-    };
-  }
+  // What the VIN said, for Claude: its model code and year, and whether it
+  // found the unit.
+  const vinFacts = vin
+    ? {
+        vin: {
+          vin: vin.vin,
+          model_code: vinModelCode(vin.vin),
+          model_year: vinYear ?? vinYears(vin.vin),
+          check_digit_ok: vin.checkDigitOk,
+        },
+      }
+    : {};
+  const vinWarning = vin && !vin.checkDigitOk ? " The VIN's check digit doesn't match the rest, so a character may be off: confirm it with the tech." : "";
+  const vinMissed =
+    vin && vinTried && vinYear === null
+      ? ` The VIN's model code ${vinModelCode(vin.vin)} (characters 4-8) with model year ${vinYears(vin.vin).join(" or ") || "unknown"} (character 10) doesn't match a model number in the shop's model list (whose characters 4-8 are that code and 2-3 the year).`
+      : "";
+  // The model number found the unit first: does the VIN agree with it?
+  const vinAgrees =
+    vin && byNumber
+      ? vinMatchesModelNumber(vin.vin, number)
+        ? ` The VIN agrees with model number ${number}.`
+        : ` The VIN's model code ${vinModelCode(vin.vin)} and year (characters 4-8 and 10) don't agree with model number ${number} (characters 4-8 and 2-3), so one of them may be off: ask the tech.`
+      : "";
+  const vinResult = (found: boolean) => (vin ? { vin: { vin: vin.vin, found, checkDigitOk: vin.checkDigitOk } } : {});
+
   if (found.count === 0) {
+    // In the model list, but with no manual in the library?
+    let listed = isModelNumber ? await listedModel(shopId, sql`cm.model_number = ${number}`) : null;
+    if (!listed && vin) {
+      for (const candidate of vinModelNumberPatterns(vin.vin)) {
+        listed = await listedModel(shopId, sql`cm.model_number like ${candidate.pattern}`);
+        if (listed) break;
+      }
+    }
+    if (listed) {
+      const name = [listed.year, listed.description].filter(Boolean).join(" ");
+      const byVin = !isModelNumber || listed.number !== number;
+      return {
+        scope: null,
+        listed,
+        ...vinResult(false),
+        result: {
+          found: true,
+          narrowed: false,
+          models: [{ model_number: listed.number, year: listed.year, description: listed.description }],
+          manuals_found: 0,
+          ...vinFacts,
+          message: `${byVin ? `The VIN matches ${listed.number}` : listed.number}${name ? ` (${name})` : ""}${byVin ? ", which" : ""} is in the shop's model list, but the shop has no manual for it. Searches still use the same manuals as before. Look it up again by year and model name to use a closely related model's manuals, or work with the whole library and say so.${vinWarning}`,
+        },
+      };
+    }
+    const asked = [
+      isModelNumber && !numberIsName && `model number ${number}`,
+      description && `"${description}"`,
+      year && `year ${year}`,
+    ].filter(Boolean);
     return {
       scope: null,
+      ...vinResult(false),
       result: {
         found: false,
-        message: `Nothing in the shop's model list matches ${[number && `model number ${number}`, description && `"${description}"`, year && `year ${year}`].filter(Boolean).join(", ")}. Searches still use the same manuals as before. Ask the tech for the model number (on the frame or VIN plate), or work with the vehicle line or the whole library and say so.`,
+        ...vinFacts,
+        message: `${vinProblem}${asked.length > 0 ? `Nothing in the shop's model list matches ${asked.join(", ")}.` : "That doesn't identify the unit."}${vinMissed} Searches still use the same manuals as before. Ask the tech for the model number (on the frame or VIN plate), or work with the vehicle line or the whole library and say so.${vinWarning}`,
       },
     };
   }
 
   const titles = await manualTitles(shopId, found.manualIds);
   const oneUnit = found.units === 1;
-  const label = oneUnit ? unitLabel(found.shown[0]) : `${how} (${found.count} models)`;
+  const vinName = vinYear !== null ? [vinYear, sharedModelName(found.descriptions)].filter(Boolean).join(" ") : "";
+  const label = oneUnit ? unitLabel(found.shown[0]) : vinYear !== null ? vinName : `${how} (${found.count} models)`;
+  // A year given with a model number that the list has under another year.
+  const otherYear =
+    byNumber && givenYear !== null && found.shown[0]?.year !== null && found.shown[0]?.year !== givenYear
+      ? ` The model list has ${number} as a ${found.shown[0].year} model, not ${givenYear}.`
+      : "";
+  const notes = `${otherYear}${vinAgrees}${vinMissed}${vinWarning}${vinProblem ? ` ${vinProblem.trim()}` : ""}`;
   const shown = {
     models: found.shown.map((model) => ({
       model_number: model.number,
@@ -272,52 +389,131 @@ export async function findUnitManuals(
       pages: manual.pageCount,
     })),
     manuals_found: titles.length,
+    ...vinFacts,
   };
   if (titles.length > DIAGNOSE_LIMITS.scopeManuals) {
     return {
       scope: null,
+      ...vinResult(false),
       result: {
         found: true,
         narrowed: false,
         ...shown,
-        message: `That matches ${titles.length} manuals, too many to narrow the search to. Searches still use the same manuals as before. Ask the tech for the model number${byName && year === null ? " or the year" : ""} to narrow it down.`,
+        message: `That matches ${titles.length} manuals, too many to narrow the search to. Searches still use the same manuals as before. Ask the tech for the model number${byName && year === null ? " or the year" : ""} to narrow it down.${notes}`,
       },
     };
   }
+  const unit = oneUnit
+    ? found.shown[0]
+    : vinYear !== null
+      ? { year: vinYear, number: null, description: sharedModelName(found.descriptions) }
+      : null;
+  const manualsWord = titles.length === 1 ? "manual" : `${titles.length} manuals`;
   return {
-    scope: { manualIds: titles.map((manual) => manual.id), label, unit: oneUnit ? found.shown[0] : null },
+    scope: { manualIds: titles.map((manual) => manual.id), label, unit },
+    ...vinResult(vinYear !== null),
     result: {
       found: true,
       narrowed: true,
       unit: label,
       ...shown,
-      message: oneUnit
-        ? `Searches and page reads now use the ${titles.length === 1 ? "manual" : `${titles.length} manuals`} for ${label}.`
-        : `Several models match (${found.count}); searches and page reads now use their ${titles.length} manuals. If the tech can give the exact model number, look it up again.`,
+      message:
+        vinYear !== null
+          ? oneUnit
+            ? `The VIN's model code and year match ${label} in the shop's list; searches and page reads now use the ${manualsWord} for it.${notes}`
+            : `The VIN's model code and year match ${found.count} models in the shop's list, variants of ${label} (a VIN doesn't give the paint or options); searches and page reads now use their ${manualsWord}.${notes}`
+          : oneUnit
+            ? `Searches and page reads now use the ${manualsWord} for ${label}.${notes}`
+            : `Several models match (${found.count}); searches and page reads now use their ${manualsWord}. If the tech can give the exact model number, look it up again.${notes}`,
     },
   };
 }
 
-// search_manual_pages: the library's full-text search, in the scope.
+const quoted = (words: string[]) => words.map((word) => (word.startsWith('"') ? word : `"${word}"`)).join(", ");
+
+const searchResult = (hit: SearchHit, has?: string[]) => ({
+  manual_id: hit.manualId,
+  manual_title: hit.title,
+  page: hit.pageNumber,
+  page_count: hit.pageCount,
+  snippet: hit.snippet.map((part) => part.text).join("").replace(/\s+/g, " ").trim(),
+  ...(has ? { has_words: has } : {}),
+});
+
+// The scope's ready manuals with pages search can't find anything on
+// (scanned pages OCR hasn't read, or found no words on), or the whole
+// library's.
+async function pagesWithoutText(shopId: string, manualIds: string[] | null) {
+  const [row] = await withShop(shopId, (tx) =>
+    tx
+      .select({
+        manuals: sql<number>`(count(*) filter (where ${manuals.pagesWithoutText} > 0))::int`,
+        pages: sql<number>`coalesce(sum(${manuals.pagesWithoutText}), 0)::int`,
+      })
+      .from(manuals)
+      .where(and(eq(manuals.status, "ready"), manualIds ? sql`${manuals.id} = any(${uuidArray(manualIds)})` : undefined)),
+  );
+  return row ?? { manuals: 0, pages: 0 };
+}
+
+// search_manual_pages: the library's full-text search, in the scope. When
+// no page has every word, the pages with most of them, saying so; when the
+// scope has nothing at all, how many pages the rest of the library has
+// (never the pages themselves: they're other units'), and whether the
+// scope's manuals have pages search can't read.
 export async function searchScopedPages(shopId: string, scope: ManualScope, query: unknown) {
   const q = cleanSearchQuery(typeof query === "string" ? query : "");
   if (!q) return { hits: [], result: { error: "The query is empty." } };
-  const hits = await searchManuals(shopId, q, {}, DIAGNOSE_LIMITS.searchHits, scope.manualIds ?? undefined);
+  const ids = scope.manualIds ?? undefined;
+  const searched = scope.manualIds === null ? "the whole library" : `${scope.manualIds.length} manuals for ${scope.label ?? "this unit"}`;
+  const hits = await searchManuals(shopId, q, {}, DIAGNOSE_LIMITS.searchHits, ids);
+  if (hits.length > 0) return { hits, result: { query: q, searched, results: hits.map((hit) => searchResult(hit)) } };
+
+  const most = await searchManualsWithMost(shopId, q, DIAGNOSE_LIMITS.searchHits, ids);
+  if (most.hits.length > 0) {
+    return {
+      hits: most.hits as SearchHit[],
+      result: {
+        query: q,
+        searched,
+        results: most.hits.map((hit) => searchResult(hit, hit.has)),
+        message: `No page in ${scope.manualIds === null ? "the library" : "this unit's manuals"} has all of ${quoted(most.words)}; these have most of them (has_words says which). Check a page covers what you need before you rely on it, or search again with other words.`,
+      },
+    };
+  }
+
+  const notes: string[] = [];
+  if (scope.manualIds !== null) {
+    const all = await countMatchesElsewhere(shopId, q, scope.manualIds);
+    const counted = all.pages > 0 ? all : await countMatchesElsewhere(shopId, q, scope.manualIds, { most: true });
+    if (counted.pages > 0) {
+      const titles = counted.manuals.slice(0, 5).map((manual) => `${manual.title} (${manual.pages})`);
+      notes.push(
+        `Outside this unit's manuals, ${counted.pages} ${counted.pages === 1 ? "page" : "pages"} in the shop's library ${all.pages > 0 ? (counted.pages === 1 ? "matches" : "match") : `${counted.pages === 1 ? "has" : "have"} most of these words`}, in ${counted.manuals.length === 1 ? "a manual" : `${counted.manuals.length} manuals`} for other units: ${titles.join("; ")}${counted.manuals.length > 5 ? "; …" : ""}. They aren't this unit's pages, so don't take its specs from them. If the unit is wrong, look it up again with find_unit_manuals.`,
+      );
+    } else {
+      notes.push("Nothing in the rest of the shop's library matches either.");
+    }
+  }
+  const unread = await pagesWithoutText(shopId, scope.manualIds);
+  if (unread.pages > 0) {
+    notes.push(
+      `${
+        scope.manualIds === null
+          ? "The library has"
+          : scope.manualIds.length === 1
+            ? "This unit's manual has"
+            : `${unread.manuals} of this unit's ${scope.manualIds.length} manuals ${unread.manuals === 1 ? "has" : "have"}`
+      } ${unread.pages} ${unread.pages === 1 ? "page" : "pages"} with no searchable text (scanned pages the library hasn't read yet, or pictures), which no search can find; the tech can open them in the Library.`,
+    );
+  }
   return {
-    hits,
+    hits: [],
     result: {
       query: q,
-      searched: scope.manualIds === null ? "the whole library" : `${scope.manualIds.length} manuals for ${scope.label ?? "this unit"}`,
-      results: hits.map((hit) => ({
-        manual_id: hit.manualId,
-        manual_title: hit.title,
-        page: hit.pageNumber,
-        page_count: hit.pageCount,
-        snippet: hit.snippet.map((part) => part.text).join("").replace(/\s+/g, " ").trim(),
-      })),
-      ...(hits.length === 0
-        ? { message: "No pages match. Try fewer or different words, the code alone, or how a manual would name the test." }
-        : {}),
+      searched,
+      results: [],
+      message: ["No pages match.", ...notes, "Try fewer or different words, the code alone, or how a manual would name the test."].join(" "),
     },
   };
 }

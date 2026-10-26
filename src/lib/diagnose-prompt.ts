@@ -1,6 +1,6 @@
 import type Anthropic from "@anthropic-ai/sdk";
 
-import { DIAGNOSE_LIMITS, DIAGNOSE_MODEL } from "@/lib/diagnose-rules";
+import { DIAGNOSE_LIMITS, DIAGNOSE_MODEL, EFFORTS } from "@/lib/diagnose-rules";
 import { CAUSE_SYSTEMS } from "@/lib/diagnose-zones";
 
 // What Diagnose sends Claude besides the conversation: the system prompt, the
@@ -22,9 +22,9 @@ You have three kinds of sources, and the tech needs to know which one each piece
 
 How the work usually goes:
 
-- Identify the unit first. When the tech gives a model number (it's on the frame or VIN plate, like Z19VDE99AM) or a year and model, call find_unit_manuals so your searches go to that unit's manuals. If nothing matches, ask for the model number, or carry on with the vehicle line or the whole library and say so.
+- Identify the unit first. When the tech gives a model number (it's on the frame or VIN plate, like Z19VDE99AM), a VIN, or a year and model, call find_unit_manuals so your searches go to that unit's manuals. If nothing matches, ask for the model number, or carry on with the vehicle line or the whole library and say so.
 - Look things up before you give specs or procedures: search for the fault code itself, the system involved and the test's name as a manual would put it ("ignition coil resistance", "fuel pressure test"), then read the pages that look right. Procedures often run onto the next page.
-- Put the checks in order from quick, cheap and non-invasive to slow and invasive: stored codes and live data, a visual inspection, connectors and grounds, simple measurements, then swapping parts or taking things apart.
+- Rank the likely causes by how likely they are: that's the diagnosis. Order the next checks by effort, the way an experienced tech works, so the quick fixes get ruled in or out first: quick checks (minutes, no tools or teardown: a visual inspection, connectors, loose or damaged sensors, wiring, fuses, grounds, fluid levels, stored codes), then tests (a meter, pressure gauge, scan tool or Digital Wrench, or a road test), then teardown (panels, covers or parts off, swapping parts). Within a tier, put the most useful check first. A two-minute check of a somewhat less likely cause comes before a likely one that needs teardown. Give each check its tier, and each cause how much work it takes to confirm or rule out (check_effort), with the same three values.
 - If one missing detail would change what you'd recommend (hours or miles, exactly when the symptom shows up, recent work or aftermarket parts), ask for that one detail rather than guessing. Don't ask for things that wouldn't change your advice.
 - Be honest when sources disagree, or when the manuals you can reach don't cover something: say it wasn't found and where the tech might look. Don't fill a spec in from memory, and never make up part numbers, specifications or bulletin numbers.
 - Mention safety where it matters: fuel and fuel pressure, hot exhaust, batteries and charging, lifting and supporting the machine, rotating parts.
@@ -33,7 +33,7 @@ Every message from the tech ends with you calling submit_diagnosis; it's how you
 
 Write for a tech on a tablet in the shop: plain words, short paragraphs or simple "- " bullets, no headings, tables or bold. Keep the reply itself short; the causes and checks carry the detail.
 
-The app adds notes in system messages: the unit and manuals the tech picked, and when the tech presses "Ruled out" or "This was it" on one of your causes. Treat a ruled-out cause as checked and fine unless new evidence points back at it.`;
+The app adds notes in system messages: the unit, VIN and manuals the tech picked, and when the tech presses "Ruled out" or "This was it" on one of your causes. Treat a ruled-out cause as checked and fine unless new evidence points back at it.`;
 
 const SOURCE_SCHEMA = {
   anyOf: [
@@ -69,6 +69,10 @@ const SOURCE_SCHEMA = {
   ],
 } as const;
 
+// The tiers of work, as the tools describe them.
+const EFFORT_DESCRIPTION = (what: string) =>
+  `${what}: quick (minutes, no tools or teardown: a visual inspection, connectors, loose or damaged sensors, wiring, fuses, grounds, fluid levels, stored codes), test (needs a meter, pressure gauge, scan tool or Digital Wrench, or a road test) or teardown (panels, covers or parts off, swapping parts).`;
+
 export const TOOL_NAMES = {
   findUnit: "find_unit_manuals",
   search: "search_manual_pages",
@@ -84,11 +88,16 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
   {
     name: TOOL_NAMES.findUnit,
     description:
-      "Look up the unit in the shop's model list and point this conversation's manual searches at its manuals. Call it as soon as you know the model number (best; from the frame or VIN plate, like Z19VDE99AM) or a year and model name (2019, \"RZR XP 1000\"). It returns the matching models and manuals and says whether it narrowed the search. If nothing matches, the manuals in use stay as they were.",
+      "Look up the unit in the shop's model list and point this conversation's manual searches at its manuals. Call it as soon as you know the model number (best; from the frame or VIN plate, like Z19VDE99AM), the 17-character VIN, or a year and model name (2019, \"RZR XP 1000\"). It returns the matching models and manuals and says whether it narrowed the search. If nothing matches, the manuals in use stay as they were.",
     input_schema: {
       type: "object",
       properties: {
         model_number: { type: "string", description: "The model number, e.g. Z19VDE99AM, or its start." },
+        vin: {
+          type: "string",
+          description:
+            "The unit's 17-character VIN, e.g. 4XASEE578PA123456. Its characters 4-8 and 10 give the model code and year, which find the model's variants (not the paint).",
+        },
         description: { type: "string", description: "Model name words, e.g. RZR XP 1000 or Sportsman 570." },
         year: { type: "integer", description: "Model year, e.g. 2019." },
       },
@@ -114,7 +123,7 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
   },
   {
     name: TOOL_NAMES.search,
-    description: `Full-text search over the pages of the manuals this conversation is using (the unit's manuals once find_unit_manuals has found them, otherwise the shop's whole library). Use it before giving any spec, procedure or code definition. All plain words must match; it also takes "quoted phrases", OR, and -word. Fault codes like P0300 and part numbers match as whole words. Returns the best ${DIAGNOSE_LIMITS.searchHits} pages with a snippet each.`,
+    description: `Full-text search over the pages of the manuals this conversation is using (the unit's manuals once find_unit_manuals has found them, otherwise the shop's whole library). Use it before giving any spec, procedure or code definition. All plain words must match; it also takes "quoted phrases", OR, and -word. Fault codes like P0300 and part numbers match as whole words. Returns the best ${DIAGNOSE_LIMITS.searchHits} pages with a snippet each. When no page has all the words, it returns the pages with most of them and says which words each has; when the unit's manuals have nothing, it says how many pages in the rest of the library match (other units' manuals, not this unit's).`,
     input_schema: {
       type: "object",
       properties: {
@@ -139,7 +148,7 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
         },
         likely_causes: {
           type: "array",
-          description: "The full ranked list of likely causes as it stands now, most likely first.",
+          description: "The full ranked list of likely causes as it stands now, most likely first, whatever the effort.",
           items: {
             type: "object",
             properties: {
@@ -152,18 +161,24 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
               likelihood: { type: "string", enum: ["high", "medium", "low"] },
               why: { type: "string", description: "One or two sentences on why it fits, or why it's ruled out." },
               status: { type: "string", enum: ["open", "ruled_out", "confirmed"] },
+              check_effort: {
+                type: "string",
+                enum: [...EFFORTS],
+                description: EFFORT_DESCRIPTION("How much work it is to confirm or rule this cause out"),
+              },
               sources: { type: "array", items: SOURCE_SCHEMA },
             },
-            required: ["title", "system", "likelihood", "why", "status", "sources"],
+            required: ["title", "system", "likelihood", "why", "status", "check_effort", "sources"],
             additionalProperties: false,
           },
         },
         next_checks: {
           type: "array",
-          description: "What to check next, in the order to do it.",
+          description: "What to check next, in the order to do it: quick checks, then tests, then teardown; within a tier, the most useful first.",
           items: {
             type: "object",
             properties: {
+              tier: { type: "string", enum: [...EFFORTS], description: EFFORT_DESCRIPTION("How much work this check is") },
               action: { type: "string", description: "What to do." },
               expected: {
                 type: "string",
@@ -171,7 +186,7 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
               },
               sources: { type: "array", items: SOURCE_SCHEMA },
             },
-            required: ["action", "expected", "sources"],
+            required: ["tier", "action", "expected", "sources"],
             additionalProperties: false,
           },
         },

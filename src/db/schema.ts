@@ -675,6 +675,10 @@ export const diagnosisConversations = pgTable(
     unitYear: integer("unit_year"),
     // As shown: "2019 RZR XP 1000 EPS — Z19VDE99AM".
     unitLabel: text("unit_label"),
+    // The unit's VIN, when the tech gave one (17 characters, upper case; see
+    // src/lib/vin.ts). Set when the conversation starts, or when the unit is
+    // looked up or changed by VIN.
+    unitVin: text("unit_vin"),
     // The manuals Claude's tools search and read. Null: the whole library.
     scopeManualIds: uuid("scope_manual_ids").array(),
     // Whether web search was declared when it started. The tool list stays
@@ -724,6 +728,8 @@ export const diagnosisConversations = pgTable(
       "diagnosis_conversations_status",
       sql`${t.status} in (${sql.raw(CONVERSATION_STATUSES.map((s) => `'${s}'`).join(", "))})`,
     ),
+    // 17 letters and digits, never I, O or Q.
+    check("diagnosis_conversations_unit_vin", sql`${t.unitVin} ~ '^[A-HJ-NPR-Z0-9]{17}$'`),
     pgPolicy("diagnosis_conversations_own_shop", {
       for: "select",
       to: appUser,
@@ -734,8 +740,8 @@ export const diagnosisConversations = pgTable(
       to: appUser,
       withCheck: sql`${t.shopId} = ${currentShopId}`,
     }),
-    // Which columns can change is set by the grant in
-    // drizzle/0019_diagnosis_grants.sql.
+    // Which columns can change is set by the grants in
+    // drizzle/0019_diagnosis_grants.sql and 0023_diagnosis_vin_grants.sql.
     pgPolicy("diagnosis_conversations_update_own_shop", {
       for: "update",
       to: appUser,

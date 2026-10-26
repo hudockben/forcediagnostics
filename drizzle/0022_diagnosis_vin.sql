@@ -1,0 +1,2 @@
+ALTER TABLE "diagnosis_conversations" ADD COLUMN "unit_vin" text;--> statement-breakpoint
+ALTER TABLE "diagnosis_conversations" ADD CONSTRAINT "diagnosis_conversations_unit_vin" CHECK ("diagnosis_conversations"."unit_vin" ~ '^[A-HJ-NPR-Z0-9]{17}$');

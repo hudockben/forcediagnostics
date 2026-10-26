@@ -3,16 +3,19 @@
 import Link from "next/link";
 import { useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 
-import type {
-  Cause,
-  CauseVerdict,
-  Check,
-  ConversationView,
-  DiagnosisReply,
-  FeedbackEntry,
-  ScopeView,
-  SourceView,
-  UnitSuggestion,
+import {
+  EFFORT_LABELS,
+  checkGroups,
+  type Cause,
+  type CauseVerdict,
+  type Check,
+  type ConversationView,
+  type DiagnosisReply,
+  type Effort,
+  type FeedbackEntry,
+  type ScopeView,
+  type SourceView,
+  type UnitSuggestion,
 } from "@/lib/diagnose-rules";
 import {
   SYSTEM_LABELS,
@@ -28,6 +31,7 @@ import {
 import type { ViewMode } from "@/lib/unit-3d/look";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 import { drawingFor } from "@/lib/unit-graphic/drawing";
+import { checkVin } from "@/lib/vin";
 
 import { changeUnitAction, markCauseAction } from "./actions";
 import { ManualPictures, PageThumbs, manualPages } from "./manual-pictures";
@@ -40,8 +44,11 @@ import {
   ChevronIcon,
   CrossIcon,
   GlobeIcon,
+  MeterIcon,
+  QuickIcon,
   UnitIcon,
   WarningIcon,
+  WrenchIcon,
 } from "./icons";
 import { Unit3D, UnitHeader, UnitKey, isDrawnSystem, unitName } from "./unit-3d";
 import { UnitGraphic } from "./unit-graphic";
@@ -175,6 +182,32 @@ function StatusChip({ status }: { status: CauseState }) {
     <span data-status-chip={status} className={`inline-flex h-9 items-center gap-1 rounded-full border px-3 text-xs font-medium ${chip.className}`}>
       {chip.icon}
       {chip.label}
+    </span>
+  );
+}
+
+const EFFORT_ICONS: Record<Effort, (props: { className?: string }) => ReactNode> = {
+  quick: QuickIcon,
+  test: MeterIcon,
+  teardown: WrenchIcon,
+};
+
+// How much work it is to confirm or rule a cause out, so the cheap suspects
+// stand out. Replies saved before causes carried it have none.
+function EffortChip({ effort }: { effort: Effort }) {
+  const Icon = EFFORT_ICONS[effort];
+  const label = EFFORT_LABELS[effort];
+  return (
+    <span
+      data-effort={effort}
+      title={`To confirm or rule out: ${label.chip.toLowerCase()} (${label.detail})`}
+      className={`inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-medium ${
+        effort === "quick" ? "border-white/25 text-ink" : "border-white/10 text-ink-muted"
+      }`}
+    >
+      <Icon className="size-3.5" />
+      {label.chip}
+      <span className="sr-only"> to confirm or rule out</span>
     </span>
   );
 }
@@ -409,6 +442,7 @@ function CauseItem({
             {cause.why && <WhyLine text={cause.why} />}
             <div className="flex flex-wrap items-start gap-2">
               <StatusChip status={status} />
+              {cause.checkEffort && <EffortChip effort={cause.checkEffort} />}
               <SystemChip system={system} active={highlight} onSelect={() => onSelectZone(system)} />
               {/* Beside the system chip while there's room for one. */}
               <SourceChips sources={cause.sources} className="min-w-0 flex-1 basis-32" />
@@ -550,6 +584,45 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
   );
 }
 
+// The next checks under their tiers (quick checks, tests, teardown), numbered
+// on across them; a reply saved before checks had tiers is one list in
+// Claude's order.
+function CheckList({ checks }: { checks: Check[] }) {
+  const groups = checkGroups(checks);
+  if (!groups) {
+    return (
+      <ol className="space-y-2">
+        {checks.map((check, index) => (
+          <CheckItem key={index} check={check} step={index + 1} />
+        ))}
+      </ol>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {groups.map(({ effort, items }) => {
+        const Icon = EFFORT_ICONS[effort];
+        const label = EFFORT_LABELS[effort];
+        return (
+          <section key={effort} data-tier={effort} aria-label={`${label.heading}: ${label.detail}`} className="space-y-2">
+            <h3 className="flex items-center gap-1.5 px-0.5 text-xs leading-5 text-ink-muted">
+              <Icon className="size-3.5" />
+              <span className="font-semibold text-ink/90">{label.heading}</span>
+              <span aria-hidden>·</span>
+              <span>{label.detail}</span>
+            </h3>
+            <ol start={items[0].step} className="space-y-2">
+              {items.map((item) => (
+                <CheckItem key={item.step} check={item.check} step={item.step} />
+              ))}
+            </ol>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 // --- Unit and manuals -------------------------------------------------------------
 
 const smallButtonClass =
@@ -561,7 +634,7 @@ function ScopeCard({
   disabled,
 }: {
   conversation: ConversationView;
-  onScope: (scope: ScopeView, unit: string | null, vehicle: UnitVehicle | null, model: UnitSpec | null) => void;
+  onScope: (scope: ScopeView, unit: string | null, vin: string | null, vehicle: UnitVehicle | null, model: UnitSpec | null) => void;
   disabled: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -569,8 +642,9 @@ function ScopeCard({
   const [picked, setPicked] = useState<UnitSuggestion | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const { scope } = conversation;
+  const { scope, vin } = conversation;
   const count = scope.manuals.length;
+  const vinCheck = vin ? checkVin(vin) : null;
 
   async function change(input: { modelNumber?: string; wholeLibrary?: boolean }) {
     setPending(true);
@@ -581,7 +655,7 @@ function ScopeCard({
       setMessage(result.error);
       return;
     }
-    onScope(result.scope, result.unit, result.vehicle, result.model);
+    onScope(result.scope, result.unit, result.vin, result.vehicle, result.model);
     setEditing(false);
     setValue("");
     setPicked(null);
@@ -606,6 +680,15 @@ function ScopeCard({
           </button>
         )}
       </div>
+      {vin && (
+        <p className="flex flex-wrap items-baseline gap-x-2 text-sm leading-6" data-testid="unit-vin">
+          <span className="text-xs font-medium text-ink-muted">VIN</span>
+          <span className="font-mono tracking-wide break-all text-ink">{vin}</span>
+          {vinCheck?.status === "ok" && !vinCheck.checkDigitOk && (
+            <span className="text-xs text-trail">check digit doesn&apos;t match: a character may be off</span>
+          )}
+        </p>
+      )}
       {count > 0 && (
         <details className="text-xs text-ink-muted">
           <summary className="flex min-h-11 cursor-pointer items-center text-glow/90 hover:text-glow">Which manuals</summary>
@@ -629,7 +712,7 @@ function ScopeCard({
           }}
         >
           <label htmlFor="change-unit" className="text-sm font-medium text-ink/90">
-            Model number
+            Model number or VIN
           </label>
           <UnitPicker id="change-unit" value={value} onChange={setValue} picked={picked} onPick={setPicked} />
           <div className="flex flex-wrap gap-2">
@@ -863,11 +946,7 @@ export function CausesPanel({
 
           {reply && reply.nextChecks.length > 0 && (
             <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
-              <ol className="space-y-2">
-                {reply.nextChecks.map((check, index) => (
-                  <CheckItem key={index} check={check} step={index + 1} />
-                ))}
-              </ol>
+              <CheckList checks={reply.nextChecks} />
             </Section>
           )}
 
@@ -892,7 +971,7 @@ export function CausesPanel({
           <ScopeCard
             conversation={conversation}
             disabled={busy}
-            onScope={(scope, unit, vehicle, model) => onConversation({ scope, unit, vehicle, model })}
+            onScope={(scope, unit, vin, vehicle, model) => onConversation({ scope, unit, vin, vehicle, model })}
           />
         </div>
       </div>

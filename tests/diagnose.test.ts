@@ -21,6 +21,7 @@ import { streamFromClaude } from "../src/lib/claude";
 import { attemptCounters, diagnosisConversations, diagnosisTurns, shops, users } from "../src/db/schema";
 import {
   STALE_AFTER_MS,
+  changeUnit,
   getConversation,
   isProblem,
   listConversations,
@@ -53,17 +54,25 @@ import {
 import {
   DIAGNOSE_LIMITS,
   DIAGNOSE_MODEL,
+  EFFORTS,
+  checkGroups,
   checkSources,
   emptyUsage,
   estimateCostCents,
   finalizeReply,
+  inferEffort,
+  listedEffort,
   normalizeFaultCodes,
+  openingRows,
+  partialReply,
   startMessage,
   textBlocks,
   type SeenSources,
   type StreamEvent,
 } from "../src/lib/diagnose-rules";
 import { findUnitManuals, readScopedPage, searchScopedPages, suggestUnits, unitVehicle } from "../src/lib/diagnose-tools";
+import { listReadyManuals, modelFilterWords } from "../src/lib/library";
+import { vinCheckDigit } from "../src/lib/vin";
 import { finishCatalogImport, saveCatalogBatch } from "../src/lib/manual-catalog";
 import { confirmManualUpload, finishManual, saveManualPages, startManualUpload, storageKeyFor } from "../src/lib/manuals";
 import { can, needsPasswordSession } from "../src/lib/permissions";
@@ -384,9 +393,9 @@ describe("citations", () => {
           { title: "", likelihood: "low", why: "", status: "open", sources: [] },
         ],
         next_checks: [
-          { action: "Measure primary resistance", expected: "0.6-0.8 ohms", sources: [{ type: "manual", manual_id: manualId, page: 142 }] },
-          { action: "Check the gap", expected: "0.9 mm", sources: [{ type: "general" }] },
-          { action: "Look at the connector", expected: "", sources: [] },
+          { tier: "test", action: "Measure primary resistance", expected: "0.6-0.8 ohms", sources: [{ type: "manual", manual_id: manualId, page: 142 }] },
+          { tier: "test", action: "Check the gap", expected: "0.9 mm", sources: [{ type: "general" }] },
+          { tier: "test", action: "Look at the connector", expected: "", sources: [] },
         ],
         safety_notes: ["Fuel is under pressure.", 7],
         questions_for_tech: ["Hours on it?"],
@@ -755,14 +764,16 @@ describe("a conversation", () => {
               ],
               next_checks: [
                 {
-                  action: "Measure coil primary resistance",
-                  expected: "0.6 to 0.8 ohms",
-                  sources: [{ type: "manual", manual_id: rzrManual, page: 2 }],
-                },
-                {
+                  tier: "quick",
                   action: "Look up the service bulletin",
                   expected: "",
                   sources: [{ type: "web", url: "https://polaris.example.com/tsb-made-up", title: "TSB" }],
+                },
+                {
+                  tier: "test",
+                  action: "Measure coil primary resistance",
+                  expected: "0.6 to 0.8 ohms",
+                  sources: [{ type: "manual", manual_id: rzrManual, page: 2 }],
                 },
               ],
               safety_notes: ["Let the exhaust cool first."],
@@ -782,8 +793,9 @@ describe("a conversation", () => {
     assert.equal(reply.reply, "P0300 on this unit usually comes down to ignition. Start with the coils.");
     assert.deepEqual(reply.likelyCauses[0].sources.map((source) => source.type), ["manual", "web"]);
     assert.deepEqual(reply.likelyCauses[1].sources, [{ type: "general" }]);
-    assert.deepEqual(reply.nextChecks[0].sources[0], { type: "manual", manualId: rzrManual, page: 2, title: "9928000" });
-    assert.deepEqual(reply.nextChecks[1].sources, []);
+    assert.deepEqual(reply.nextChecks[1].sources[0], { type: "manual", manualId: rzrManual, page: 2, title: "9928000" });
+    assert.deepEqual(reply.nextChecks[0].sources, []);
+    assert.deepEqual(reply.nextChecks.map((check) => check.tier), ["quick", "test"]);
     assert.equal(reply.dropped, 2);
     assert.deepEqual(reply.questions, ["How many hours on it?"]);
     // The unit lookup set the conversation's scope.
@@ -1516,5 +1528,417 @@ describe("Diagnose and shops", () => {
         (error: Error & { cause?: { code?: string } }) => error.cause?.code === "42501",
       );
     }
+  });
+});
+
+// --- VINs, tiers, and finding pages ---------------------------------------------------
+
+// A VIN with its check digit (character 9) worked out.
+const withCheckDigit = (vin: string) => `${vin.slice(0, 8)}${vinCheckDigit(`${vin.slice(0, 8)}0${vin.slice(9)}`)}${vin.slice(9)}`;
+const SPORTSMAN_VIN = withCheckDigit("4XASEE570PA123456"); // A23SEE57..: a 2023 Sportsman 570 EPS
+const BIG_BOSS_VIN = withCheckDigit("4XAAE50A0WA123456"); // W98AE50A: W is 1998 or 2028
+const RZR_2020_VIN = withCheckDigit("3NSVDE990LF123456"); // Z20VDE99..: not in the list
+const SPORTSMAN_2024_VIN = withCheckDigit("4XASEE570RA123456"); // A24SEE57A1: listed, no manual
+
+describe("VINs, tiers and finding pages", () => {
+  // Polaris's own entries for these model numbers (real ones).
+  let techV: CurrentUser;
+  let techW: CurrentUser;
+  let oneUp: string;
+  let p1552: string;
+  let touring: string;
+  let rzrV: string;
+  let bigBoss: string;
+  let rzrW: string;
+
+  before(async () => {
+    const shopV = await createShop(`dn${suffix}`);
+    const shopW = await createShop(`dw${suffix}`);
+    const adminV = await createUser(shopV, "admin", "Vic");
+    techV = await createUser(shopV, "tech", "Val");
+    const adminW = await createUser(shopW, "admin", "Wes");
+    techW = await createUser(shopW, "tech", "Wyn");
+    oneUp = await addManual(adminV, "9860005r02.pdf", [
+      "Speed sensor location. The vehicle speed sensor is on the right side of the transmission. Inspect the speed sensor connector for water.",
+      "Speed sensor resistance test with a meter.",
+      // A scanned page nothing has read yet.
+      "",
+    ]);
+    p1552 = await addManual(adminV, "P1552 Diagnostics Manual.pdf", ["P1552 throttle stuck error diagnostics."]);
+    touring = await addManual(adminV, "9942015_r02.pdf", ["Touring rear rack removal."]);
+    rzrV = await addManual(adminV, "9940787.pdf", ["RZR wheel speed sensor wiring."]);
+    bigBoss = await addManual(adminV, "9914000.pdf", ["Big Boss 6x6 drive chain."]);
+    rzrW = await addManual(adminW, "9940787.pdf", ["Shop W's own RZR manual."]);
+    await importModels(adminV, [
+      {
+        fileName: "9860005r02.pdf",
+        brand: "ATV",
+        title: "2021-2026 Sportsman 450 / 570 1-Up",
+        models: [
+          [2023, "A23SEA57A1", "SPORTSMAN 570 - SAGE GREEN"],
+          [2023, "A23SEA57A9", "SPORTSMAN 570 - POLARIS PUSUIT CAMO"],
+          [2023, "A23SEE57A1", "SPORTSMAN 570 EPS - SAGE GREEN"],
+          [2023, "A23SEE57A9", "SPORTSMAN 570 EPS - POLARIS PURSUIT CAMO"],
+          [2023, "A23SEE57B9", "SPORTSMAN 570 EPS - POLARIS PURSUIT CAMO"],
+          [2023, "A23SEE57F1", "SPORTSMAN 570 EPS GREEN EU"],
+          [2023, "A23SEE57KL", "SPORTSMAN 570 EPS ONXY BLACK (3PC)"],
+        ],
+      },
+      {
+        fileName: "P1552 Diagnostics Manual.pdf",
+        brand: "ATV",
+        title: "P1552 Throttle Stuck Error Diagnostics Service Manual",
+        models: [
+          [2023, "A23SEA57A9", "SPORTSMAN 570 - POLARIS PUSUIT CAMO"],
+          [2023, "A23SEE57A9", "SPORTSMAN 570 EPS - POLARIS PURSUIT CAMO"],
+        ],
+      },
+      {
+        fileName: "9942015_r02.pdf",
+        brand: "ATV",
+        title: "2017-2024 Sportsman 450 / 570",
+        models: [
+          [2023, "A23SDA57A5", "SPORTSMAN TOURING 570 - SONIC BLUE"],
+          [2023, "A23SWE57F1", "SPORTSMAN X2 570 EPS GREEN EU"],
+        ],
+      },
+      {
+        fileName: "9940787.pdf",
+        brand: "RZR",
+        title: "2019 RZR XP 1000 Service Manual",
+        models: [
+          [2019, "Z19VDE99AK", "RZR XP 1000 BLACK PEARL"],
+          [2019, "Z19VDE99AN", "RZR XP 1000 SKY BLUE"],
+        ],
+      },
+      { fileName: "9914000.pdf", brand: "ATV", title: "1998 Big Boss Service Manual", models: [[1998, "W98AE50A", "BIG BOSS 500"]] },
+      // Listed, but its PDF isn't in the library.
+      { fileName: "9861111.pdf", brand: "ATV", models: [[2024, "A24SEE57A1", "SPORTSMAN 570 EPS - SAGE GREEN"]] },
+    ]);
+    await importModels(adminW, [
+      { fileName: "9940787.pdf", brand: "RZR", models: [[2019, "Z19VDE99AK", "RZR XP 1000 BLACK PEARL"]] },
+    ]);
+  });
+
+  test("a VIN finds its model's variants in the shop's list (code in characters 4-8, year in 10), not their paint", async () => {
+    const lookup = await findUnitManuals(techV.shop.id, { vin: SPORTSMAN_VIN.toLowerCase() });
+    assert.ok(lookup.scope, JSON.stringify(lookup.result));
+    // The five A23SEE57 variants: their manuals, not the carbureted 570's
+    // or the Touring's.
+    assert.equal(lookup.result.models_found, 5);
+    assert.deepEqual(new Set(lookup.scope.manualIds), new Set([oneUp, p1552]));
+    assert.equal(lookup.scope.label, "2023 SPORTSMAN 570 EPS");
+    assert.deepEqual(lookup.scope.unit, { year: 2023, number: null, description: "SPORTSMAN 570 EPS" });
+    assert.deepEqual(lookup.vin, { vin: SPORTSMAN_VIN, found: true, checkDigitOk: true });
+    assert.deepEqual(lookup.result.vin, { vin: SPORTSMAN_VIN, model_code: "SEE57", model_year: 2023, check_digit_ok: true });
+    assert.match(String(lookup.result.message), /variants of 2023 SPORTSMAN 570 EPS \(a VIN doesn't give the paint or options\)/);
+    // A VIN given as the model number is a VIN.
+    assert.deepEqual((await findUnitManuals(techV.shop.id, { model_number: SPORTSMAN_VIN })).scope?.manualIds.sort(), [oneUp, p1552].sort());
+    // A 30-year-old year code: W is 2028 or 1998, and the list has only 1998.
+    const old = await findUnitManuals(techV.shop.id, { vin: BIG_BOSS_VIN });
+    assert.deepEqual(old.scope?.manualIds, [bigBoss]);
+    assert.equal(old.scope?.label, "1998 BIG BOSS 500 — W98AE50A");
+    assert.equal((old.result.vin as { model_year: number }).model_year, 1998);
+  });
+
+  test("a VIN with a wrong check digit still finds the unit, with a warning; one not in the list is kept as information", async () => {
+    const misread = `${SPORTSMAN_VIN.slice(0, 16)}${SPORTSMAN_VIN[16] === "1" ? "2" : "1"}`;
+    const lookup = await findUnitManuals(techV.shop.id, { vin: misread });
+    assert.ok(lookup.scope);
+    assert.equal(lookup.vin?.checkDigitOk, false);
+    assert.match(String(lookup.result.message), /check digit doesn't match the rest, so a character may be off/);
+    // A 2020 RZR XP 1000: the list has the 2019's only.
+    const missing = await findUnitManuals(techV.shop.id, { vin: RZR_2020_VIN });
+    assert.equal(missing.scope, null);
+    assert.equal(missing.result.found, false);
+    assert.deepEqual(missing.vin, { vin: RZR_2020_VIN, found: false, checkDigitOk: true });
+    assert.match(String(missing.result.message), /model code VDE99 \(characters 4-8\) with model year 2020 or 1990 \(character 10\) doesn't match a model number/);
+    // In the list, but no manual: reported as that model.
+    const listed = await findUnitManuals(techV.shop.id, { vin: SPORTSMAN_2024_VIN });
+    assert.equal(listed.scope, null);
+    assert.equal(listed.listed?.number, "A24SEE57A1");
+    assert.match(String(listed.result.message), /The VIN matches A24SEE57A1 \(2024 SPORTSMAN 570 EPS - SAGE GREEN\), which is in the shop's model list, but the shop has no manual for it/);
+    // The last digits alone aren't a VIN.
+    const partial = await findUnitManuals(techV.shop.id, { vin: "PA123456" });
+    assert.equal(partial.result.found, false);
+    assert.match(String(partial.result.message), /a VIN has 17/);
+  });
+
+  test("a model number found first says whether the VIN given with it agrees, rather than that the VIN wasn't found", async () => {
+    const disagree = await findUnitManuals(techV.shop.id, { model_number: "Z19VDE99AK", vin: SPORTSMAN_VIN });
+    assert.deepEqual(disagree.scope?.manualIds, [rzrV]);
+    assert.match(String(disagree.result.message), /The VIN's model code SEE57 and year \(characters 4-8 and 10\) don't agree with model number Z19VDE99AK/);
+    assert.ok(!/doesn't match a model number/.test(String(disagree.result.message)));
+    const agree = await findUnitManuals(techV.shop.id, { model_number: "A23SEE57A1", vin: SPORTSMAN_VIN });
+    assert.match(String(agree.result.message), /The VIN agrees with model number A23SEE57A1/);
+  });
+
+  test("a VIN is looked up in the shop's own list only", async () => {
+    assert.equal((await findUnitManuals(techW.shop.id, { vin: SPORTSMAN_VIN })).scope, null);
+    const rzrVin = withCheckDigit("3NSVDE990KF123456");
+    assert.deepEqual((await findUnitManuals(techW.shop.id, { vin: rzrVin })).scope?.manualIds, [rzrW]);
+    assert.deepEqual((await findUnitManuals(techV.shop.id, { vin: rzrVin })).scope?.manualIds, [rzrV]);
+  });
+
+  test("the make isn't a Model word: \"Polaris Sportsman 570\" is every Sportsman 570, not the Polaris Pursuit Camo ones", async () => {
+    assert.deepEqual(modelFilterWords("Polaris Sportsman 570"), ["SPORTSMAN", "570"]);
+    assert.deepEqual(modelFilterWords("POLARIS"), []);
+    // The Library's filter and the quick form's lookup.
+    const manuals = await listReadyManuals(techV.shop.id, { year: 2023, model: "POLARIS SPORTSMAN 570" });
+    assert.deepEqual(new Set(manuals.map((manual) => manual.id)), new Set([oneUp, p1552, touring]));
+    // find_unit_manuals.
+    const lookup = await findUnitManuals(techV.shop.id, { description: "2023 Polaris Sportsman 570" });
+    assert.equal(lookup.result.models_found, 9);
+    assert.deepEqual(new Set(lookup.scope?.manualIds), new Set([oneUp, p1552, touring]));
+  });
+
+  test("a 'model number' that reads as a name is looked up as one; a model number's year beats the one given", async () => {
+    // What Claude sent in the conversation that found no pages.
+    for (const input of [{ model_number: "2023 Sportsman 570" }, { model_number: "Sportsman 570", year: 2023 }]) {
+      const lookup = await findUnitManuals(techV.shop.id, input);
+      assert.equal(lookup.result.found, true, JSON.stringify(input));
+      assert.equal(lookup.result.models_found, 9, JSON.stringify(input));
+      assert.ok(!/model number 2023SPORTSMAN570/i.test(String(lookup.result.message)));
+    }
+    // The year the unit was sold isn't its model year.
+    const sold = await findUnitManuals(techV.shop.id, { model_number: "A23SEE57A1", year: 2024 });
+    assert.deepEqual(new Set(sold.scope?.manualIds), new Set([oneUp]));
+    assert.match(String(sold.result.message), /The model list has A23SEE57A1 as a 2023 model, not 2024/);
+  });
+
+  test("search: no page with every word gets the pages with most of them, saying so; never another unit's pages", async () => {
+    const scope = { manualIds: [oneUp], label: "2023 SPORTSMAN 570 EPS" };
+    const most = await searchScopedPages(techV.shop.id, scope, "speed sensor connector corrosion");
+    assert.deepEqual(most.hits.map((hit) => hit.pageNumber), [1, 2]);
+    const results = most.result.results as { page: number; has_words: string[] }[];
+    assert.deepEqual(results[0].has_words, ["speed", "sensor", "connector"]);
+    assert.deepEqual(results[1].has_words, ["speed", "sensor"]);
+    assert.match(String(most.result.message), /No page in this unit's manuals has all of "speed", "sensor", "connector", "corrosion"; these have most of them/);
+    // Excluded words stay out, and a phrase counts as one.
+    const phrase = await searchScopedPages(techV.shop.id, scope, '"speed sensor" resistance corrosion -water');
+    assert.deepEqual(phrase.hits.map((hit) => hit.pageNumber), [2]);
+    assert.deepEqual((phrase.result.results as { has_words: string[] }[])[0].has_words, ['"speed sensor"', "resistance"]);
+    // All the words on a page: a plain search, no message.
+    const plain = await searchScopedPages(techV.shop.id, scope, "speed sensor connector");
+    assert.equal(plain.result.message, undefined);
+
+    // Nothing in the unit's manuals: how many pages elsewhere, not the pages.
+    const touringScope = { manualIds: [touring], label: "2023 SPORTSMAN TOURING 570" };
+    const elsewhere = await searchScopedPages(techV.shop.id, touringScope, "speed sensor");
+    assert.deepEqual(elsewhere.hits, []);
+    assert.deepEqual(elsewhere.result.results, []);
+    assert.match(String(elsewhere.result.message), /Outside this unit's manuals, 3 pages in the shop's library match, in 2 manuals for other units: 2021-2026 Sportsman 450 \/ 570 1-Up \(2\); 2019 RZR XP 1000 Service Manual \(1\)\. They aren't this unit's pages/);
+    // Another shop's pages are never counted.
+    assert.ok(!/Shop W/.test(JSON.stringify(elsewhere.result)));
+    // Fewer words elsewhere too.
+    const fewer = await searchScopedPages(techV.shop.id, touringScope, "wheel speed harness");
+    assert.match(String(fewer.result.message), /1 page in the shop's library has most of these words, in a manual for other units: 2019 RZR XP 1000 Service Manual \(1\)/);
+    // Nothing anywhere, and a page in the unit's manual search can't read.
+    const nowhere = await searchScopedPages(techV.shop.id, scope, "zylophonic");
+    assert.match(String(nowhere.result.message), /Nothing in the rest of the shop's library matches either\. This unit's manual has 1 page with no searchable text/);
+  });
+
+  test("a check's tier and a cause's effort: kept when given, worked out from the words otherwise; checks go quick, test, teardown", () => {
+    const reply = finalizeReply(
+      {
+        reply: "Start with the quick ones.",
+        likely_causes: [
+          { title: "Water in the speed sensor connector", system: "electrical", likelihood: "high", why: "Moisture found.", status: "open", check_effort: "quick", sources: [] },
+          { title: "Speed sensor failing inside", system: "electrical", likelihood: "medium", why: "Less likely.", status: "open", check_effort: "Needs a test", sources: [] },
+          { title: "Damaged tone ring in the gearcase", system: "transmission", likelihood: "low", why: "Rare.", status: "open", check_effort: "huge", sources: [] },
+          { title: "Chafed wire", system: "electrical", likelihood: "low", why: "Look along the harness.", status: "open", sources: [] },
+        ],
+        next_checks: [
+          { tier: "teardown", action: "Pull the sensor and look at its tip", expected: "", sources: [] },
+          { tier: "test", action: "Back-probe the sensor signal", expected: "", sources: [] },
+          { tier: "QUICK", action: "Unplug the connector and look for water", expected: "", sources: [] },
+          { tier: "something", action: "Measure the resistance with a meter", expected: "", sources: [] },
+          { action: "Remove the clutch cover and check the belt", expected: "", sources: [] },
+          { tier: "quick", action: "Check the fuse", expected: "", sources: [] },
+        ],
+        safety_notes: [],
+        questions_for_tech: [],
+      },
+      { pages: [], urls: [] },
+    );
+    // Causes stay in Claude's order (their ranks, the callouts' numbers).
+    assert.deepEqual(reply.likelyCauses.map((cause) => [cause.title.split(" ")[0], cause.checkEffort]), [
+      ["Water", "quick"],
+      ["Speed", "test"],
+      ["Damaged", "quick"],
+      ["Chafed", "quick"],
+    ]);
+    assert.deepEqual(reply.nextChecks.map((check) => [check.tier, check.action.split(" ")[0]]), [
+      ["quick", "Unplug"],
+      ["quick", "Check"],
+      ["test", "Back-probe"],
+      ["test", "Measure"],
+      ["teardown", "Pull"],
+      ["teardown", "Remove"],
+    ]);
+    const groups = checkGroups(reply.nextChecks)!;
+    assert.deepEqual(groups.map((group) => [group.effort, group.items.map((item) => item.step)]), [
+      ["quick", [1, 2]],
+      ["test", [3, 4]],
+      ["teardown", [5, 6]],
+    ]);
+    // A tier that's missing gets no group of its own.
+    assert.deepEqual(checkGroups(reply.nextChecks.filter((check) => check.tier !== "test"))!.map((group) => group.items.map((item) => item.step)), [[1, 2], [3, 4]]);
+    // A reply saved before checks had tiers: one list, no effort chips.
+    const old = partialReply("Text only", {
+      ...reply,
+      likelyCauses: [{ title: "Coil", likelihood: "high", why: "", status: "open", sources: [] }],
+      nextChecks: [{ action: "Measure", expected: "", sources: [], unverifiedSpec: false }],
+    });
+    assert.equal(checkGroups(old.nextChecks), null);
+    assert.equal(old.likelyCauses[0].checkEffort, undefined);
+    assert.deepEqual([listedEffort("Tear down"), listedEffort("tests"), listedEffort(7), inferEffort("Look at the connector")], [
+      "teardown",
+      "test",
+      null,
+      "quick",
+    ]);
+    assert.equal(inferEffort("Something vague"), "test");
+  });
+
+  test("submit_diagnosis asks for each check's tier and each cause's effort; the prompt orders by likelihood, then effort", () => {
+    const tools = buildRequest({ messages: [], webSearch: false }).tools as Anthropic.Beta.Messages.BetaTool[];
+    const submitTool = tools.find((tool) => tool.name === TOOL_NAMES.submit)!;
+    type Schema = { type?: string; properties?: Record<string, Schema>; required?: string[]; items?: Schema; anyOf?: Schema[]; additionalProperties?: boolean; enum?: string[] };
+    // Strict tools: every object closed and every required key defined.
+    const walk = (schema: Schema, at: string) => {
+      if (schema.type === "object") {
+        assert.equal(schema.additionalProperties, false, at);
+        for (const key of schema.required ?? []) assert.ok(schema.properties?.[key], `${at}.${key}`);
+        for (const [key, child] of Object.entries(schema.properties ?? {})) walk(child, `${at}.${key}`);
+      }
+      if (schema.items) walk(schema.items, `${at}[]`);
+      for (const option of schema.anyOf ?? []) walk(option, `${at}|`);
+    };
+    for (const tool of tools) walk(tool.input_schema as Schema, tool.name);
+    const input = submitTool.input_schema as Schema;
+    const cause = input.properties!.likely_causes.items!;
+    const check = input.properties!.next_checks.items!;
+    assert.ok(cause.required!.includes("check_effort"));
+    assert.deepEqual(cause.properties!.check_effort.enum, [...EFFORTS]);
+    assert.ok(check.required!.includes("tier"));
+    assert.deepEqual(check.properties!.tier.enum, ["quick", "test", "teardown"]);
+    assert.match(String((check.properties!.tier as { description?: string }).description), /quick \(minutes, no tools or teardown: .*loose or damaged sensors.*\), test \(needs a meter, pressure gauge, scan tool or Digital Wrench, or a road test\) or teardown \(panels, covers or parts off, swapping parts\)/);
+    const find = tools.find((tool) => tool.name === TOOL_NAMES.findUnit)!.input_schema as Schema;
+    assert.equal(find.properties!.vin.type, "string");
+    assert.match(SYSTEM_PROMPT, /Rank the likely causes by how likely they are/);
+    assert.match(SYSTEM_PROMPT, /quick checks \(minutes, no tools or teardown.*\), then tests \(.*\), then teardown \(.*\)\. Within a tier, put the most useful check first\. A two-minute check of a somewhat less likely cause comes before a likely one that needs teardown/);
+  });
+
+  test("the quick form's opening has the VIN as a row of its own", () => {
+    const text = startMessage({ unit: "2023 SPORTSMAN 570 EPS", vin: SPORTSMAN_VIN, complaint: "Speedo drops to zero", checked: "Connector wet" });
+    assert.equal(text, `Unit: 2023 SPORTSMAN 570 EPS\nVIN: ${SPORTSMAN_VIN}\nComplaint: Speedo drops to zero\nAlready checked: Connector wet`);
+    assert.deepEqual(openingRows(text)?.rows, [
+      { label: "Unit", value: "2023 SPORTSMAN 570 EPS" },
+      { label: "VIN", value: SPORTSMAN_VIN },
+      { label: "Complaint", value: "Speedo drops to zero" },
+      { label: "Already checked", value: "Connector wet" },
+    ]);
+  });
+
+  test("starting with a VIN: it picks the unit and its manuals, is kept on the conversation, and Claude is told", async () => {
+    const run = await startTurn(techV, { start: { vin: ` ${SPORTSMAN_VIN.slice(0, 8)}-${SPORTSMAN_VIN.slice(8).toLowerCase()} `, complaint: "Speedometer drops to zero" } }, [
+      (params) => {
+        const note = JSON.stringify(params.messages[1]);
+        assert.match(note, new RegExp(`The tech gave the unit's VIN: ${SPORTSMAN_VIN}\\. Its model code SEE57 \\(characters 4-8\\) and model year \\(character 10\\) match 2023 SPORTSMAN 570 EPS`));
+        assert.match(note, /look up recalls or service bulletins/);
+        assert.match(JSON.stringify(params.messages[0]), new RegExp(`VIN: ${SPORTSMAN_VIN}`));
+        return message([submit({})], "tool_use");
+      },
+    ]);
+    assert.equal(run.conversation.vin, SPORTSMAN_VIN);
+    assert.equal(run.conversation.unit, "2023 SPORTSMAN 570 EPS");
+    assert.deepEqual(new Set(run.conversation.scope.manuals.map((manual) => manual.id)), new Set([oneUp, p1552]));
+    assert.equal(run.conversation.vehicle, "atv");
+    assert.deepEqual(openingRows(run.turn.techText)?.rows.map((row) => row.label), ["Unit", "VIN", "Complaint"]);
+    // The last digits alone are refused before anything is counted.
+    const partial = await prepareTurn(techV, { start: { vin: "123456", complaint: "x" } });
+    assert.ok(isProblem(partial) && partial.status === 400 && /a VIN has 17/.test(partial.error));
+    const letters = await prepareTurn(techV, { start: { vin: SPORTSMAN_VIN.replace("0", "O").replace(/^(.{16})./, "$1O"), complaint: "x" } });
+    assert.ok(isProblem(letters) && /I, O or Q/.test(letters.error));
+  });
+
+  test("a VIN that disagrees with the model number, or isn't in the list, is still kept and Claude is told so", async () => {
+    const run = await startTurn(techV, { start: { modelNumber: "Z19VDE99AK", vin: SPORTSMAN_VIN, complaint: "x" } }, [
+      (params) => {
+        assert.match(JSON.stringify(params.messages[1]), /don't agree with model number Z19VDE99AK.*so one of them may be off/);
+        return message([submit({})], "tool_use");
+      },
+    ]);
+    assert.equal(run.conversation.unit, "2019 RZR XP 1000 BLACK PEARL — Z19VDE99AK");
+    assert.equal(run.conversation.vin, SPORTSMAN_VIN);
+    const unknown = await startTurn(techV, { start: { vin: RZR_2020_VIN, complaint: "x" } }, [
+      (params) => {
+        assert.match(JSON.stringify(params.messages[1]), /doesn't match a model number in the shop's model list, so it didn't identify the unit/);
+        return message([submit({})], "tool_use");
+      },
+    ]);
+    assert.equal(unknown.conversation.vin, RZR_2020_VIN);
+    assert.equal(unknown.conversation.scope.label, null);
+    // A model number that isn't in the list, with a VIN that is: the VIN
+    // finds the unit, and Claude hears about the model number too.
+    const typo = await startTurn(techV, { start: { modelNumber: "A23SEE75A1", vin: SPORTSMAN_VIN, complaint: "x" } }, [
+      (params) => {
+        const note = JSON.stringify(params.messages[1]);
+        assert.match(note, /The tech also typed \"A23SEE75A1\" as the model number, which isn't in the shop's model list/);
+        assert.match(note, /match 2023 SPORTSMAN 570 EPS in the shop's model list/);
+        return message([submit({})], "tool_use");
+      },
+    ]);
+    assert.equal(typo.conversation.unit, "2023 SPORTSMAN 570 EPS");
+  });
+
+  test("the quick form: the make, a name in the model number box, and a year typed into Model all find the unit", async () => {
+    const all = new Set([oneUp, p1552, touring]);
+    const starts = [
+      // The conversation that found no pages: Year 2023, Model "POLARIS SPORTSMAN 570".
+      { year: "2023", model: "POLARIS SPORTSMAN 570", complaint: "x" },
+      { model: "2023 Sportsman 570", complaint: "x" },
+      { modelNumber: "2023 Sportsman 570", complaint: "x" },
+    ];
+    for (const start of starts) {
+      const run = await startTurn(techV, { start }, [() => message([submit({})], "tool_use")]);
+      assert.deepEqual(new Set(run.conversation.scope.manuals.map((manual) => manual.id)), all, JSON.stringify(start));
+    }
+  });
+
+  test("Claude's lookup by VIN keeps the VIN with the unit; Change unit by VIN sets it, by another model clears it", async () => {
+    const run = await startTurn(techV, { start: { message: `Sportsman, VIN ${SPORTSMAN_VIN}, speedo drops out` } }, [
+      () => message([toolUse(TOOL_NAMES.findUnit, { vin: SPORTSMAN_VIN })], "tool_use"),
+      () => message([submit({})], "tool_use"),
+    ]);
+    assert.equal(run.conversation.vin, SPORTSMAN_VIN);
+    assert.ok(run.events.some((event) => event.type === "scope" && event.vin === SPORTSMAN_VIN));
+    const id = run.conversation.id;
+    // The whole library: the same unit, so the same VIN.
+    const library = await changeUnit(techV, { conversationId: id, wholeLibrary: true });
+    assert.ok(!("error" in library) && library.vin === SPORTSMAN_VIN);
+    // A model number its VIN doesn't fit: the VIN goes.
+    const other = await changeUnit(techV, { conversationId: id, modelNumber: "Z19VDE99AK" });
+    assert.ok(!("error" in other) && other.vin === null && other.unit === "2019 RZR XP 1000 BLACK PEARL — Z19VDE99AK");
+    // By VIN.
+    const byVin = await changeUnit(techV, { conversationId: id, modelNumber: SPORTSMAN_VIN.toLowerCase() });
+    assert.ok(!("error" in byVin) && byVin.vin === SPORTSMAN_VIN && byVin.unit === "2023 SPORTSMAN 570 EPS");
+    // A model number that fits it keeps it.
+    const fits = await changeUnit(techV, { conversationId: id, modelNumber: "A23SEE57A9" });
+    assert.ok(!("error" in fits) && fits.vin === SPORTSMAN_VIN);
+    // The last digits alone.
+    const partial = await changeUnit(techV, { conversationId: id, modelNumber: "123456" });
+    assert.ok("error" in partial && /a VIN has 17/.test(partial.error));
+    // Claude hears about each change.
+    const [row] = await systemDb.select().from(diagnosisConversations).where(eq(diagnosisConversations.id, id));
+    assert.ok(row.pendingNotes.some((note) => /The VIN .* is for another model than Z19VDE99AK/.test(note)));
+    assert.ok(row.pendingNotes.some((note) => note.includes(`The tech gave the unit's VIN: ${SPORTSMAN_VIN}`)));
+    // Only a VIN can be stored, and app_user can't set another shop's.
+    await assert.rejects(systemDb.update(diagnosisConversations).set({ unitVin: "PA123456" }).where(eq(diagnosisConversations.id, id)));
+    const sneaky = await withShop(techW.shop.id, (tx) =>
+      tx.update(diagnosisConversations).set({ unitVin: SPORTSMAN_VIN }).where(eq(diagnosisConversations.id, id)).returning(),
+    );
+    assert.equal(sneaky.length, 0);
   });
 });

@@ -21,11 +21,12 @@ import {
 } from "@/lib/diagnose-rules";
 import { claudeSummary, openTurnIds, techSummary } from "@/lib/diagnose-thread";
 import type { Vehicle } from "@/lib/manual-catalog-rules";
+import { VIN_LENGTH, checkVin } from "@/lib/vin";
 
 import { Chevron, vehicleOptions } from "../library/search-form";
 import { loadConversationAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
-import { CausesIcon, ChatIcon, ChevronIcon, GlobeIcon, PageIcon, ReplyIcon, SearchIcon, WorkingIcon } from "./icons";
+import { CausesIcon, ChatIcon, CheckIcon, ChevronIcon, GlobeIcon, PageIcon, ReplyIcon, SearchIcon, WarningIcon, WorkingIcon } from "./icons";
 import { PlainText } from "./plain-text";
 import { UnitPicker } from "./unit-picker";
 
@@ -132,6 +133,7 @@ function ActivityChips({ progress }: { progress: ProgressStep[] }) {
 
 const OPENING_SHORT: Record<string, string> = {
   Unit: "Unit",
+  VIN: "VIN",
   Complaint: "Complaint",
   "Fault codes": "Codes",
   "Already checked": "Checked",
@@ -149,7 +151,9 @@ function TechText({ turn }: { turn: TurnView }) {
             <Fragment key={row.label}>
               <dt className="pt-[1px] text-xs font-medium text-ink-muted">{OPENING_SHORT[row.label]}</dt>
               <dd className="min-w-0 break-words text-ink" data-opening={row.label}>
-                {row.label === "Fault codes" ? (
+                {row.label === "VIN" ? (
+                  <span className="font-mono tracking-wide break-all">{row.value}</span>
+                ) : row.label === "Fault codes" ? (
                   <span className="flex flex-wrap gap-1">
                     {row.value.split(/,\s*/).map((code) => (
                       <span key={code} className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-xs text-ink">
@@ -195,6 +199,10 @@ function QuotedText({ text }: { text: string }) {
     </div>
   );
 }
+
+// The thread's cards (the tech's message, Claude's reply): the column's full
+// width, one padding.
+const threadCardClass = "w-full rounded-xl border px-4 py-3";
 
 // An earlier exchange in one line: the tech's first line and Claude's
 // count of causes and the likeliest, opened with a tap.
@@ -255,13 +263,18 @@ function TurnBlock({
           Fold
         </button>
       )}
-      <div className="ml-auto max-w-[92%] rounded-xl rounded-br-sm border border-white/10 bg-white/[0.05] px-3.5 py-2.5 sm:max-w-[82%]">
-        <p className="mb-1 text-xs font-medium text-ink-muted">{turn.userName || "Tech"}</p>
+      {/* The tech's card and Claude's share the column's edges and padding;
+          the tech's is told apart by its name and lighter fill, not by an
+          offset like a chat bubble's. */}
+      <div data-card="tech" className={`${threadCardClass} border-white/[0.14] bg-white/[0.06]`}>
+        <div className="mb-1.5 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-sm font-semibold text-ink/85">{turn.userName || "Tech"}</span>
+        </div>
         <TechText turn={turn} />
       </div>
 
-      <div className="max-w-full rounded-xl rounded-bl-sm border border-white/10 bg-charcoal-900/70 px-3.5 py-2.5 sm:max-w-[92%]">
-        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+      <div data-card="claude" className={`${threadCardClass} border-white/10 bg-charcoal-900/70`}>
+        <div className="mb-1.5 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
           <span className="text-sm font-semibold text-ink">Claude</span>
           {turn.status === "done" && turn.reply && <ActivityChips progress={turn.progress} />}
         </div>
@@ -344,6 +357,7 @@ function TurnBlock({
 
 type StartFields = {
   modelNumber: string;
+  vin: string;
   vehicle: string;
   year: string;
   model: string;
@@ -364,6 +378,7 @@ function Starter({
 }) {
   const [fields, setFields] = useState<StartFields>({
     modelNumber: "",
+    vin: "",
     vehicle: "",
     year: "",
     model: "",
@@ -376,22 +391,29 @@ function Starter({
   const [byVehicle, setByVehicle] = useState(false);
   const set = (name: keyof StartFields) => (value: string) => setFields((old) => ({ ...old, [name]: value }));
   const codes = normalizeFaultCodes(fields.faultCodes);
+  const vin = checkVin(fields.vin);
+  const vinBlocks = vin.status === "partial" || vin.status === "invalid";
+  // While it's being typed, a short VIN only counts its characters.
+  const [vinFocused, setVinFocused] = useState(false);
   const vehicles = vehicleOptions(options, fields.vehicle);
   const showFilters = options.vehicles.length > 0 || options.years.length > 0;
 
   function unitFields(): Record<string, string> {
     if (options.carry) return { from: options.carry.id };
-    if (!byVehicle) return { modelNumber: fields.modelNumber.trim() };
+    const vinField: Record<string, string> = vin.status === "ok" ? { vin: vin.vin } : {};
+    if (!byVehicle) return { modelNumber: fields.modelNumber.trim(), ...vinField };
     const vehicleIsLine = fields.vehicle !== "" && !["UTV", "ATV", "Generator", "Other"].includes(fields.vehicle);
     return {
       ...(vehicleIsLine ? { brand: fields.vehicle } : { vehicle: fields.vehicle }),
       year: fields.year,
       model: fields.model.trim(),
+      ...vinField,
     };
   }
 
   function submitForm(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (vinBlocks && !options.carry) return;
     void onStart({
       ...unitFields(),
       complaint: fields.complaint,
@@ -506,6 +528,30 @@ function Starter({
           </div>
         )}
 
+        {!options.carry && (
+          <div>
+            <label htmlFor="start-vin" className={labelClass}>
+              VIN <span className="font-normal text-ink-muted">(optional)</span>
+            </label>
+            <input
+              id="start-vin"
+              value={fields.vin}
+              onChange={(event) => set("vin")(event.target.value)}
+              onFocus={() => setVinFocused(true)}
+              onBlur={() => setVinFocused(false)}
+              placeholder="17 characters, from the frame"
+              autoComplete="off"
+              autoCapitalize="characters"
+              spellCheck={false}
+              maxLength={30}
+              aria-invalid={vinBlocks && !vinFocused}
+              aria-describedby="start-vin-note"
+              className={`mt-1.5 ${inputBaseClass} font-mono tracking-wide uppercase placeholder:font-sans placeholder:tracking-normal placeholder:normal-case`}
+            />
+            <VinNote check={vin} typing={vinFocused} />
+          </div>
+        )}
+
         <div>
           <label htmlFor="start-complaint" className={labelClass}>
             Complaint
@@ -558,7 +604,11 @@ function Starter({
             className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
           />
         </div>
-        <button type="submit" disabled={busy || (!fields.complaint.trim() && codes.length === 0)} className={primaryLinkClass}>
+        <button
+          type="submit"
+          disabled={busy || (!fields.complaint.trim() && codes.length === 0) || (vinBlocks && !options.carry)}
+          className={primaryLinkClass}
+        >
           Start diagnosis
         </button>
       </form>
@@ -586,6 +636,52 @@ function Starter({
         </button>
       </form>
     </div>
+  );
+}
+
+// Under the VIN box: what to type, how far along it is, that it's a VIN,
+// or what's wrong. A wrong check digit is only a warning; anything that
+// isn't a VIN (too short, too long, I, O or Q) has to be fixed or cleared
+// before the diagnosis starts.
+function VinNote({ check, typing }: { check: ReturnType<typeof checkVin>; typing: boolean }) {
+  const base = "mt-1.5 flex items-start gap-1.5 text-xs leading-5";
+  let note: ReactNode;
+  if (check.status === "empty") {
+    note = <span className="text-ink-muted">On the frame or VIN plate. It finds the exact model when the model list has it.</span>;
+  } else if (check.status === "partial" && typing) {
+    note = (
+      <span className="text-ink-muted tabular-nums">
+        {check.vin.length} of {VIN_LENGTH} characters
+      </span>
+    );
+  } else if (check.status === "partial" || check.status === "invalid") {
+    note = (
+      <>
+        <WarningIcon className="mt-0.5 size-3.5 text-trail" />
+        <span className="text-trail">{check.message}</span>
+      </>
+    );
+  } else if (check.status === "ok" && check.warning) {
+    note = (
+      <>
+        <WarningIcon className="mt-0.5 size-3.5 text-trail" />
+        <span className="text-trail">{check.warning}</span>
+      </>
+    );
+  } else if (check.status === "ok") {
+    note = (
+      <>
+        <CheckIcon className="mt-0.5 size-3.5 text-glow" />
+        <span className="text-ink-muted">
+          <span className="font-mono tracking-wide text-ink">{check.vin}</span> · check digit matches
+        </span>
+      </>
+    );
+  }
+  return (
+    <p id="start-vin-note" data-vin-status={check.status === "ok" ? (check.checkDigitOk ? "ok" : "warning") : check.status} aria-live="polite" className={base}>
+      {note}
+    </p>
   );
 }
 
@@ -713,7 +809,9 @@ export function DiagnoseChat({
         break;
       case "scope":
         setConversation((old) =>
-          old ? { ...old, scope: event.scope, unit: event.scope.label ?? old.unit, vehicle: event.vehicle, model: event.model } : old,
+          old
+            ? { ...old, scope: event.scope, unit: event.scope.label ?? old.unit, vin: event.vin ?? old.vin, vehicle: event.vehicle, model: event.model }
+            : old,
         );
         break;
       case "end":
