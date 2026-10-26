@@ -14,6 +14,7 @@ import type {
   UnitSuggestion,
   VinPreview,
 } from "@/lib/diagnose-rules";
+import type { StepState } from "@/lib/diagnose-step-checks";
 import { previewVin, suggestUnits } from "@/lib/diagnose-tools";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { requireCapability } from "@/lib/session";
@@ -68,14 +69,15 @@ export async function markCauseAction(input: {
 }
 
 // A tick on one of Claude's checks, or taking one back: the same people can
-// as can mark a cause.
+// as can mark a cause. "was" is how the check stood on the screen tapped.
 export async function markStepAction(input: {
   conversationId: string;
   turnId: string;
   index: number;
   done: boolean;
   result: StepResult | null;
-}): Promise<{ stepChecks: StepCheckEntry[] } | Failed> {
+  was: StepState;
+}): Promise<{ stepChecks: StepCheckEntry[]; stale?: true } | Failed> {
   const user = await requireCapability("diagnostics.work");
   return attempt("save the step", () =>
     markStep(user, {
@@ -84,6 +86,7 @@ export async function markStepAction(input: {
       index: Number(input?.index),
       done: input?.done,
       result: input?.result ?? null,
+      was: input?.was ?? null,
     }),
   );
 }

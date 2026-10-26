@@ -5,7 +5,7 @@ import { Fragment, useId, useRef, useState, type FocusEvent, type PointerEvent, 
 import { flushSync } from "react-dom";
 
 import { causeSteps, howToCheckQuestion, specText, type CauseStep } from "@/lib/diagnose-cause-steps";
-import { SOURCE_LEVEL_LABELS, evidenceParts, sourceLevel, type SourceLevel } from "@/lib/diagnose-evidence";
+import { SOURCE_LEVEL_LABELS, evidenceParts, sourceLevel } from "@/lib/diagnose-evidence";
 import {
   EFFORT_LABELS,
   STEP_RESULTS,
@@ -169,9 +169,10 @@ const METER: Record<Cause["likelihood"], { lit: number; color: string }> = {
 // Likelihood as a three-segment heat bar on the title's first line, and
 // while the cause is open, Claude's confidence right after it (the bar is
 // set from it, so the two agree). The % has a fixed width, so the bars line
-// up down the list. A reply saved before causes carried a confidence has
-// the bar alone.
-function LikelihoodMeter({ likelihood, confidence }: { likelihood: Cause["likelihood"]; confidence?: number }) {
+// up down the list; it's muted once another cause was it (set aside, as on
+// the drawing). A reply saved before causes carried a confidence has the
+// bar alone.
+function LikelihoodMeter({ likelihood, confidence, setAside = false }: { likelihood: Cause["likelihood"]; confidence?: number; setAside?: boolean }) {
   const { lit, color } = METER[likelihood];
   return (
     <span className="flex h-6 shrink-0 items-center gap-1.5">
@@ -181,7 +182,12 @@ function LikelihoodMeter({ likelihood, confidence }: { likelihood: Cause["likeli
         ))}
       </span>
       {confidence !== undefined && (
-        <span data-confidence={confidence} title={`Claude's confidence: ${confidence}%`} className="w-8 text-right text-xs leading-none font-semibold text-ink/90 tabular-nums">
+        <span
+          data-confidence={confidence}
+          data-set-aside={setAside || undefined}
+          title={`Claude's confidence: ${confidence}%${setAside ? " (set aside: another cause was it)" : ""}`}
+          className={`w-8 text-right text-xs leading-none font-semibold tabular-nums ${setAside ? "text-ink-muted" : "text-ink/90"}`}
+        >
           {confidence}%<span className="sr-only"> confidence</span>
         </span>
       )}
@@ -405,6 +411,7 @@ function CauseItem({
   steps,
   refs,
   ticks,
+  setAside = false,
   onAsk,
   pictures = "inline",
 }: {
@@ -422,6 +429,9 @@ function CauseItem({
   refs: CauseRef[];
   // The tech's ticks on the steps; none without a reply to tick them on.
   ticks: Ticks | null;
+  // Still open, but another cause was it: its % muted, as the drawing tones
+  // it down (and its steps no longer point the way: ticks.guide).
+  setAside?: boolean;
   // Puts "How do I check cause N, …?" in the message box (not while the
   // conversation is full).
   onAsk?: () => void;
@@ -495,8 +505,9 @@ function CauseItem({
   const confidence = status === "open" && typeof cause.confidence === "number" ? cause.confidence : undefined;
   const evidence = confidence !== undefined ? evidenceParts(cause) : [];
   // What its steps suggest, by its buttons: every one OK, ruled out; a
-  // problem found, this was it. Only a suggestion: the tech decides.
-  const hint = status === "open" && steps && ticks ? markHint(steps.map((step) => ticks.stateOf(step.check))) : null;
+  // problem found, this was it. Only a suggestion: the tech decides; and
+  // none once another cause was it.
+  const hint = status === "open" && steps && ticks?.guide ? markHint(steps.map((step) => ticks.stateOf(step.check))) : null;
   return (
     <li
       {...common}
@@ -519,7 +530,7 @@ function CauseItem({
               {cause.title}
             </p>
             {isNew && <NewTag />}
-            <LikelihoodMeter likelihood={cause.likelihood} confidence={confidence} />
+            <LikelihoodMeter likelihood={cause.likelihood} confidence={confidence} setAside={setAside} />
           </div>
           {/* One quiet line under the title: what the % rests on. On a
               narrow phone a long one wraps between its parts, never inside
@@ -689,11 +700,11 @@ function AlsoChecks({ refs, className = "" }: { refs: CauseRef[]; className?: st
 }
 
 // Where a step's spec or procedure comes from (sourceLevel): the shop's
-// manuals (teal), a web source (white), or general knowledge, to verify
-// first (amber and dashed, never the manuals' teal, so a number Claude gave
-// from memory doesn't pass for one). A spec carries it as its chip's label:
-// MANUAL, or VERIFY for one with no manual page behind it (from the web
-// too: the web is for patterns, not specs).
+// manuals, a web source, or general knowledge, to verify first. A spec
+// carries it as its chip's label: MANUAL (teal), or VERIFY for one with no
+// manual page behind it (from the web too: the web is for patterns, not
+// specs), amber and dashed, never the manuals' teal, so a number Claude gave
+// from memory doesn't pass for one. Amber is kept for that number to check.
 function SpecChip({ check, className = "" }: { check: Check; className?: string }) {
   if (!check.expected) return null;
   if (sourceLevel(check) === "manual") {
@@ -727,39 +738,39 @@ function SpecChip({ check, className = "" }: { check: Check; className?: string 
   );
 }
 
-const LEVEL_TAG: Record<SourceLevel, string> = {
-  manual: "border-glow/45 text-glow",
-  web: "border-white/25 text-ink/85",
-  general: "border-dashed border-trail/70 text-trail",
-};
-
-// A step without a spec says where its procedure comes from in a small tag
-// at the end of its words, in the colours of a spec chip at that level, so
-// the level costs no row of its own (a short tag at a line's end).
+// A step without a spec that cites no manual or web page says it's from
+// general knowledge in a small tag at the end of its words (so it costs no
+// row), quiet and dashed like a cause's General chip: most of Claude's
+// quick looks are general, and amber is for a number to verify. A step from
+// the manuals or the web needs no tag: its teal page chip or its web chip
+// says so.
 function LevelTag({ check }: { check: Check }) {
-  if (check.expected) return null;
-  const level = sourceLevel(check);
-  const { label, detail } = SOURCE_LEVEL_LABELS[level];
+  if (check.expected || sourceLevel(check) !== "general") return null;
   return (
     <span
-      data-source-level={level}
-      title={detail}
-      className={`ml-1.5 inline-flex h-5 items-center rounded border px-1.5 align-[1px] text-[10px] leading-none font-semibold tracking-wide whitespace-nowrap uppercase ${LEVEL_TAG[level]}`}
+      data-source-level="general"
+      title={SOURCE_LEVEL_LABELS.general.detail}
+      className="ml-1.5 inline-flex h-5 items-center rounded border border-dashed border-white/25 px-1.5 align-[1px] text-[11px] leading-none font-medium whitespace-nowrap text-ink-muted"
     >
-      <span className="sr-only">Source: </span>
-      {label}
+      General<span className="sr-only"> knowledge, not from your manuals</span>
     </span>
   );
 }
 
 // The tech's ticks on the reply's checks: how a check stands (as saved, or
 // as just tapped while that's saving), who ticked it, and ticking it (done,
-// with OK or a problem found, or taken back). A check that settles several
+// with OK or a problem found, or taken back) from a place on the screen (a
+// list and the step's number in it: "cause-2:1", "start:2", "old:3"), where
+// a tick that didn't go through says why. A check that settles several
 // causes is one check: ticked in every card it's in.
 type Ticks = {
   stateOf: (check: Check) => StepState;
   byOf: (check: Check) => string | null;
-  tick: (check: Check, done: boolean, result: StepResult | null, from: HTMLElement) => void;
+  tick: (check: Check, done: boolean, result: StepResult | null, from: HTMLElement, place: string) => void;
+  errorAt: (place: string, check: Check) => string | null;
+  // Whether the steps point the way (Next, and what they suggest by a
+  // cause's buttons): not once a cause was it, and the rest are set aside.
+  guide: boolean;
 };
 
 const resultClass =
@@ -772,63 +783,65 @@ const RESULT_LOOK: Record<StepResult, { label: string; pressed: string }> = {
 
 // A step's tick at the end of its row, 44px for gloved hands: the box, and
 // once it's ticked, what the tech found, OK or Problem found (optional; tap
-// the one pressed to take it back). Those two keep their room while the
-// step isn't done, where "Next" marks the step to do next, so a tick moves
-// nothing on the list.
+// the one pressed to take it back), 12px clear of the box so a near miss
+// doesn't take the tick back. Those two keep their room on the step to do
+// next, where "Next" says so (part of the box's button, so tapping the word
+// ticks it), so ticking steps in order moves nothing above the next one;
+// any other step not done has only its box, which fits at the end of a row
+// of chips.
 function StepControls({
-  number,
+  action,
   state,
   next,
   by,
   onTick,
 }: {
-  number: number;
+  action: string;
   state: StepState;
   next: boolean;
   by: string | null;
   onTick: (done: boolean, result: StepResult | null, from: HTMLElement) => void;
 }) {
+  const showNext = next && !state.done;
   return (
-    <div data-step-controls className="ml-auto flex shrink-0 items-center gap-1.5">
-      <div
-        role={state.done ? "group" : undefined}
-        aria-label={state.done ? `What step ${number} found` : undefined}
-        className="relative flex items-center gap-1.5"
-      >
-        {STEP_RESULTS.map((result) => {
-          const pressed = state.result === result;
-          return (
-            <button
-              key={result}
-              type="button"
-              data-result={result}
-              aria-pressed={pressed}
-              disabled={!state.done}
-              onClick={(event) => onTick(true, pressed ? null : result, event.currentTarget)}
-              className={`${resultClass} ${state.done ? "" : "invisible"} ${
-                pressed ? RESULT_LOOK[result].pressed : "border-white/15 text-ink-muted hover:border-white/30 hover:text-ink"
-              }`}
-            >
-              {RESULT_LOOK[result].label}
-            </button>
-          );
-        })}
-        {next && !state.done && (
-          <span data-next-label className="absolute inset-y-0 right-0 flex items-center pr-0.5 text-[11px] font-semibold tracking-wide text-glow uppercase">
-            Next
-          </span>
-        )}
-      </div>
+    <div data-step-controls className="ml-auto flex shrink-0 items-center gap-3">
+      {(state.done || next) && (
+        <div role={state.done ? "group" : undefined} aria-label={state.done ? `What “${action}” found` : undefined} className="flex items-center gap-1.5">
+          {STEP_RESULTS.map((result) => {
+            const pressed = state.result === result;
+            return (
+              <button
+                key={result}
+                type="button"
+                data-result={result}
+                aria-pressed={pressed}
+                disabled={!state.done}
+                onClick={(event) => onTick(true, pressed ? null : result, event.currentTarget)}
+                className={`${resultClass} ${state.done ? "" : "invisible"} ${
+                  pressed ? RESULT_LOOK[result].pressed : "border-white/15 text-ink-muted hover:border-white/30 hover:text-ink"
+                }`}
+              >
+                {RESULT_LOOK[result].label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       <button
         type="button"
         role="checkbox"
         aria-checked={state.done}
-        aria-label={`Step ${number} done`}
+        aria-label={`${showNext ? "Next. " : ""}Done: ${action}`}
         title={state.done ? `Done${by ? ` · ${by}` : ""}` : "Mark done"}
         data-step-check={state.done ? "done" : "open"}
         onClick={(event) => onTick(!state.done, null, event.currentTarget)}
-        className="group grid size-11 shrink-0 place-items-center rounded-lg focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        className="group relative grid size-11 shrink-0 place-items-center rounded-lg focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
       >
+        {showNext && (
+          <span aria-hidden data-next-label className="absolute inset-y-0 right-full flex items-center pr-0.5 pl-2 text-[11px] font-semibold tracking-wide text-glow uppercase">
+            Next
+          </span>
+        )}
         <span
           className={`grid size-6 place-items-center rounded-md border-2 transition ${
             state.done ? "border-glow bg-glow text-forest-950" : next ? "border-glow/80 group-hover:bg-glow/10" : "border-white/35 group-hover:border-white/60"
@@ -844,10 +857,24 @@ function StepControls({
 // A done step reads as done, where it was: dimmed, its tick checked.
 const doneDim = (state: StepState | null) => `transition-opacity ${state?.done ? "opacity-55" : ""}`;
 
-// How a step stands, as data attributes for the end-to-end checks: done,
-// its result, and whether it's the one to do next.
-const tickData = (state: StepState | null, next: boolean) =>
-  state ? { "data-step-done": String(state.done), "data-step-result": state.result ?? undefined, "data-next-step": next || undefined } : {};
+// How a step stands, as data attributes for the end-to-end checks: where
+// its spec or procedure comes from, done, its result, and whether it's the
+// one to do next.
+const tickData = (check: Check, state: StepState | null, next: boolean) => ({
+  "data-step-level": sourceLevel(check),
+  ...(state ? { "data-step-done": String(state.done), "data-step-result": state.result ?? undefined, "data-next-step": next || undefined } : {}),
+});
+
+// Why a tick on this step didn't go through (it's back as saved), under the
+// step, where the tech is looking, rather than at the end of the list.
+function TickError({ text, className = "" }: { text: string | null; className?: string }) {
+  if (!text) return null;
+  return (
+    <p role="status" data-step-error className={`text-sm leading-5 text-trail ${className}`}>
+      {text}
+    </p>
+  );
+}
 
 // A next check of a reply saved before checks said which causes they're
 // for, in its list of its own: its step (numbered on across the tiers, and
@@ -858,8 +885,9 @@ function CheckItem({ check, step, ticks, next }: { check: Check; step: number; t
   const sources = check.sources.filter((source) => source.type !== "general");
   const state = ticks?.stateOf(check) ?? null;
   const dim = doneDim(state);
+  const place = `old:${step}`;
   return (
-    <li data-step={step} {...tickData(state, next)} className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
+    <li data-step={step} {...tickData(check, state, next)} className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
       <span className="flex w-8 shrink-0 flex-col items-center pt-0.5 leading-none" aria-label={`Step ${step}`}>
         <span aria-hidden className="text-[10px] font-semibold tracking-wide text-ink-muted uppercase">
           Step
@@ -878,10 +906,11 @@ function CheckItem({ check, step, ticks, next }: { check: Check; step: number; t
             <SpecChip check={check} className={dim} />
             <SourceChips sources={sources} className={dim} />
             {ticks && state && (
-              <StepControls number={step} state={state} next={next} by={ticks.byOf(check)} onTick={(done, result, from) => ticks.tick(check, done, result, from)} />
+              <StepControls action={check.action} state={state} next={next} by={ticks.byOf(check)} onTick={(done, result, from) => ticks.tick(check, done, result, from, place)} />
             )}
           </div>
         )}
+        <TickError text={ticks?.errorAt(place, check) ?? null} />
         <PageThumbs sources={check.sources} className={dim} />
       </div>
     </li>
@@ -895,7 +924,7 @@ function CheckList({ checks, ticks }: { checks: Check[]; ticks: Ticks | null }) 
   const groups = checkGroups(checks);
   // The step to do next, in the order they're listed.
   const shown = groups ? groups.flatMap((group) => group.items.map((item) => item.check)) : checks;
-  const next = ticks ? shown[nextStep(shown.map((check) => ticks.stateOf(check)))] : undefined;
+  const next = ticks?.guide ? shown[nextStep(shown.map((check) => ticks.stateOf(check)))] : undefined;
   if (!groups) {
     return (
       <ol className="space-y-2">
@@ -953,10 +982,11 @@ function TierTag({ tier }: { tier: Effort }) {
 
 // One step of a cause's "How to check", or of Start here: its number in the
 // card (a list's "1." rather than a square, so it isn't taken for a
-// cause's number), its tier, what to do and, without a spec, where that
-// comes from (Manual, Web or General, at the end of its words), then in one
-// row that wraps (so a short step takes one line) its spec (labelled MANUAL
-// or VERIFY), the manual pages and web pages it cites, the other causes it
+// cause's number; teal on the step to do next), its tier, what to do and,
+// from general knowledge without a spec, a quiet General tag at the end of
+// its words, then in one row that wraps (so a short step takes one line)
+// its spec (labelled MANUAL or VERIFY), the manual pages and web pages it
+// cites (which say it's from the manuals or the web), the other causes it
 // also settles, and pictures of the pages that the card doesn't show
 // already (small, at the row's end; under it in the full-screen sheet). No
 // "General" chip: most steps would have one, a row each, and it cites
@@ -965,6 +995,7 @@ function TierTag({ tier }: { tier: Effort }) {
 function StepItem({
   step,
   number,
+  list,
   refs,
   large,
   shownPages = [],
@@ -973,6 +1004,8 @@ function StepItem({
 }: {
   step: CauseStep<Check>;
   number: number;
+  // Which list it's in ("cause-2", "start"), for where a tick's error shows.
+  list: string;
   refs: CauseRef[];
   large: boolean;
   shownPages?: SourceView[];
@@ -986,14 +1019,19 @@ function StepItem({
   const pages = manualPages(check.sources).filter((page) => !shown.has(`${page.manualId}:${page.page}`));
   const state = ticks?.stateOf(check) ?? null;
   const dim = doneDim(state);
+  const place = `${list}:${number}`;
   // The number hangs off the action's first line (wherever the row centres
   // it beside a chip), in the step's left margin. The tick is last in the
   // row, at its right end (on a line of its own when the row is full).
   return (
-    <li data-cause-step={number} data-step-tier={tier ?? undefined} {...tickData(state, next)} className="pl-6">
+    <li data-cause-step={number} data-step-tier={tier ?? undefined} {...tickData(check, state, next)} className="pl-6">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
         <p className={`relative min-w-0 text-sm leading-6 break-words text-ink ${dim}`}>
-          <span aria-hidden data-step-number className="absolute top-0 -left-6 w-4 text-right font-mono text-xs leading-6 text-ink-muted">
+          <span
+            aria-hidden
+            data-step-number
+            className={`absolute top-0 -left-6 w-4 text-right font-mono text-xs leading-6 ${next && !state?.done ? "font-semibold text-glow" : "text-ink-muted"}`}
+          >
             {number}.
           </span>
           {tier && <TierTag tier={tier} />}
@@ -1007,8 +1045,9 @@ function StepItem({
           <PageThumbs sources={pages} size={large ? "small" : "inline"} className={`${large ? "basis-full" : ticks ? "gap-1.5" : "ml-auto gap-1.5"} ${dim}`} />
         )}
         {ticks && state && (
-          <StepControls number={number} state={state} next={next} by={ticks.byOf(check)} onTick={(done, result, from) => ticks.tick(check, done, result, from)} />
+          <StepControls action={check.action} state={state} next={next} by={ticks.byOf(check)} onTick={(done, result, from) => ticks.tick(check, done, result, from, place)} />
         )}
+        <TickError text={ticks?.errorAt(place, check) ?? null} className="basis-full" />
       </div>
     </li>
   );
@@ -1037,7 +1076,7 @@ function HowToCheck({
   shownPages: SourceView[];
   onAsk?: () => void;
 }) {
-  const next = ticks ? nextStep(steps.map((step) => ticks.stateOf(step.check))) : -1;
+  const next = ticks?.guide ? nextStep(steps.map((step) => ticks.stateOf(step.check))) : -1;
   if (steps.length === 0) {
     return (
       <div data-no-check className="flex min-h-11 flex-wrap items-center gap-x-3 border-t border-white/[0.06] pt-1">
@@ -1065,7 +1104,7 @@ function HowToCheck({
       </p>
       <ol aria-label={`How to check cause ${rank}`} className="mt-1.5 space-y-2.5">
         {steps.map((step, index) => (
-          <StepItem key={index} step={step} number={index + 1} refs={refs} large={large} shownPages={shownPages} ticks={ticks} next={index === next} />
+          <StepItem key={index} step={step} number={index + 1} list={`cause-${rank}`} refs={refs} large={large} shownPages={shownPages} ticks={ticks} next={index === next} />
         ))}
       </ol>
     </div>
@@ -1075,7 +1114,7 @@ function HowToCheck({
 // "Start here": the checks for no cause in particular (stored codes, the
 // battery's charge), quickest first, before cause 1.
 function StartHere({ steps, refs, hasCauses, ticks }: { steps: CauseStep<Check>[]; refs: CauseRef[]; hasCauses: boolean; ticks: Ticks | null }) {
-  const next = ticks ? nextStep(steps.map((step) => ticks.stateOf(step.check))) : -1;
+  const next = ticks?.guide ? nextStep(steps.map((step) => ticks.stateOf(step.check))) : -1;
   return (
     <section data-start-here aria-label="Start here" className="mb-2 rounded-lg border border-white/10 bg-forest-950/40 p-3">
       <h3 className="flex flex-wrap items-center gap-x-1.5 text-sm leading-5">
@@ -1088,7 +1127,7 @@ function StartHere({ steps, refs, hasCauses, ticks }: { steps: CauseStep<Check>[
       </h3>
       <ol className="mt-2 space-y-2.5">
         {steps.map((step, index) => (
-          <StepItem key={index} step={step} number={index + 1} refs={refs} large={false} ticks={ticks} next={index === next} />
+          <StepItem key={index} step={step} number={index + 1} list="start" refs={refs} large={false} ticks={ticks} next={index === next} />
         ))}
       </ol>
     </section>
@@ -1099,6 +1138,13 @@ function StartHere({ steps, refs, hasCauses, ticks }: { steps: CauseStep<Check>[
 
 const smallButtonClass =
   "inline-flex min-h-11 items-center rounded-lg border px-3 text-sm font-medium transition focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60";
+
+// A small action whose request never got an answer (the bay's Wi-Fi
+// dropped, the server restarted, or the app was updated since the page
+// loaded: the action throws then rather than answer) is said as the server
+// says one that failed there, so what was shown at once goes back.
+const NOT_THROUGH = { error: "That didn't go through. Check the connection and try again." };
+const notThrough = (): { error: string } => NOT_THROUGH;
 
 function ScopeCard({
   conversation,
@@ -1124,7 +1170,7 @@ function ScopeCard({
   async function change(input: { modelNumber?: string; wholeLibrary?: boolean }) {
     setPending(true);
     setMessage(null);
-    const result = await changeUnitAction({ conversationId: conversation.id, ...input });
+    const result = await changeUnitAction({ conversationId: conversation.id, ...input }).catch(notThrough);
     setPending(false);
     if ("error" in result) {
       setMessage(result.error);
@@ -1323,6 +1369,9 @@ export function CausesPanel({
   // check back as saved.
   const [ticking, setTicking] = useState<Map<string, { state: StepState; request: number }>>(() => new Map());
   const requests = useRef(0);
+  // Why the last tick didn't go through, under the step it was tapped on
+  // (that place, that check, that reply).
+  const [tickError, setTickError] = useState<{ place: string; key: string; turnId: string; text: string } | null>(null);
 
   const rows: CauseRow[] = (reply?.likelyCauses ?? []).map((cause, index) => ({
     cause,
@@ -1336,6 +1385,9 @@ export function CausesPanel({
   // order within each.
   const ordered = [...rows].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || a.index - b.index);
   const refs: CauseRef[] = rows.map((row) => ({ rank: row.index + 1, title: row.cause.title }));
+  // Once a cause was it, the others still open are set aside (the drawing
+  // tones them down), and the steps stop pointing the way.
+  const solved = rows.some((row) => row.status === "confirmed");
   // Each open cause's checks in its card, and the ones for no cause in
   // particular first; null for a reply whose checks don't say which causes
   // they're for, which keeps its own Next checks list.
@@ -1352,17 +1404,23 @@ export function CausesPanel({
       ? {
           stateOf,
           byOf: (check) => saved.get(stepKey(check.action))?.userName ?? null,
-          tick: (check, done, result, from) => void tick(check, done, result, from),
+          tick: (check, done, result, from, place) => void tick(check, done, result, from, place),
+          errorAt: (place, check) =>
+            tickError && tickError.place === place && tickError.key === stepKey(check.action) && tickError.turnId === replyTurnId ? tickError.text : null,
+          guide: !solved,
         }
       : null;
 
   // Ticks a step (or takes the tick back) at once, and saves it. The tapped
   // control stays where it is on screen whatever changes around it (the
-  // note under the list that Claude will hear, say).
-  async function tick(check: Check, done: boolean, result: StepResult | null, from: HTMLElement) {
+  // note under the list that Claude will hear, say). The server gets how
+  // the check stood here too, so a tap on a screen that hasn't seen another
+  // device's change doesn't undo it (stale: that's shown instead).
+  async function tick(check: Check, done: boolean, result: StepResult | null, from: HTMLElement, place: string) {
     const index = reply?.nextChecks.indexOf(check) ?? -1;
     if (!replyTurnId || index < 0) return;
     const key = stepKey(check.action);
+    const was = stateOf(check);
     const request = ++requests.current;
     const steady = (update: () => void) => {
       const hold = from.isConnected ? holdOnScreen(from) : () => {};
@@ -1370,10 +1428,10 @@ export function CausesPanel({
       hold();
     };
     steady(() => {
-      setMessage(null);
+      setTickError(null);
       setTicking((old) => new Map(old).set(key, { state: { done, result: done ? result : null }, request }));
     });
-    const outcome = await markStepAction({ conversationId: conversation.id, turnId: replyTurnId, index, done, result });
+    const outcome = await markStepAction({ conversationId: conversation.id, turnId: replyTurnId, index, done, result, was }).catch(notThrough);
     // Only the last tap on a check settles it; one before it is overtaken.
     const settle = () =>
       setTicking((old) => {
@@ -1383,8 +1441,12 @@ export function CausesPanel({
         return next;
       });
     steady(() => {
-      if ("error" in outcome) setMessage(outcome.error);
-      else onConversation({ stepChecks: outcome.stepChecks });
+      const turnId = replyTurnId;
+      if ("error" in outcome) setTickError({ place, key, turnId, text: outcome.error });
+      else {
+        onConversation({ stepChecks: outcome.stepChecks });
+        if (outcome.stale) setTickError({ place, key, turnId, text: "That step was changed on another device. This is how it stands now." });
+      }
       settle();
     });
   }
@@ -1394,7 +1456,7 @@ export function CausesPanel({
     const pressed = verdict === "open" ? rows[index]?.verdict : verdict;
     setPending(index);
     setMessage(null);
-    const result = await markCauseAction({ conversationId: conversation.id, turnId: replyTurnId, index, verdict });
+    const result = await markCauseAction({ conversationId: conversation.id, turnId: replyTurnId, index, verdict }).catch(notThrough);
     setPending(null);
     if ("error" in result) {
       setMessage(result.error);
@@ -1483,6 +1545,7 @@ export function CausesPanel({
                 steps={stepsOf(row)}
                 refs={refs}
                 ticks={ticks}
+                setAside={solved && row.status === "open"}
                 onAsk={
                   ask &&
                   (() => {
@@ -1582,6 +1645,7 @@ export function CausesPanel({
                     steps={stepsOf(row)}
                     refs={refs}
                     ticks={ticks}
+                    setAside={solved && row.status === "open"}
                     onAsk={askFor(row)}
                   />
                 ))}

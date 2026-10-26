@@ -72,7 +72,7 @@ import {
   type SeenSources,
   type StreamEvent,
 } from "../src/lib/diagnose-rules";
-import { stepStateOf, stepStates } from "../src/lib/diagnose-step-checks";
+import { stepNotes, stepStateOf, stepStates } from "../src/lib/diagnose-step-checks";
 import { findUnitManuals, previewVin, readScopedPage, searchScopedPages, suggestUnits, unitVehicle } from "../src/lib/diagnose-tools";
 import { countMatchesElsewhere, isCodeTerm, listReadyManuals, modelFilterWords } from "../src/lib/library";
 import { vinCheckDigit, vinDisagreement } from "../src/lib/vin";
@@ -2478,6 +2478,45 @@ describe("ticking off checks", () => {
     assert.equal(fourth.turn.status, "done", fourth.turn.error ?? "");
     const [after] = await systemDb.select().from(diagnosisConversations).where(eq(diagnosisConversations.id, conversationId));
     assert.ok(after.stepChecks.every((item) => item.sentInSeq !== null), JSON.stringify(after.stepChecks));
+  });
+
+  test("a tap on a screen that hasn't seen another device's change saves nothing and gets how it stands; a check given twice is for both its causes", async () => {
+    const first = await startTurn(techS, { start: { message: "Speedo drops out on bumps" } }, [
+      () =>
+        message(
+          [
+            submit({
+              likely_causes: [cause(WATER, 70), cause(CHAFE, 35)],
+              // The same look given twice, once for each cause.
+              next_checks: [quick("Look at the sensor connector.", [1]), quick("look at the sensor connector", [2])],
+            }),
+          ],
+          "tool_use",
+        ),
+    ]);
+    const conversationId = first.conversation.id;
+    const turnId = first.turn.id;
+    const notDone = { done: false, result: null };
+    // The bay tablet: done, Problem found, ticked in cause 1's card.
+    let marked = await markStep(techS, { conversationId, turnId, index: 0, done: true, result: null, was: notDone });
+    marked = await markStep(techS, { conversationId, turnId, index: 0, done: true, result: "problem", was: { done: true, result: null } });
+    assert.ok("stepChecks" in marked && !marked.stale);
+    assert.deepEqual(marked.stepChecks.map((entry) => [entry.index, entry.causes, entry.result]), [[0, [WATER, CHAFE], "problem"]]);
+    // The office PC, loaded before, still shows it not done: its tick saves
+    // nothing, and it gets the tablet's Problem found back.
+    const stale = await markStep(techS2, { conversationId, turnId, index: 1, done: true, result: null, was: notDone });
+    assert.ok("stepChecks" in stale && stale.stale, JSON.stringify(stale));
+    assert.deepEqual(stale.stepChecks, marked.stepChecks);
+    // Taking its result back from there, as it now shows, goes through.
+    const cleared = await markStep(techS2, { conversationId, turnId, index: 1, done: true, result: null, was: { done: true, result: "problem" } });
+    assert.ok("stepChecks" in cleared && !cleared.stale);
+    assert.deepEqual(cleared.stepChecks.map((entry) => [entry.index, entry.result, entry.userName]), [[1, null, "Tao"]]);
+    // A stale tap asking for what's there already is just that.
+    const same = await markStep(techS, { conversationId, turnId, index: 0, done: true, result: null, was: notDone });
+    assert.ok("stepChecks" in same && !same.stale);
+    assert.deepEqual(same.stepChecks, cleared.stepChecks);
+    // Claude hears it for both causes, whichever card it was ticked in.
+    assert.deepEqual(stepNotes(cleared.stepChecks), [`Since your last reply the tech checked:\n- “look at the sensor connector” (for causes “${WATER}” and “${CHAFE}”): done (no result given)`]);
   });
 
   test("a tick taken back while Claude is answering isn't lost: the ticks on their way to Claude stay, and Claude hears the change with the message after", async () => {

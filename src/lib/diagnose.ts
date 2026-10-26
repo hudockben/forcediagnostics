@@ -35,7 +35,7 @@ import {
   type TurnUsage,
   type TurnView,
 } from "@/lib/diagnose-rules";
-import { applyStepCheck, stepNotes, stepStateOf, stepStates } from "@/lib/diagnose-step-checks";
+import { applyStepCheck, sameState, stepKey, stepNotes, stepStateIn, stepStateOf, stepStates, type StepState } from "@/lib/diagnose-step-checks";
 import {
   describeScope,
   findUnitManuals,
@@ -1066,17 +1066,22 @@ export async function markCause(
 // tech says), or taking one back (done false), as on the bay tablet or the
 // office PC. The same people can as can mark a cause. Claude hears about it
 // with the next message; the check is found by its turn and its place in
-// that turn's reply, and stands for every check with the same words.
+// that turn's reply, and stands for every check with the same words. "was"
+// is how the check stood on the screen it was tapped on: when another device
+// has changed it since (a Problem found the office PC hasn't seen), nothing
+// is saved and the screen gets how it stands now (stale), rather than wipe
+// out what the other one said.
 export async function markStep(
   user: CurrentUser,
-  input: { conversationId: string; turnId: string; index: number; done: boolean; result: StepResult | null },
-): Promise<{ stepChecks: StepCheckEntry[] } | { error: string }> {
+  input: { conversationId: string; turnId: string; index: number; done: boolean; result: StepResult | null; was?: StepState | null },
+): Promise<{ stepChecks: StepCheckEntry[]; stale?: true } | { error: string }> {
   const { conversationId, turnId, index, done } = input;
   if (!isUuid(conversationId) || !isUuid(turnId) || !Number.isInteger(index) || index < 0) {
     return { error: "That step isn't there any more. Reload the page." };
   }
   const result = input.result ?? null;
   if (typeof done !== "boolean" || (result !== null && result !== "ok" && result !== "problem")) return { error: "That isn't a choice." };
+  const was = stepStateIn(input.was);
   return withShop(user.shop.id, async (tx) => {
     const [conversation] = await tx
       .select()
@@ -1089,6 +1094,10 @@ export async function markStep(
       .where(and(eq(diagnosisTurns.id, turnId), eq(diagnosisTurns.conversationId, conversationId)));
     const check = turn?.reply?.nextChecks[index];
     if (!conversation || !turn || !check) return { error: "That step isn't there any more. Reload the page." };
+    const now = stepStateOf(stepStates(conversation.stepChecks), check.action);
+    if (was && !sameState(was, now)) {
+      return sameState(now, { done, result: done ? result : null }) ? { stepChecks: conversation.stepChecks } : { stepChecks: conversation.stepChecks, stale: true };
+    }
     // A message with Claude now read the ticks it hasn't heard when it
     // started (the conversation's row is locked while one starts).
     const [running] = await tx
@@ -1096,13 +1105,18 @@ export async function markStep(
       .from(diagnosisTurns)
       .where(and(eq(diagnosisTurns.conversationId, conversationId), eq(diagnosisTurns.status, "running")))
       .limit(1);
+    // The causes it's for: those of every check in the reply with its words
+    // (Claude may give one check twice, once for each cause), since the tick
+    // shows in all their cards.
     const causes = turn.reply!.likelyCauses;
+    const key = stepKey(check.action);
+    const ranks = new Set(turn.reply!.nextChecks.flatMap((other) => (stepKey(other.action) === key ? (other.causes ?? []) : [])));
     const entry: StepCheckEntry = {
       turnId,
       seq: turn.seq,
       index,
       action: check.action,
-      causes: (check.causes ?? []).flatMap((rank) => (causes[rank - 1]?.title ? [causes[rank - 1].title] : [])),
+      causes: [...ranks].sort((a, b) => a - b).flatMap((rank) => (causes[rank - 1]?.title ? [causes[rank - 1].title] : [])),
       done,
       result: done ? result : null,
       userId: user.id,

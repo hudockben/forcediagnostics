@@ -8,7 +8,7 @@ import { describe, test } from "node:test";
 
 import { SYSTEM_PROMPT, buildRequest } from "../src/lib/diagnose-prompt";
 import type { StepCheckEntry, StepResult } from "../src/lib/diagnose-rules";
-import { NOT_DONE, applyStepCheck, markHint, nextStep, stepKey, stepNotes, stepStateOf, stepStates } from "../src/lib/diagnose-step-checks";
+import { NOT_DONE, applyStepCheck, markHint, nextStep, sameState, stepKey, stepNotes, stepStateIn, stepStateOf, stepStates } from "../src/lib/diagnose-step-checks";
 
 const turnId = randomUUID();
 const COIL = "Ignition coil breaking down under load";
@@ -41,6 +41,22 @@ describe("a check from one reply to the next", () => {
     assert.equal(stepKey("Check the régulateur's plug!"), "check the regulateur s plug");
     assert.notEqual(stepKey("Measure coil secondary resistance."), stepKey("Measure coil primary resistance."));
     assert.equal(stepKey(undefined as unknown as string), "");
+    // Signs aren't punctuation: over and under 12 V are two checks.
+    assert.notEqual(stepKey("Confirm voltage > 12 V."), stepKey("Confirm voltage < 12 V."));
+    assert.equal(stepKey("Confirm voltage>12 V"), "confirm voltage > 12 v");
+    assert.equal(stepKey("Check B+ at the relay."), "check b + at the relay");
+  });
+
+  test("how it stood on the screen tapped is a state, or nothing", () => {
+    assert.deepEqual(stepStateIn({ done: true, result: "problem" }), { done: true, result: "problem" });
+    assert.deepEqual(stepStateIn({ done: true }), { done: true, result: null });
+    assert.deepEqual(stepStateIn({ done: false, result: "ok" }), NOT_DONE);
+    assert.equal(stepStateIn({ done: "yes" }), null);
+    assert.equal(stepStateIn({ done: true, result: "maybe" }), null);
+    assert.equal(stepStateIn(null), null);
+    assert.equal(stepStateIn("done"), null);
+    assert.ok(sameState({ done: false, result: "ok" }, NOT_DONE));
+    assert.ok(!sameState({ done: true, result: null }, { done: true, result: "ok" }));
   });
 
   test("stands as its latest entry, whichever reply it was ticked on", () => {
@@ -141,6 +157,7 @@ describe("what Claude hears", () => {
     assert.match(SYSTEM_PROMPT, /the next checks the tech has ticked off as done, with the step's result when they gave one: OK \(they found nothing wrong\) or problem found/);
     assert.match(SYSTEM_PROMPT, /Use the tech's marks and step results to update each cause's confidence and status/);
     assert.match(SYSTEM_PROMPT, /keep a check's action word for word when you repeat it/);
+    assert.match(SYSTEM_PROMPT, /To have the tech do a check again \(after a repair, say\), word it as a new check/);
     const a = buildRequest({ messages: [], webSearch: true });
     const b = buildRequest({ messages: [{ role: "user", content: `Coil OK\n${stepNotes([entry(RESISTANCE, true, "ok")])[0]}` }], webSearch: true });
     assert.equal(JSON.stringify([a.system, a.tools]), JSON.stringify([b.system, b.tools]));

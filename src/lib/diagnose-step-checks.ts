@@ -11,13 +11,15 @@ import type { StepCheckEntry, StepResult } from "@/lib/diagnose-rules";
 
 // A check's words as they're compared: case, accents, punctuation and
 // spacing aside ("Measure coil primary resistance." is "measure coil
-// primary resistance").
+// primary resistance"). Signs such as < > = + stay, each a word of its own:
+// "under 12 V" and "over 12 V" written with them are two checks.
 export const stepKey = (action: string) =>
   String(action ?? "")
     .normalize("NFKD")
     .replace(/\p{M}+/gu, "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\p{Sm}/gu, " $& ")
+    .replace(/[^\p{L}\p{N}\p{Sm}]+/gu, " ")
     .trim();
 
 export type StepState = { done: boolean; result: StepResult | null };
@@ -26,7 +28,17 @@ export const NOT_DONE: StepState = { done: false, result: null };
 const stateOf = (entry: StepCheckEntry | undefined): StepState =>
   entry?.done ? { done: true, result: entry.result ?? null } : NOT_DONE;
 
-const sameState = (a: StepState, b: StepState) => a.done === b.done && (!a.done || a.result === b.result);
+export const sameState = (a: StepState, b: StepState) => a.done === b.done && (!a.done || a.result === b.result);
+
+// A state as a screen sent it (how a check stood when it was tapped), or
+// null when it isn't one.
+export function stepStateIn(value: unknown): StepState | null {
+  if (!value || typeof value !== "object") return null;
+  const { done, result } = value as { done?: unknown; result?: unknown };
+  if (typeof done !== "boolean") return null;
+  if (result !== null && result !== undefined && result !== "ok" && result !== "problem") return null;
+  return done ? { done, result: (result as StepResult | undefined) ?? null } : NOT_DONE;
+}
 
 // How each check stands: its latest entry, by its words' key.
 export function stepStates(entries: StepCheckEntry[]): Map<string, StepCheckEntry> {
