@@ -31,7 +31,7 @@ export function HudShell({ children }: { children: ReactNode }) {
       <TopoScene />
       <div className="relative flex flex-1 flex-col">
         <header className="flex items-center justify-between gap-4 px-4 py-5 sm:px-8">
-          <Wordmark className="text-xl sm:text-2xl" />
+          <Wordmark className="h-8 sm:h-10" />
           <p className={`flex items-center gap-2 text-glow ${hudText}`}>
             <span className="hud-pulse size-2 rounded-full bg-glow shadow-[0_0_10px] shadow-glow" />
             System online

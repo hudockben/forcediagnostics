@@ -945,8 +945,9 @@ export function CausesPanel({
     );
   }
 
-  // Wide screens: the causes and checks, and beside them the unit and the
-  // manual pictures. Narrower: the unit above the causes.
+  // Wide screens: the causes and checks, and beside them the unit, its
+  // safety notes and the manual pictures. Narrower: the unit and safety
+  // above the causes.
   return (
     <ManualPictures titles={titles}>
       <div className="space-y-4 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] xl:items-start xl:gap-4 xl:space-y-0">
@@ -967,6 +968,26 @@ export function CausesPanel({
               onCloseExamine={closeExamine}
               sheet={sheet}
             />
+          )}
+          {/* Safety next to the unit, so it's among the first things read: beside
+              it on wide screens, straight after it (before the causes) on
+              narrower ones. */}
+          {reply && reply.safetyNotes.length > 0 && (
+            <section aria-label="Safety" className="rounded-xl border border-trail/40 bg-trail/10 px-4 py-3 text-trail">
+              <h2 className="flex items-center gap-2 text-[15px] leading-5 font-semibold">
+                <WarningIcon />
+                Safety
+                <span className="ml-auto rounded-full bg-trail/15 px-2 py-0.5 text-xs tracking-normal tabular-nums">{reply.safetyNotes.length}</span>
+              </h2>
+              <ul className="mt-2 space-y-1.5 text-sm leading-5">
+                {reply.safetyNotes.map((note, index) => (
+                  <li key={index} className="flex gap-2">
+                    <span aria-hidden className="mt-[0.45rem] size-1.5 shrink-0 rounded-full bg-trail" />
+                    <span className="min-w-0 break-words">{note}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
           {gallery.length > 0 && (
             <Section
@@ -1016,24 +1037,6 @@ export function CausesPanel({
             <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
               <CheckList checks={reply.nextChecks} causes={rows.map((row) => ({ rank: row.index + 1, title: row.cause.title, status: row.status }))} />
             </Section>
-          )}
-
-          {reply && reply.safetyNotes.length > 0 && (
-            <section aria-label="Safety" className="rounded-xl border border-trail/40 bg-trail/10 px-4 py-3 text-trail">
-              <h2 className="flex items-center gap-2 text-[15px] leading-5 font-semibold">
-                <WarningIcon />
-                Safety
-                <span className="ml-auto rounded-full bg-trail/15 px-2 py-0.5 text-xs tracking-normal tabular-nums">{reply.safetyNotes.length}</span>
-              </h2>
-              <ul className="mt-2 space-y-1.5 text-sm leading-5">
-                {reply.safetyNotes.map((note, index) => (
-                  <li key={index} className="flex gap-2">
-                    <span aria-hidden className="mt-[0.45rem] size-1.5 shrink-0 rounded-full bg-trail" />
-                    <span className="min-w-0 break-words">{note}</span>
-                  </li>
-                ))}
-              </ul>
-            </section>
           )}
 
           <ScopeCard

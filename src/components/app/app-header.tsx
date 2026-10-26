@@ -17,7 +17,7 @@ function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
           href="/home"
           className="rounded focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
         >
-          <Wordmark className="text-xl" />
+          <Wordmark className="h-7 sm:h-9" />
         </Link>
         {user}
       </div>
