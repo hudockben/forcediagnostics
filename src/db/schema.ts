@@ -34,6 +34,7 @@ import {
   type TurnStatus,
   type TurnUsage,
 } from "../lib/diagnose-rules";
+import { PAGE_FACTS_STATUSES, type PageFacts, type PageFactsStatus } from "../lib/manual-facts-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
 
@@ -486,6 +487,76 @@ export const manualPages = pgTable(
 );
 
 export const manualPageToRead = pageToRead(manualPages);
+
+// What a manual page says (its procedure's steps, torque specs, tools and
+// cautions), as Claude read it the first time someone opened the page on
+// Diagnose's part sheet and as checked against the page's text (see
+// src/lib/manual-facts.ts). Saved so a page is read once: also when it had
+// nothing worth showing (empty), and when the read failed, which is tried
+// again only after a while.
+export const manualPageFacts = pgTable(
+  "manual_page_facts",
+  {
+    manualId: uuid("manual_id").notNull(),
+    shopId: uuid("shop_id").notNull(),
+    pageNumber: integer("page_number").notNull(),
+    status: text("status").notNull().$type<PageFactsStatus>(),
+    // Set once the page is read (ready or empty).
+    facts: jsonb("facts").$type<PageFacts>(),
+    // How many of the values Claude gave the check against the page dropped.
+    dropped: integer("dropped").notNull().default(0),
+    // Why the last read failed, for the logs and an admin.
+    error: text("error"),
+    attempts: integer("attempts").notNull().default(1),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    costCents: doublePrecision("cost_cents").notNull().default(0),
+    // When the read now under way, or the last one, started: a read that's
+    // been under way too long (its server went away) can be taken over, and
+    // a failed one is tried again a while after.
+    attemptedAt: timestamp("attempted_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // One reading per page, which is what lets two devices opening the same
+    // page at once read it only once (see claimPage in src/lib/manual-facts.ts).
+    primaryKey({ name: "manual_page_facts_pk", columns: [t.manualId, t.pageNumber] }),
+    // A reading belongs to a page of a manual in its own shop, and goes with it.
+    foreignKey({
+      name: "manual_page_facts_manual_shop_fk",
+      columns: [t.manualId, t.shopId],
+      foreignColumns: [manuals.id, manuals.shopId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "manual_page_facts_page_fk",
+      columns: [t.manualId, t.pageNumber],
+      foreignColumns: [manualPages.manualId, manualPages.pageNumber],
+    }).onDelete("cascade"),
+    check(
+      "manual_page_facts_status",
+      sql`${t.status} in (${sql.raw(PAGE_FACTS_STATUSES.map((s) => `'${s}'`).join(", "))})`,
+    ),
+    pgPolicy("manual_page_facts_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("manual_page_facts_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Which columns can change is set by the grant in
+    // drizzle/0027_manual_page_facts_grants.sql.
+    pgPolicy("manual_page_facts_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
 
 // Every file name a manual is known by: its own, and the names of
 // byte-identical copies that were added after it (Polaris lists some PDFs
