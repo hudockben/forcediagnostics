@@ -10,9 +10,11 @@ import {
   VIN_CHECK_DIGIT_WARNING,
   checkVin,
   isVin,
+  modelNumberYear,
   normalizeVin,
   sharedModelName,
   vinCheckDigit,
+  vinDisagreement,
   vinMatchesModelNumber,
   vinModelCode,
   vinModelNumberPatterns,
@@ -32,6 +34,52 @@ describe("VINs", () => {
     assert.equal(normalizeVin(" 4xa-see57 8pa 123456 "), SPORTSMAN_2023);
     assert.equal(normalizeVin("4XA–SEE578PA123456"), SPORTSMAN_2023);
     assert.equal(normalizeVin(""), "");
+  });
+
+  test("a label in front of the VIN, or a barcode scanner's leading I, is left out", () => {
+    // Pasted from a work order, typed with the label, or scanned.
+    for (const typed of [
+      "VIN: 4XASEE578PA123456",
+      "VIN 4xasee578pa123456",
+      "VIN#4XA-SEE57-8PA123456",
+      "vin no. 4XASEE578PA123456",
+      "I4XASEE578PA123456",
+    ]) {
+      assert.equal(normalizeVin(typed), SPORTSMAN_2023, typed);
+      assert.deepEqual(checkVin(typed), { status: "ok", vin: SPORTSMAN_2023, checkDigitOk: true, warning: null }, typed);
+    }
+    // An I that isn't a scanner's (17 characters with it) is still refused.
+    const withI = checkVin("I4XASEE578PA12345");
+    assert.ok(withI.status === "invalid" && /I, O or Q/.test(withI.message));
+  });
+
+  test("a short VIN: a character or two missing, or the serial number on its own", () => {
+    const nearly = checkVin(SPORTSMAN_2023.slice(0, 16));
+    assert.ok(nearly.status === "partial" && /That's 16 characters: a VIN has 17\. A character is missing: check it against the frame\./.test(nearly.message), JSON.stringify(nearly));
+    assert.ok(!/serial/.test(nearly.status === "partial" ? nearly.message : ""));
+    const three = checkVin(SPORTSMAN_2023.slice(0, 14));
+    assert.ok(three.status === "partial" && /3 characters are missing/.test(three.message));
+    const serial = checkVin("PA123456");
+    assert.ok(serial.status === "partial" && /The last few digits alone are the serial number and don't say which model it is/.test(serial.message));
+  });
+
+  test("a VIN and a model number for different models are said to disagree; ones that fit, or can't be compared, aren't", () => {
+    assert.equal(vinDisagreement(SPORTSMAN_2023, "A23SEE57A1"), null);
+    assert.equal(vinDisagreement(SPORTSMAN_2023, "a23see57b9"), null);
+    assert.equal(
+      vinDisagreement(SPORTSMAN_2023, "Z19VDE99AM", 2026),
+      "This VIN reads as a 2023, model code SEE57; Z19VDE99AM is a 2019, model code VDE99. One of them may be off: check both on the frame.",
+    );
+    // The same model a year apart.
+    assert.match(String(vinDisagreement(SPORTSMAN_2023, "A24SEE57A1", 2026)), /a 2023, model code SEE57; A24SEE57A1 is a 2024, model code SEE57/);
+    // W is 1998 or 2028: in 2026 it's 1998.
+    assert.match(String(vinDisagreement("4XAAE50A0WA123456", "Z19VDE99AM", 2026)), /reads as a 1998, model code AE50A/);
+    // Older model numbers, names and nothing at all can't be compared.
+    for (const other of ["P937221", "Sportsman 570", ""]) assert.equal(vinDisagreement(SPORTSMAN_2023, other), null, other);
+    assert.equal(vinDisagreement("PA123456", "Z19VDE99AM"), null);
+    assert.equal(modelNumberYear("W98AE50A"), 1998);
+    assert.equal(modelNumberYear("A23SEE57A1"), 2023);
+    assert.equal(modelNumberYear("P937221"), null);
   });
 
   test("the check digit is worked out as 49 CFR 565 does it", () => {
@@ -126,6 +174,11 @@ describe("VINs", () => {
       "RZR XP 1000",
     );
     assert.equal(sharedModelName(["RZR XP 1000 WHITE PEARL"]), "RZR XP 1000 WHITE PEARL");
+    // A and B variants listed under one description share its paint too.
+    assert.equal(
+      sharedModelName(["RGR CREW XP 1000 TRAIL BOSS - GHOST GRAY", "RGR CREW XP 1000 TRAIL BOSS - GHOST GRAY"]),
+      "RGR CREW XP 1000 TRAIL BOSS - GHOST GRAY",
+    );
     // Nothing in common: the first one's name before its paint.
     assert.equal(sharedModelName(["TRAILBLAZER", "SPORT 400L"]), "TRAILBLAZER");
     assert.equal(sharedModelName([null, ""]), null);

@@ -56,10 +56,12 @@ export type CauseStatus = (typeof CAUSE_STATUSES)[number];
 export const EFFORTS = ["quick", "test", "teardown"] as const;
 export type Effort = (typeof EFFORTS)[number];
 
-export const EFFORT_LABELS: Record<Effort, { heading: string; detail: string; chip: string }> = {
-  quick: { heading: "Quick checks", detail: "minutes, no tools", chip: "Quick check" },
-  test: { heading: "Tests", detail: "meter or scan tool", chip: "Needs a test" },
-  teardown: { heading: "Teardown", detail: "parts off", chip: "Teardown" },
+// The tiers' headers over the next checks, and how a cause says what it
+// takes to rule it in or out.
+export const EFFORT_LABELS: Record<Effort, { heading: string; detail: string; cause: string }> = {
+  quick: { heading: "Quick checks", detail: "minutes, no tools", cause: "Quick to rule out" },
+  test: { heading: "Tests", detail: "meter or scan tool", cause: "Needs a test" },
+  teardown: { heading: "Teardown", detail: "parts off", cause: "Needs teardown" },
 };
 
 // Where a piece of advice comes from, after the server has checked it: a
@@ -89,6 +91,10 @@ export type Check = {
   // have it: their checks show as one list, in Claude's order.
   tier?: Effort;
   action: string;
+  // The likely causes it confirms or rules out, by their numbers in the
+  // list (1 is the first; the drawing's callouts carry the same numbers).
+  // Replies saved before checks carried it don't have it.
+  causes?: number[];
   // Expected values and specs ("0.6-0.8 ohms primary"); blank when none.
   expected: string;
   sources: SourceView[];
@@ -252,6 +258,8 @@ const tidyText = (value: unknown, max: number) =>
 export function startMessage(input: {
   unit?: string | null;
   vin?: string | null;
+  // Part of a VIN (too short to be one), kept as the tech typed it.
+  partialVin?: string | null;
   complaint?: string;
   faultCodes?: string[];
   checked?: string;
@@ -260,6 +268,7 @@ export function startMessage(input: {
   const lines = [
     input.unit ? `Unit: ${input.unit}` : null,
     input.vin ? `VIN: ${input.vin}` : null,
+    input.partialVin ? `Partial VIN: ${input.partialVin} (${input.partialVin.length} of 17 characters)` : null,
     input.complaint?.trim() ? `Complaint: ${input.complaint.trim()}` : null,
     input.faultCodes?.length ? `Fault codes: ${input.faultCodes.join(", ")}` : null,
     input.checked?.trim() ? `Already checked: ${input.checked.trim()}` : null,
@@ -269,10 +278,10 @@ export function startMessage(input: {
 }
 
 // The quick form's first message read back as labelled rows (the reverse
-// of startMessage): its leading "Unit: …", "VIN: …", "Complaint: …",
-// "Fault codes: …" and "Already checked: …" lines, and whatever follows.
-// Null when the message doesn't start that way.
-export const OPENING_LABELS = ["Unit", "VIN", "Complaint", "Fault codes", "Already checked"] as const;
+// of startMessage): its leading "Unit: …", "VIN: …" (or "Partial VIN: …"),
+// "Complaint: …", "Fault codes: …" and "Already checked: …" lines, and
+// whatever follows. Null when the message doesn't start that way.
+export const OPENING_LABELS = ["Unit", "VIN", "Partial VIN", "Complaint", "Fault codes", "Already checked"] as const;
 export type OpeningRow = { label: (typeof OPENING_LABELS)[number]; value: string };
 
 export function openingRows(text: string): { rows: OpeningRow[]; more: string } | null {
@@ -280,7 +289,7 @@ export function openingRows(text: string): { rows: OpeningRow[]; more: string } 
   const rows: OpeningRow[] = [];
   let i = 0;
   for (; i < lines.length; i++) {
-    const match = /^(Unit|VIN|Complaint|Fault codes|Already checked): (.+)$/.exec(lines[i]);
+    const match = /^(Unit|VIN|Partial VIN|Complaint|Fault codes|Already checked): (.+)$/.exec(lines[i]);
     if (!match) break;
     rows.push({ label: match[1] as OpeningRow["label"], value: match[2].trim() });
   }
@@ -418,19 +427,27 @@ const pick = <T extends string>(value: unknown, allowed: readonly T[], otherwise
 
 // Words that say how much work a check is, for a tier Claude didn't give or
 // gave as something else (the tools stream their input, so the API doesn't
-// hold Claude to the enum). Teardown words win over test words, and test
-// words over quick ones: "unplug the connector and measure the resistance"
+// hold Claude to the enum). Teardown is taking something apart, or off, or
+// swapping a part in: a removal word together with a part that's work to
+// get at (a cover, the clutch, a wheel, a sensor), or words that only mean
+// teardown. Pulling a fuse, the seat or a plug wire, or "pulling" stored
+// codes, isn't. Then test words (a meter, a gauge, a scan tool, the Digital
+// Wrench, a road test), then quick ones (looking, connectors, fuses, codes
+// on the dash, levels). "Unplug the connector and measure the resistance"
 // is a test, "pull the clutch cover and check the belt" teardown.
-const TEARDOWN_WORDS =
-  /\b(remov\w*|take (?:off|out|apart)|pull (?:the |off |out )|disassembl\w*|tear ?down|teardown|split (?:the )?case|swap\w*|install (?:a )?(?:new|known)|known[- ]good|(?:clutch|stator|valve|side|cvt|outer) cover|cylinder head|crankcase|drain and|panels? off|(?:side|body|access|floor|seat) panels?|seat off|body ?work|parts off)\b/i;
+const TEARDOWN_ONLY =
+  /\b(disassembl\w*|tear ?down|teardown|split(?:ting)? (?:the )?(?:crank ?)?cases?|cylinder head|crankcase|parts off|panels? off|body ?work off|known[- ]good)\b/i;
+const TAKING_OFF = /\b(remov\w*|take (?:off|out|apart)|taking (?:off|out|apart)|pull(?:ing)?|drop(?:ping)?|swap\w*|replac\w*|install\w*|unbolt\w*)\b/i;
+const HARD_TO_REACH =
+  /\b((?<!air ?box |filter |fuse ?box |fuse |battery |radiator |tank )covers?|clutch\w*|belts?|stators?|flywheel|heads?|cylinders?|pistons?|valves?|cam ?shafts?|crank\w*|wheels?|hubs?|axles?|cv joints?|half ?shafts?|bearings?|seals?|(?:side|body|access|floor|rocker|inner) panels?|fenders?|hood|plastics|bodywork|skid plates?|fuel tank|gas tank|throttle bod(?:y|ies)|injectors?|fuel pump|water pump|oil pump|starter|transmission|gear ?case|gearbox|diff\w*|engine|exhaust|header|muffler|radiator|shocks?|a-arms?|(?:sensors?|coils?)\b(?! (?:connectors?|plugs?|wires?|wiring|leads?))|spark plugs?|plugs\b(?! wires?)|ecu|regulator)\b/i;
 const TEST_WORDS =
-  /\b(meter|multimeter|dvom|ohms?|volts?|voltage|resistance|continuity|amps?|amperage|current draw|pressure (?:test|gauge)|(?:vacuum|fuel|pressure) gauge|gauge set|compression|leak[- ]?down|scan tool|digital wrench|live data|data stream|oscilloscope|back ?prob\w*|load test|road test|test ride|test drive|measur\w*|vacuum|smoke test|test light|noid)\b/i;
+  /\b(meter|multimeter|dvom|ohms?|volts?|voltage|resistance|continuity|amps?|amperage|current draw|pressure (?:test|gauge)|fuel pressure|(?:vacuum|fuel|pressure|compression) gauge|gauge set|compression|leak[- ]?down|scan tool|digital wrench|live data|data stream|oscilloscope|back ?prob\w*|load test|road test|test ride|test drive|measur\w*|vacuum|smoke test|test light|noid)\b/i;
 const QUICK_WORDS =
-  /\b(look\w*|inspect\w*|visual\w*|connectors?|plugged|unplugged|loose|wiggle|fuses?|grounds?|wiring|harness|chaf\w*|corro\w*|damaged?|broken wire|fluid|oil level|coolant level|levels?|stored codes?|codes? on the (?:gauge|cluster|display|dash)|battery terminals?|cap|clamp|hose)\b/i;
+  /\b(look\w*|inspect\w*|visual\w*|connectors?|plugged|unplugged|loose|tight\w*|wiggle|fuses?|relays?|grounds?|wiring|harness|chaf\w*|corro\w*|damaged?|broken wire|fluid|oil level|coolant level|levels?|codes?|battery terminals?|terminals?|caps?|clamps?|hoses?|seat|air filter|filter|plug wires?|boots?|bulbs?)\b/i;
 
 export function inferEffort(...texts: string[]): Effort {
   const text = texts.join(" ");
-  if (TEARDOWN_WORDS.test(text)) return "teardown";
+  if (TEARDOWN_ONLY.test(text) || (TAKING_OFF.test(text) && HARD_TO_REACH.test(text))) return "teardown";
   if (TEST_WORDS.test(text)) return "test";
   if (QUICK_WORDS.test(text)) return "quick";
   return "test";
@@ -487,7 +504,7 @@ export function submittedProblem(input: unknown): string | null {
 export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply {
   const value = (input ?? {}) as Record<string, unknown>;
   let dropped = 0;
-  const likelyCauses: Cause[] = (Array.isArray(value.likely_causes) ? value.likely_causes : [])
+  const causes = (Array.isArray(value.likely_causes) ? value.likely_causes : [])
     .slice(0, 10)
     .map((item) => {
       const cause = (item ?? {}) as Record<string, unknown>;
@@ -508,8 +525,14 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
         // Likewise worked out from the words when it isn't one of the three.
         checkEffort: listedEffort(cause.check_effort) ?? inferEffort(title, why),
       };
-    })
-    .filter((cause) => cause.title);
+    });
+  const likelyCauses: Cause[] = causes.filter((cause) => cause.title);
+  // Claude's numbers for its causes (1 is its first) to their places in the
+  // list kept, which leaves out a cause without a title.
+  const rankOf = new Map<number, number>();
+  causes.forEach((cause, index) => {
+    if (cause.title) rankOf.set(index + 1, likelyCauses.indexOf(cause) + 1);
+  });
   const nextChecks: Check[] = (Array.isArray(value.next_checks) ? value.next_checks : [])
     .slice(0, 10)
     .map((item) => {
@@ -521,6 +544,12 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
       return {
         tier: listedEffort(check.tier) ?? inferEffort(action, expected),
         action,
+        // Causes it's about, once each, in order; numbers that aren't a
+        // cause's are left out.
+        causes: [...new Set((Array.isArray(check.causes) ? check.causes : []).map((n) => rankOf.get(Number(n))))]
+          .filter((n): n is number => n !== undefined)
+          .sort((a, b) => a - b)
+          .slice(0, 5),
         expected,
         sources: checked.sources,
         unverifiedSpec: expected !== "" && !checked.sources.some((source) => source.type === "manual"),
@@ -620,8 +649,10 @@ export type ConversationView = {
   title: string;
   status: ConversationStatus;
   unit: string | null;
-  // The unit's VIN, if the tech gave one.
+  // The unit's VIN, if the tech gave one, and its model number when it's
+  // known (so the screen can say when the two don't agree).
   vin: string | null;
+  modelNumber: string | null;
   // Which drawing the unit gets, if any.
   vehicle: UnitVehicle | null;
   // Which machine the 3D unit shows (line, seats, size, paint), if known.
@@ -638,8 +669,25 @@ export type StreamEvent =
   | { type: "start"; conversation: ConversationView; turn: TurnView }
   | { type: "progress"; step: ProgressStep }
   | { type: "reply"; text: string }
-  | { type: "scope"; scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null; vin: string | null }
+  | {
+      type: "scope";
+      scope: ScopeView;
+      vehicle: UnitVehicle | null;
+      model: UnitSpec | null;
+      vin: string | null;
+      modelNumber: string | null;
+    }
   | { type: "end"; conversation: ConversationView; turn: TurnView };
+
+// What a VIN typed in the quick form finds in the shop's model list, said
+// before the diagnosis starts: the unit and its manuals (models > 1 for a
+// model's variants), a model that's listed without a manual, a match with
+// too many manuals to narrow to, or nothing.
+export type VinPreview =
+  | { status: "found"; label: string; models: number; manuals: number }
+  | { status: "listed"; label: string; models: number }
+  | { status: "many"; models: number; manuals: number }
+  | { status: "none" };
 
 // The conversation is full; the tech starts a new one for the unit.
 export const FULL_BY_MESSAGES = `This diagnosis has ${DIAGNOSE_LIMITS.techMessages} messages, as many as one can hold. Start a new diagnosis for this unit to carry on: the causes and checks so far go with it.`;

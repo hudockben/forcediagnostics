@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
+import { Fragment, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 
 import {
   EFFORT_LABELS,
@@ -13,7 +13,6 @@ import {
   type DiagnosisReply,
   type Effort,
   type FeedbackEntry,
-  type ScopeView,
   type SourceView,
   type UnitSuggestion,
 } from "@/lib/diagnose-rules";
@@ -31,7 +30,7 @@ import {
 import type { ViewMode } from "@/lib/unit-3d/look";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 import { drawingFor } from "@/lib/unit-graphic/drawing";
-import { checkVin } from "@/lib/vin";
+import { checkVin, vinDisagreement } from "@/lib/vin";
 
 import { changeUnitAction, markCauseAction } from "./actions";
 import { ManualPictures, PageThumbs, manualPages } from "./manual-pictures";
@@ -193,21 +192,20 @@ const EFFORT_ICONS: Record<Effort, (props: { className?: string }) => ReactNode>
 };
 
 // How much work it is to confirm or rule a cause out, so the cheap suspects
-// stand out. Replies saved before causes carried it have none.
-function EffortChip({ effort }: { effort: Effort }) {
+// stand out: quiet words at the start of its why line, not a chip (chips
+// here are buttons and links). Only on open causes: one that's confirmed or
+// ruled out has been. Replies saved before causes carried it have none.
+function EffortLead({ effort }: { effort: Effort }) {
   const Icon = EFFORT_ICONS[effort];
-  const label = EFFORT_LABELS[effort];
   return (
     <span
       data-effort={effort}
-      title={`To confirm or rule out: ${label.chip.toLowerCase()} (${label.detail})`}
-      className={`inline-flex h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-medium ${
-        effort === "quick" ? "border-white/25 text-ink" : "border-white/10 text-ink-muted"
-      }`}
+      title={`To confirm or rule out: ${EFFORT_LABELS[effort].heading.toLowerCase()} (${EFFORT_LABELS[effort].detail})`}
+      className={`font-medium ${effort === "quick" ? "text-ink/90" : "text-ink/75"}`}
     >
-      <Icon className="size-3.5" />
-      {label.chip}
-      <span className="sr-only"> to confirm or rule out</span>
+      <Icon className="mr-1 inline size-3.5 align-[-2px]" />
+      {EFFORT_LABELS[effort].cause}
+      <span aria-hidden> · </span>
     </span>
   );
 }
@@ -257,9 +255,11 @@ function MarkButton({
   );
 }
 
-// Why Claude thinks so: one line, tap for the rest.
-function WhyLine({ text }: { text: string }) {
+// Why Claude thinks so: one line, tap for the rest; led by how much work
+// it is to rule in or out, when there's that to say.
+function WhyLine({ text, lead }: { text: string; lead?: ReactNode }) {
   const [open, setOpen] = useState(false);
+  if (!text) return lead ? <p className="text-sm leading-6 text-ink-muted">{lead}</p> : null;
   return (
     <button
       type="button"
@@ -267,7 +267,10 @@ function WhyLine({ text }: { text: string }) {
       onClick={() => setOpen(!open)}
       className="-my-2.5 flex min-h-11 w-full items-start gap-1 rounded py-2.5 text-left text-sm leading-6 text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
     >
-      <span className={`min-w-0 flex-1 break-words ${open ? "" : "line-clamp-1"}`}>{text}</span>
+      <span className={`min-w-0 flex-1 break-words ${open ? "" : "line-clamp-1"}`}>
+        {lead}
+        {text}
+      </span>
       <ChevronIcon className={`mt-1 size-4 transition ${open ? "rotate-180" : ""}`} />
     </button>
   );
@@ -439,10 +442,9 @@ function CauseItem({
             <LikelihoodMeter likelihood={cause.likelihood} />
           </div>
           <div onClick={(event) => event.stopPropagation()} className="space-y-2">
-            {cause.why && <WhyLine text={cause.why} />}
+            <WhyLine text={cause.why} lead={status === "open" && cause.checkEffort ? <EffortLead effort={cause.checkEffort} /> : undefined} />
             <div className="flex flex-wrap items-start gap-2">
               <StatusChip status={status} />
-              {cause.checkEffort && <EffortChip effort={cause.checkEffort} />}
               <SystemChip system={system} active={highlight} onSelect={() => onSelectZone(system)} />
               {/* Beside the system chip while there's room for one. */}
               <SourceChips sources={cause.sources} className="min-w-0 flex-1 basis-32" />
@@ -536,12 +538,62 @@ function UnitCard({
 
 // --- Checks and safety --------------------------------------------------------
 
-function CheckItem({ check, step }: { check: Check; step: number }) {
+// A cause as the checks refer to it: its number in the list (the drawing's
+// callouts carry the same), its title and where it stands.
+type CauseRef = { rank: number; title: string; status: CauseState };
+
+// "For cause 2: Water in the speed sensor connector", or "For causes 2 and
+// 4": which causes a check rules in or out, numbered as in the list above.
+function CheckCauses({ refs }: { refs: CauseRef[] }) {
+  const badge = (ref: CauseRef) => (
+    <span key={ref.rank} className="inline-grid size-5 place-items-center rounded-md bg-white/5 font-mono text-[11px] text-ink-muted">
+      {ref.rank}
+    </span>
+  );
   return (
-    <li className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
-      <span className="grid size-7 shrink-0 place-items-center rounded-full border border-glow/40 font-mono text-sm text-glow">{step}</span>
+    <p
+      data-check-causes={refs.map((ref) => ref.rank).join(" ")}
+      title={refs.map((ref) => `${ref.rank}. ${ref.title}`).join("\n")}
+      className="flex min-w-0 items-center gap-1.5 text-xs leading-5 text-ink-muted"
+    >
+      <span className="shrink-0">{refs.length === 1 ? "For cause" : "For causes"}</span>
+      {refs.length === 1 ? (
+        <>
+          {badge(refs[0])}
+          <span className="min-w-0 truncate">{refs[0].title}</span>
+        </>
+      ) : (
+        refs.map((ref, index) => (
+          <Fragment key={ref.rank}>
+            {index > 0 && <span aria-hidden>{index === refs.length - 1 ? "and" : ","}</span>}
+            {badge(ref)}
+          </Fragment>
+        ))
+      )}
+    </p>
+  );
+}
+
+// A next check: its step (numbered on across the tiers, and called a step so
+// it isn't taken for a cause's number), what to do, which causes it's for
+// (stepped back once they're all ruled out), and its spec and sources.
+function CheckItem({ check, step, causes }: { check: Check; step: number; causes: CauseRef[] }) {
+  const refs = (check.causes ?? []).flatMap((rank) => causes.filter((cause) => cause.rank === rank));
+  const moot = refs.length > 0 && refs.every((ref) => ref.status === "ruled_out");
+  return (
+    <li data-step={step} data-moot={moot || undefined} className={`flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3 ${moot ? "opacity-60" : ""}`}>
+      <span className="flex w-8 shrink-0 flex-col items-center pt-0.5 leading-none" aria-label={`Step ${step}`}>
+        <span aria-hidden className="text-[10px] font-semibold tracking-wide text-ink-muted uppercase">
+          Step
+        </span>
+        <span aria-hidden className="mt-1 font-mono text-base font-semibold text-glow">
+          {step}
+        </span>
+      </span>
       <div className="min-w-0 flex-1 space-y-2">
         <p className="text-sm leading-6 break-words text-ink">{check.action}</p>
+        {refs.length > 0 && <CheckCauses refs={refs} />}
+        {moot && <p className="text-xs text-ink-muted">{refs.length === 1 ? "That cause is" : "Those causes are"} ruled out.</p>}
         {(check.expected || check.unverifiedSpec || check.sources.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
             {check.expected &&
@@ -587,13 +639,13 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
 // The next checks under their tiers (quick checks, tests, teardown), numbered
 // on across them; a reply saved before checks had tiers is one list in
 // Claude's order.
-function CheckList({ checks }: { checks: Check[] }) {
+function CheckList({ checks, causes }: { checks: Check[]; causes: CauseRef[] }) {
   const groups = checkGroups(checks);
   if (!groups) {
     return (
       <ol className="space-y-2">
         {checks.map((check, index) => (
-          <CheckItem key={index} check={check} step={index + 1} />
+          <CheckItem key={index} check={check} step={index + 1} causes={causes} />
         ))}
       </ol>
     );
@@ -605,15 +657,15 @@ function CheckList({ checks }: { checks: Check[] }) {
         const label = EFFORT_LABELS[effort];
         return (
           <section key={effort} data-tier={effort} aria-label={`${label.heading}: ${label.detail}`} className="space-y-2">
-            <h3 className="flex items-center gap-1.5 px-0.5 text-xs leading-5 text-ink-muted">
-              <Icon className="size-3.5" />
-              <span className="font-semibold text-ink/90">{label.heading}</span>
+            <h3 className="flex items-center gap-1.5 px-0.5 text-sm leading-5 text-ink-muted">
+              <Icon className="size-4" />
+              <span className="font-semibold text-ink">{label.heading}</span>
               <span aria-hidden>·</span>
               <span>{label.detail}</span>
             </h3>
             <ol start={items[0].step} className="space-y-2">
               {items.map((item) => (
-                <CheckItem key={item.step} check={item.check} step={item.step} />
+                <CheckItem key={item.step} check={item.check} step={item.step} causes={causes} />
               ))}
             </ol>
           </section>
@@ -634,7 +686,7 @@ function ScopeCard({
   disabled,
 }: {
   conversation: ConversationView;
-  onScope: (scope: ScopeView, unit: string | null, vin: string | null, vehicle: UnitVehicle | null, model: UnitSpec | null) => void;
+  onScope: (update: Pick<ConversationView, "scope" | "unit" | "vin" | "modelNumber" | "vehicle" | "model">) => void;
   disabled: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -645,6 +697,9 @@ function ScopeCard({
   const { scope, vin } = conversation;
   const count = scope.manuals.length;
   const vinCheck = vin ? checkVin(vin) : null;
+  // A VIN for another model than the one the unit was found as (the tech
+  // typed both, or Claude looked another model up): said here, by the unit.
+  const disagreement = vin && conversation.modelNumber ? vinDisagreement(vin, conversation.modelNumber) : null;
 
   async function change(input: { modelNumber?: string; wholeLibrary?: boolean }) {
     setPending(true);
@@ -655,7 +710,14 @@ function ScopeCard({
       setMessage(result.error);
       return;
     }
-    onScope(result.scope, result.unit, result.vin, result.vehicle, result.model);
+    onScope({
+      scope: result.scope,
+      unit: result.unit,
+      vin: result.vin,
+      modelNumber: result.modelNumber,
+      vehicle: result.vehicle,
+      model: result.model,
+    });
     setEditing(false);
     setValue("");
     setPicked(null);
@@ -687,6 +749,12 @@ function ScopeCard({
           {vinCheck?.status === "ok" && !vinCheck.checkDigitOk && (
             <span className="text-xs text-trail">check digit doesn&apos;t match: a character may be off</span>
           )}
+        </p>
+      )}
+      {disagreement && (
+        <p data-testid="unit-vin-disagree" className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-trail">
+          <WarningIcon className="mt-0.5 size-3.5" />
+          <span>{disagreement}</span>
         </p>
       )}
       {count > 0 && (
@@ -946,7 +1014,7 @@ export function CausesPanel({
 
           {reply && reply.nextChecks.length > 0 && (
             <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
-              <CheckList checks={reply.nextChecks} />
+              <CheckList checks={reply.nextChecks} causes={rows.map((row) => ({ rank: row.index + 1, title: row.cause.title, status: row.status }))} />
             </Section>
           )}
 
@@ -971,7 +1039,7 @@ export function CausesPanel({
           <ScopeCard
             conversation={conversation}
             disabled={busy}
-            onScope={(scope, unit, vin, vehicle, model) => onConversation({ scope, unit, vin, vehicle, model })}
+            onScope={onConversation}
           />
         </div>
       </div>

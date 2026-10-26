@@ -293,8 +293,10 @@ function manualsMatching(filters: LibraryFilters): SQL | null {
 
 // For a search tried again with fewer words (see searchManualsWithMost):
 // each word's or phrase's tsquery (as text, from websearch_to_tsquery), any
-// excluded words' tsquery, and how many of the words a page needs.
-export type MostWords = { terms: string[]; excluded: string | null; atLeast: number };
+// excluded words' tsquery, how many of the words a page needs, and which of
+// the terms are fault codes or part numbers (codes, by index into terms;
+// optional), which count first.
+export type MostWords = { terms: string[]; excluded: string | null; atLeast: number; codes?: number[] };
 
 // The search itself, apart from searchManuals so tests can check its plan.
 // Matches come from ready_manual_pages rather than manual_pages: under
@@ -315,8 +317,10 @@ export type MostWords = { terms: string[]; excluded: string | null; atLeast: num
 //
 // With most, the query is at least atLeast of the words (excluded words
 // still out), written out as a tsquery the index answers like any other
-// (see mostTsquery); pages with more of the words come first, then by rank,
-// and only the pages the filters keep are counted and ranked.
+// (see mostTsquery); pages with more of its fault codes and part numbers
+// come first (a code is what the search is most about, and a generic word
+// matches pages a code doesn't), then those with more of the words, then
+// by rank, and only the pages the filters keep are counted and ranked.
 export function searchQuery(
   q: string,
   limit: number,
@@ -333,24 +337,38 @@ export function searchQuery(
     conditions.length > 0 ? sql`case when ${sql.join(conditions, sql` and `)} then ${value} end` : value;
   // Ranked and highlighted by any of the words, with most.
   const rank = sql`ts_rank_cd(v.search_vector, ${most ? sql`query.words` : sql`query.tsq`}, 1)`;
+  const codes = (most?.codes ?? []).filter((index) => most?.terms[index] !== undefined);
   const query = most
     ? sql`select (${mostTsquery(most)})::tsquery as tsq, (${anyTsquery(most)})::tsquery as words,
         array[${sql.join(most.terms.map((term) => sql`${term}::tsquery`), sql`, `)}] as terms`
     : sql`select websearch_to_tsquery('english', ${q}) as tsq`;
-  const matched = sql`(select count(*) from unnest(query.terms) t where v.search_vector @@ t)::int`;
+  // How many of the words (and of its codes) a page has, written out term
+  // by term: a subquery over the terms costs three times as much on a
+  // search of common words, where it runs for tens of thousands of pages.
+  const countOf = (indexes: number[]) =>
+    indexes.length > 0
+      ? sql`(${sql.join(
+          indexes.map((index) => sql`(v.search_vector @@ ${most!.terms[index]}::tsquery)::int`),
+          sql` + `,
+        )})`
+      : sql`0`;
+  const matched = countOf(most ? most.terms.map((_, index) => index) : []);
+  const codesMatched = countOf(codes);
   return sql`
     with query as (${query}),
     matches as materialized (
-      select v.manual_id, v.page_number, ${kept(rank)} as rank${most ? sql`, ${kept(matched)} as matched` : sql``}
+      select v.manual_id, v.page_number, ${kept(rank)} as rank${
+        most ? sql`, ${kept(matched)} as matched, ${kept(codesMatched)} as codes_matched` : sql``
+      }
       from ready_manual_pages v
       cross join query
       where v.search_vector @@ query.tsq
     ),
     top as materialized (
-      select manual_id, page_number, rank${most ? sql`, matched` : sql``}
+      select manual_id, page_number, rank${most ? sql`, matched, codes_matched` : sql``}
       from matches
       where rank is not null
-      order by ${most ? sql`matched desc, ` : sql``}rank desc, manual_id, page_number
+      order by ${most ? sql`codes_matched desc, matched desc, ` : sql``}rank desc, manual_id, page_number
       limit ${limit}
     )
     -- Snippets are slow to build, so only for the pages that made the cut.
@@ -367,7 +385,7 @@ export function searchQuery(
     join manual_pages p on p.manual_id = top.manual_id and p.page_number = top.page_number
     join manuals on manuals.id = top.manual_id
     cross join query
-    order by ${most ? sql`top.matched desc, ` : sql``}top.rank desc, title, top.page_number
+    order by ${most ? sql`top.codes_matched desc, top.matched desc, ` : sql``}top.rank desc, title, top.page_number
   `;
 }
 
@@ -458,6 +476,12 @@ export function searchTerms(query: string): { terms: string[]; excluded: string[
 
 export type MostHit = SearchHit & { has: string[] };
 
+// A fault code or part number among a search's words: letters and digits
+// together (P0335, B0101, 3NSVDE99), or a number of five digits or more
+// (2205187); not a size like 570 or 1000, or a phrase.
+export const isCodeTerm = (term: string) =>
+  !term.startsWith('"') && (/^(?=.*\d)(?=.*[a-z])[a-z0-9]{4,}$/i.test(term) || /^\d{5,}$/.test(term));
+
 // A search's words for trying it with fewer (see searchTerms), as Postgres
 // reads each one, leaving out the ones it drops from searches ("the", "of"):
 // the words kept, and what searchQuery needs. Null with fewer than two.
@@ -479,32 +503,37 @@ async function mostWords(tx: ShopTransaction, query: string): Promise<{ words: s
         `)
       ).rows[0]
     : undefined;
+  const words = parsed.rows.map((row) => row.term);
   return {
-    words: parsed.rows.map((row) => row.term),
+    words,
     most: {
       terms: parsed.rows.map((row) => row.tsq),
       excluded: notWords?.tsq ?? null,
       atLeast: Math.ceil(parsed.rows.length / 2),
+      codes: words.flatMap((word, index) => (isCodeTerm(word) ? [index] : [])),
     },
   };
 }
 
 // When no page has every word of a search: the pages with most of them (at
-// least half, rounded up), those with more first, each with the words it
-// has. Empty for a search of one word, which there's no fewer of.
+// least half, rounded up), those with more of its codes and then more of
+// its words first, each with the words it has. Empty for a search of one
+// word, which there's no fewer of. codes: the words that are fault codes or
+// part numbers (isCodeTerm).
 export async function searchManualsWithMost(
   shopId: string,
   query: string,
   limit = SEARCH_LIMIT,
   manualIds?: string[],
-): Promise<{ hits: MostHit[]; words: string[] }> {
-  if (manualIds?.length === 0) return { hits: [], words: [] };
+): Promise<{ hits: MostHit[]; words: string[]; codes: string[] }> {
+  if (manualIds?.length === 0) return { hits: [], words: [], codes: [] };
   return withShop(shopId, async (tx) => {
     const found = await mostWords(tx, cleanSearchQuery(query));
-    if (!found) return { hits: [], words: [] };
+    if (!found) return { hits: [], words: [], codes: [] };
     const result = await tx.execute<SearchRow>(searchQuery("", limit, {}, manualIds, found.most));
     return {
       words: found.words,
+      codes: (found.most.codes ?? []).map((index) => found.words[index]),
       hits: result.rows.map((row) => ({
         ...toHit(row),
         has: (row.has ?? []).map((index) => found.words[index]).filter((word): word is string => Boolean(word)),
@@ -513,23 +542,32 @@ export async function searchManualsWithMost(
   });
 }
 
+// Diagnose counts matches outside a unit's manuals up to this many pages:
+// enough to say the words are there, and it stops reading pages once it
+// has them (common words match tens of thousands).
+export const COUNT_CAP = 500;
+
 // The pages of the shop's ready manuals that match a search, counted by
 // manual (most first), leaving out the manuals given (Diagnose's unit
 // scope): what the search would find in the rest of the library. With most,
 // the pages with most of its words, as searchManualsWithMost counts them.
-export function countQuery(q: string, leaveOut: string[], most?: MostWords) {
+// Only the first cap matching pages are counted. The manuals left out are
+// left out as the index's matches are read (a NOT can't steer the plan away
+// from the index, as a filter on which manuals can), so they don't use up
+// the cap.
+export function countQuery(q: string, leaveOut: string[], most?: MostWords, cap = COUNT_CAP) {
   return sql`
     with query as (select ${most ? sql`(${mostTsquery(most)})::tsquery` : sql`websearch_to_tsquery('english', ${q})`} as tsq),
     matches as materialized (
       select v.manual_id
       from ready_manual_pages v
       cross join query
-      where v.search_vector @@ query.tsq
+      where v.search_vector @@ query.tsq and not (v.manual_id = any(${uuidArray(leaveOut)}))
+      limit ${cap}
     ),
     counted as (
       select manual_id, count(*)::int as pages
       from matches
-      where not (manual_id = any(${uuidArray(leaveOut)}))
       group by manual_id
     )
     select counted.manual_id, counted.pages, ${manualDisplayTitle} as title
@@ -543,20 +581,22 @@ export async function countMatchesElsewhere(
   shopId: string,
   query: string,
   leaveOut: string[],
-  { most = false } = {},
-): Promise<{ pages: number; manuals: { manualId: string; title: string; pages: number }[] }> {
+  { most = false, cap = COUNT_CAP } = {},
+): Promise<{ pages: number; capped: boolean; manuals: { manualId: string; title: string; pages: number }[] }> {
   const q = cleanSearchQuery(query);
-  if (!q) return { pages: 0, manuals: [] };
+  if (!q) return { pages: 0, capped: false, manuals: [] };
   const rows = await withShop(shopId, async (tx) => {
     const words = most ? await mostWords(tx, q) : null;
     if (most && !words) return [];
     const result = await tx.execute<{ manual_id: string; pages: number; title: string }>(
-      countQuery(q, leaveOut, words?.most),
+      countQuery(q, leaveOut, words?.most, cap),
     );
     return result.rows;
   });
+  const pages = rows.reduce((sum, row) => sum + row.pages, 0);
   return {
-    pages: rows.reduce((sum, row) => sum + row.pages, 0),
+    pages,
+    capped: pages >= cap,
     manuals: rows.map((row) => ({ manualId: row.manual_id, title: row.title, pages: row.pages })),
   };
 }

@@ -203,3 +203,19 @@ export const WrenchIcon = (p: Props) => (
     <path d="M10.6 2.1a3.4 3.4 0 0 0-3.9 4.5L2.3 11a1.5 1.5 0 0 0 2.1 2.1l4.4-4.4a3.4 3.4 0 0 0 4.5-3.9l-2 2-1.9-.4-.4-1.9z" />
   </Icon>
 );
+
+// The tech, beside their name on their messages.
+export const PersonIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="8" cy="5.25" r="2.75" />
+    <path d="M2.75 14c.4-2.9 2.6-4.75 5.25-4.75s4.85 1.85 5.25 4.75" />
+  </Icon>
+);
+
+// A note that only informs (part of a VIN kept as it was typed).
+export const InfoIcon = (p: Props) => (
+  <Icon {...p}>
+    <circle cx="8" cy="8" r="6" />
+    <path d="M8 7.25V11M8 5h.01" />
+  </Icon>
+);

@@ -18,15 +18,29 @@ import {
   type StreamEvent,
   type TurnView,
   type UnitSuggestion,
+  type VinPreview,
 } from "@/lib/diagnose-rules";
 import { claudeSummary, openTurnIds, techSummary } from "@/lib/diagnose-thread";
 import type { Vehicle } from "@/lib/manual-catalog-rules";
-import { VIN_LENGTH, checkVin } from "@/lib/vin";
+import { VIN_LENGTH, checkVin, vinDisagreement } from "@/lib/vin";
 
 import { Chevron, vehicleOptions } from "../library/search-form";
-import { loadConversationAction, stopTurnAction } from "./actions";
+import { loadConversationAction, previewVinAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
-import { CausesIcon, ChatIcon, CheckIcon, ChevronIcon, GlobeIcon, PageIcon, ReplyIcon, SearchIcon, WarningIcon, WorkingIcon } from "./icons";
+import {
+  CausesIcon,
+  ChatIcon,
+  CheckIcon,
+  ChevronIcon,
+  GlobeIcon,
+  InfoIcon,
+  PageIcon,
+  PersonIcon,
+  ReplyIcon,
+  SearchIcon,
+  WarningIcon,
+  WorkingIcon,
+} from "./icons";
 import { PlainText } from "./plain-text";
 import { UnitPicker } from "./unit-picker";
 
@@ -134,6 +148,7 @@ function ActivityChips({ progress }: { progress: ProgressStep[] }) {
 const OPENING_SHORT: Record<string, string> = {
   Unit: "Unit",
   VIN: "VIN",
+  "Partial VIN": "VIN",
   Complaint: "Complaint",
   "Fault codes": "Codes",
   "Already checked": "Checked",
@@ -153,6 +168,8 @@ function TechText({ turn }: { turn: TurnView }) {
               <dd className="min-w-0 break-words text-ink" data-opening={row.label}>
                 {row.label === "VIN" ? (
                   <span className="font-mono tracking-wide break-all">{row.value}</span>
+                ) : row.label === "Partial VIN" ? (
+                  <PartialVin value={row.value} />
                 ) : row.label === "Fault codes" ? (
                   <span className="flex flex-wrap gap-1">
                     {row.value.split(/,\s*/).map((code) => (
@@ -173,6 +190,17 @@ function TechText({ turn }: { turn: TurnView }) {
     );
   }
   return <QuotedText text={turn.techText} />;
+}
+
+// "MA765432 (8 of 17 characters)": part of a VIN, as the tech typed it.
+function PartialVin({ value }: { value: string }) {
+  const match = /^(\S+)\s*\((\d+) of 17 characters\)$/.exec(value);
+  return (
+    <span>
+      <span className="font-mono tracking-wide break-all">{match ? match[1] : value}</span>
+      {match && <span className="text-ink-muted"> · part of a VIN, {match[2]} of 17 characters</span>}
+    </span>
+  );
 }
 
 function QuotedText({ text }: { text: string }) {
@@ -200,8 +228,8 @@ function QuotedText({ text }: { text: string }) {
   );
 }
 
-// The thread's cards (the tech's message, Claude's reply): the column's full
-// width, one padding.
+// The thread's cards (the tech's message, Claude's reply) and the folded
+// exchanges: the column's full width, one padding, one corner.
 const threadCardClass = "w-full rounded-xl border px-4 py-3";
 
 // An earlier exchange in one line: the tech's first line and Claude's
@@ -213,7 +241,7 @@ function FoldedTurn({ turn, onOpen }: { turn: TurnView; onOpen: () => void }) {
         type="button"
         aria-expanded={false}
         onClick={onOpen}
-        className="flex min-h-11 w-full items-center gap-2 rounded-lg border border-white/10 bg-charcoal-900/50 px-3 py-1.5 text-left text-sm transition hover:border-glow/30 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        className="flex min-h-11 w-full items-center gap-2 rounded-xl border border-white/10 bg-charcoal-900/50 px-4 py-1.5 text-left text-sm transition hover:border-glow/30 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
       >
         <ChevronIcon className="size-4 shrink-0 -rotate-90 text-ink-muted" />
         <span className="min-w-0 flex-1 leading-5">
@@ -264,11 +292,18 @@ function TurnBlock({
         </button>
       )}
       {/* The tech's card and Claude's share the column's edges and padding;
-          the tech's is told apart by its name and lighter fill, not by an
-          offset like a chat bubble's. */}
-      <div data-card="tech" className={`${threadCardClass} border-white/[0.14] bg-white/[0.06]`}>
+          the tech's is told apart by a bar down its left side (drawn inside
+          the card, so the edges stay put), the person mark by their name and
+          a lighter fill, not by an offset like a chat bubble's. */}
+      <div
+        data-card="tech"
+        className={`${threadCardClass} border-white/[0.14] bg-white/[0.07] shadow-[inset_3px_0_0_var(--color-ink-muted)]`}
+      >
         <div className="mb-1.5 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="text-sm font-semibold text-ink/85">{turn.userName || "Tech"}</span>
+          <span data-person className="flex items-center gap-1.5 text-sm font-semibold text-ink/85">
+            <PersonIcon className="size-3.5 text-ink-muted" />
+            {turn.userName || "Tech"}
+          </span>
         </div>
         <TechText turn={turn} />
       </div>
@@ -392,15 +427,52 @@ function Starter({
   const set = (name: keyof StartFields) => (value: string) => setFields((old) => ({ ...old, [name]: value }));
   const codes = normalizeFaultCodes(fields.faultCodes);
   const vin = checkVin(fields.vin);
-  const vinBlocks = vin.status === "partial" || vin.status === "invalid";
+  // Only what can't be a VIN (I, O or Q, too long) holds the start up; part
+  // of one (the last digits) goes with the diagnosis as a note, and a wrong
+  // check digit is only a warning.
+  const vinBlocks = vin.status === "invalid" && !options.carry;
   // While it's being typed, a short VIN only counts its characters.
   const [vinFocused, setVinFocused] = useState(false);
+  // A VIN typed or pasted in the model number box goes to the VIN box.
+  const [movedVin, setMovedVin] = useState(false);
+  // What the VIN finds in the shop's model list, looked up as it's typed.
+  const [preview, setPreview] = useState<{ vin: string; found: VinPreview | null } | null>(null);
   const vehicles = vehicleOptions(options, fields.vehicle);
   const showFilters = options.vehicles.length > 0 || options.years.length > 0;
+  const okVin = vin.status === "ok" ? vin.vin : null;
+  const typedNumber = !byVehicle ? (picked?.modelNumber ?? fields.modelNumber.trim()) : "";
+  const disagreement = okVin && typedNumber ? vinDisagreement(okVin, typedNumber) : null;
+  const vehiclePicked = byVehicle && Boolean(fields.vehicle || fields.year || fields.model.trim());
+
+  useEffect(() => {
+    if (!okVin || options.carry) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const found = await previewVinAction(okVin);
+      if (!cancelled) setPreview({ vin: okVin, found });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [okVin, options.carry]);
+
+  function setModelNumber(value: string) {
+    const asVin = checkVin(value);
+    // Into an empty VIN box, or over the same VIN or its last digits.
+    const fits = vin.status === "empty" || ((vin.status === "ok" || vin.status === "partial") && asVin.status === "ok" && asVin.vin.endsWith(vin.vin));
+    if (asVin.status === "ok" && fits) {
+      setFields((old) => ({ ...old, modelNumber: "", vin: asVin.vin }));
+      setMovedVin(true);
+      return;
+    }
+    setMovedVin(false);
+    set("modelNumber")(value);
+  }
 
   function unitFields(): Record<string, string> {
     if (options.carry) return { from: options.carry.id };
-    const vinField: Record<string, string> = vin.status === "ok" ? { vin: vin.vin } : {};
+    const vinField: Record<string, string> = vin.status === "ok" || vin.status === "partial" ? { vin: vin.vin } : {};
     if (!byVehicle) return { modelNumber: fields.modelNumber.trim(), ...vinField };
     const vehicleIsLine = fields.vehicle !== "" && !["UTV", "ATV", "Generator", "Other"].includes(fields.vehicle);
     return {
@@ -413,7 +485,7 @@ function Starter({
 
   function submitForm(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (vinBlocks && !options.carry) return;
+    if (vinBlocks) return;
     void onStart({
       ...unitFields(),
       complaint: fields.complaint,
@@ -448,13 +520,19 @@ function Starter({
               <UnitPicker
                 id="start-model-number"
                 value={fields.modelNumber}
-                onChange={set("modelNumber")}
+                onChange={setModelNumber}
                 picked={picked}
                 onPick={setPicked}
               />
             </div>
+            {movedVin && (
+              <p role="status" data-vin-moved className="mt-1.5 flex items-start gap-1.5 text-xs leading-5 text-glow">
+                <CheckIcon className="mt-0.5 size-3.5" />
+                That&apos;s the VIN: it&apos;s in the VIN box below now.
+              </p>
+            )}
             <p className="mt-1.5 text-xs text-ink-muted">
-              On the frame or VIN plate.{" "}
+              On the frame or VIN plate (Z19VDE99AM, not the 17-character VIN).{" "}
               {showFilters && (
                 <button type="button" onClick={() => setByVehicle(true)} className="text-glow/90 hover:text-glow hover:underline">
                   No model number? Pick the vehicle instead.
@@ -536,19 +614,36 @@ function Starter({
             <input
               id="start-vin"
               value={fields.vin}
-              onChange={(event) => set("vin")(event.target.value)}
+              onChange={(event) => {
+                setMovedVin(false);
+                set("vin")(event.target.value);
+              }}
               onFocus={() => setVinFocused(true)}
               onBlur={() => setVinFocused(false)}
               placeholder="17 characters, from the frame"
               autoComplete="off"
               autoCapitalize="characters"
+              autoCorrect="off"
               spellCheck={false}
-              maxLength={30}
-              aria-invalid={vinBlocks && !vinFocused}
-              aria-describedby="start-vin-note"
-              className={`mt-1.5 ${inputBaseClass} font-mono tracking-wide uppercase placeholder:font-sans placeholder:tracking-normal placeholder:normal-case`}
+              enterKeyHint="next"
+              maxLength={40}
+              aria-invalid={vinBlocks}
+              aria-describedby={vinBlocks ? "start-vin-note start-blocked" : "start-vin-note"}
+              // Something that isn't a VIN gets an amber edge: it's the one
+              // thing here that holds the start up.
+              className={`mt-1.5 ${
+                vinBlocks
+                  ? inputBaseClass.replace("border-white/10", "border-trail/80").replace("focus:border-glow/60", "focus:border-trail").replace("focus:ring-glow/25", "focus:ring-trail/30")
+                  : inputBaseClass
+              } font-mono tracking-wide uppercase placeholder:font-sans placeholder:tracking-normal placeholder:normal-case`}
             />
-            <VinNote check={vin} typing={vinFocused} />
+            <VinNote
+              check={vin}
+              typing={vinFocused}
+              preview={okVin && preview?.vin === okVin ? preview.found : undefined}
+              disagreement={disagreement}
+              vehiclePicked={vehiclePicked}
+            />
           </div>
         )}
 
@@ -604,13 +699,22 @@ function Starter({
             className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
           />
         </div>
-        <button
-          type="submit"
-          disabled={busy || (!fields.complaint.trim() && codes.length === 0) || (vinBlocks && !options.carry)}
-          className={primaryLinkClass}
-        >
-          Start diagnosis
-        </button>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <button
+            type="submit"
+            disabled={busy || (!fields.complaint.trim() && codes.length === 0) || vinBlocks}
+            aria-describedby={vinBlocks ? "start-blocked" : undefined}
+            className={primaryLinkClass}
+          >
+            Start diagnosis
+          </button>
+          {vinBlocks && (
+            <p id="start-blocked" role="status" className="flex items-center gap-1.5 text-sm font-medium text-trail">
+              <WarningIcon className="size-4" />
+              Fix or clear the VIN to start.
+            </p>
+          )}
+        </div>
       </form>
 
       <form
@@ -639,33 +743,58 @@ function Starter({
   );
 }
 
-// Under the VIN box: what to type, how far along it is, that it's a VIN,
-// or what's wrong. A wrong check digit is only a warning; anything that
-// isn't a VIN (too short, too long, I, O or Q) has to be fixed or cleared
-// before the diagnosis starts.
-function VinNote({ check, typing }: { check: ReturnType<typeof checkVin>; typing: boolean }) {
+// Under the VIN box: what to type, how far along it is, that it's a VIN
+// and what it finds in the shop's model list, or what's wrong. Three looks
+// for three outcomes: part of a VIN (the last digits) is only information
+// and goes with the diagnosis as a note; a wrong check digit, or a model
+// number for another model, is an amber warning that doesn't stop the
+// start; only something that can't be a VIN (I, O or Q, too long) holds it
+// up, with an amber edge on the box and the reason beside Start.
+function VinNote({
+  check,
+  typing,
+  preview,
+  disagreement,
+  vehiclePicked,
+}: {
+  check: ReturnType<typeof checkVin>;
+  typing: boolean;
+  // What the VIN finds: undefined while it's being looked up.
+  preview?: VinPreview | null;
+  disagreement: string | null;
+  vehiclePicked: boolean;
+}) {
   const base = "mt-1.5 flex items-start gap-1.5 text-xs leading-5";
   let note: ReactNode;
   if (check.status === "empty") {
-    note = <span className="text-ink-muted">On the frame or VIN plate. It finds the exact model when the model list has it.</span>;
+    note = <span className="text-ink-muted">On the frame or VIN plate. It finds the model (not the paint) when the shop&apos;s model list has it.</span>;
   } else if (check.status === "partial" && typing) {
     note = (
       <span className="text-ink-muted tabular-nums">
         {check.vin.length} of {VIN_LENGTH} characters
       </span>
     );
-  } else if (check.status === "partial" || check.status === "invalid") {
+  } else if (check.status === "partial") {
+    note = (
+      <>
+        <InfoIcon className="mt-0.5 size-3.5 text-ink-muted" />
+        <span className="text-ink-muted">
+          {check.message} It goes with the diagnosis as a note, but won&apos;t find the unit.
+        </span>
+      </>
+    );
+  } else if (check.status === "invalid") {
     note = (
       <>
         <WarningIcon className="mt-0.5 size-3.5 text-trail" />
-        <span className="text-trail">{check.message}</span>
+        <span className="font-medium text-trail">Not a VIN: {check.message}</span>
       </>
     );
   } else if (check.status === "ok" && check.warning) {
     note = (
       <>
         <WarningIcon className="mt-0.5 size-3.5 text-trail" />
-        <span className="text-trail">{check.warning}</span>
+        <span className="text-trail">{check.warning} You can still start.</span>
       </>
     );
   } else if (check.status === "ok") {
@@ -678,9 +807,61 @@ function VinNote({ check, typing }: { check: ReturnType<typeof checkVin>; typing
       </>
     );
   }
+  const status = check.status === "ok" ? (check.checkDigitOk ? "ok" : "warning") : check.status;
   return (
-    <p id="start-vin-note" data-vin-status={check.status === "ok" ? (check.checkDigitOk ? "ok" : "warning") : check.status} aria-live="polite" className={base}>
-      {note}
+    <div aria-live="polite">
+      <p id="start-vin-note" data-vin-status={status} className={base}>
+        {note}
+      </p>
+      {check.status === "ok" && <VinMatch preview={preview} vehiclePicked={vehiclePicked} />}
+      {disagreement && (
+        <p data-vin-disagree className={`${base} text-trail`}>
+          <WarningIcon className="mt-0.5 size-3.5" />
+          <span>{disagreement}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+// What a whole VIN finds in the shop's model list, before the start.
+function VinMatch({ preview, vehiclePicked }: { preview: VinPreview | null | undefined; vehiclePicked: boolean }) {
+  const base = "mt-1 flex items-start gap-1.5 text-xs leading-5";
+  if (preview === undefined) return <p data-vin-match="looking" className={`${base} text-ink-muted`}>Looking in the model list…</p>;
+  if (preview === null) return null;
+  const instead = vehiclePicked ? " The VIN decides the unit, not the vehicle picked above." : "";
+  if (preview.status === "found") {
+    const manuals = `${preview.manuals} ${preview.manuals === 1 ? "manual" : "manuals"}`;
+    return (
+      <p data-vin-match="found" className={`${base} text-glow`}>
+        <span>
+          {preview.models > 1 ? `Matches ${preview.models} variants of ${preview.label}` : `Matches ${preview.label}`} · {manuals}
+          {instead}
+        </span>
+      </p>
+    );
+  }
+  if (preview.status === "listed") {
+    return (
+      <p data-vin-match="listed" className={`${base} text-ink-muted`}>
+        <span>
+          Matches {preview.label} in the model list, but the shop has no manual for it: Claude will search the whole library.{instead}
+        </span>
+      </p>
+    );
+  }
+  if (preview.status === "many") {
+    return (
+      <p data-vin-match="many" className={`${base} text-ink-muted`}>
+        <span>
+          Matches {preview.models} models with {preview.manuals} manuals, too many to narrow the search to.
+        </span>
+      </p>
+    );
+  }
+  return (
+    <p data-vin-match="none" className={`${base} text-ink-muted`}>
+      <span>No model in the shop&apos;s list has this VIN&apos;s model code: it goes with the diagnosis as information.</span>
     </p>
   );
 }
@@ -810,7 +991,15 @@ export function DiagnoseChat({
       case "scope":
         setConversation((old) =>
           old
-            ? { ...old, scope: event.scope, unit: event.scope.label ?? old.unit, vin: event.vin ?? old.vin, vehicle: event.vehicle, model: event.model }
+            ? {
+                ...old,
+                scope: event.scope,
+                unit: event.scope.label ?? old.unit,
+                vin: event.vin ?? old.vin,
+                modelNumber: event.modelNumber,
+                vehicle: event.vehicle,
+                model: event.model,
+              }
             : old,
         );
         break;

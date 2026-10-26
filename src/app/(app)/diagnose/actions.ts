@@ -4,8 +4,8 @@ import { DrizzleQueryError } from "drizzle-orm";
 import { unstable_rethrow } from "next/navigation";
 
 import { changeUnit, getConversation, markCause, requestStop, type ConversationDetail } from "@/lib/diagnose";
-import type { CauseVerdict, ConversationView, FeedbackEntry, ScopeView, UnitSuggestion } from "@/lib/diagnose-rules";
-import { suggestUnits } from "@/lib/diagnose-tools";
+import type { CauseVerdict, ConversationView, FeedbackEntry, ScopeView, UnitSuggestion, VinPreview } from "@/lib/diagnose-rules";
+import { previewVin, suggestUnits } from "@/lib/diagnose-tools";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { requireCapability } from "@/lib/session";
 import type { UnitSpec } from "@/lib/unit-vehicle";
@@ -32,6 +32,13 @@ export async function suggestUnitsAction(query: string): Promise<UnitSuggestion[
   return Array.isArray(result) ? result : [];
 }
 
+// What a VIN typed in the quick form finds in the shop's model list.
+export async function previewVinAction(vin: string): Promise<VinPreview | null> {
+  const user = await requireCapability("diagnostics.work");
+  const result = await attempt("look up the VIN", () => previewVin(user.shop.id, String(vin ?? "")));
+  return result && !("error" in result) ? result : null;
+}
+
 export async function markCauseAction(input: {
   conversationId: string;
   turnId: string;
@@ -56,7 +63,15 @@ export async function changeUnitAction(input: {
   modelNumber?: string;
   wholeLibrary?: boolean;
 }): Promise<
-  { scope: ScopeView; unit: string | null; vin: string | null; vehicle: UnitVehicle | null; model: UnitSpec | null } | Failed
+  | {
+      scope: ScopeView;
+      unit: string | null;
+      vin: string | null;
+      modelNumber: string | null;
+      vehicle: UnitVehicle | null;
+      model: UnitSpec | null;
+    }
+  | Failed
 > {
   const user = await requireCapability("diagnostics.work");
   return attempt("change the unit", () =>

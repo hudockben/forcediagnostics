@@ -37,11 +37,17 @@ const YEAR_CODES = "ABCDEFGHJKLMNPRSTVWXY123456789";
 const FIRST_YEAR = 1980;
 
 // " 4xa-see57 xpa 123456 " -> "4XASEE57XPA123456": upper-cased, without the
-// spaces and dashes people type or copy with it.
+// spaces and dashes people type or copy with it. A label in front ("VIN:
+// 4XA…", "VIN# 4XA…", "VIN 4XA…", copied from a work order) goes too, and so
+// does the leading I a barcode scanner reads off a Code 39 VIN label (18
+// characters): no VIN has an I in it, so neither can be part of one.
 export function normalizeVin(text: string) {
-  return String(text ?? "")
+  let vin = String(text ?? "")
     .toUpperCase()
-    .replace(/[\s\-‐-―]+/g, "");
+    .replace(/[\s\-‐-―]+/g, "")
+    .replace(/^VIN(?:NO|NUMBER)?[.:#]*/, "");
+  if (vin.length === VIN_LENGTH + 1 && vin.startsWith("I")) vin = vin.slice(1);
+  return vin;
 }
 
 // The check digit a 17-character VIN should have ("0"-"9" or "X"), or null
@@ -80,6 +86,10 @@ export type VinCheck =
   // (warning says so); it's still used.
   | { status: "ok"; vin: string; checkDigitOk: boolean; warning: string | null };
 
+// From this many characters a short VIN is a whole one with something
+// missing rather than its end (the last 6-8 characters are the serial).
+const PARTIAL_NEARLY_WHOLE = 12;
+
 export const VIN_CHECK_DIGIT_WARNING =
   "Check the VIN: its check digit (the 9th character) doesn't match the rest, so a character may be off.";
 
@@ -99,10 +109,16 @@ export function checkVin(text: string): VinCheck {
     return { status: "invalid", vin, message: "A VIN is only letters and digits." };
   }
   if (vin.length < VIN_LENGTH) {
+    const count = `That's ${vin.length} ${vin.length === 1 ? "character" : "characters"}: a VIN has ${VIN_LENGTH}.`;
     return {
       status: "partial",
       vin,
-      message: `That's ${vin.length} ${vin.length === 1 ? "character" : "characters"}: a VIN has ${VIN_LENGTH}. The last few digits alone are the serial number and don't say which model it is, so type the whole VIN from the frame or leave this blank.`,
+      // Nearly all of it: a character or two left out. Much less: the
+      // serial number at its end, which techs sometimes have on their own.
+      message:
+        vin.length >= PARTIAL_NEARLY_WHOLE
+          ? `${count} ${VIN_LENGTH - vin.length === 1 ? "A character is" : `${VIN_LENGTH - vin.length} characters are`} missing: check it against the frame.`
+          : `${count} The last few digits alone are the serial number and don't say which model it is.`,
     };
   }
   if (vin.length > VIN_LENGTH) {
@@ -140,15 +156,45 @@ export function vinMatchesModelNumber(vin: string, modelNumber: string, maxYear?
 // ("SPORTSMAN 570 EPS - SAGE GREEN", "SPORTSMAN 570 EPS GREEN EU" ->
 // "SPORTSMAN 570 EPS"): the words every description has, in the first one's
 // order, after leaving out the paint Polaris writes after " - ". Failing that
-// (no word in common), the first description's name before its paint.
+// (no word in common), the first description's name before its paint. When
+// they all have the same description, that description, paint and all.
 export function sharedModelName(descriptions: (string | null)[]): string | null {
-  const names = descriptions
-    .filter((text): text is string => typeof text === "string" && text.trim() !== "")
-    .map((text) => text.split(/\s+-\s+/)[0].trim());
+  const given = descriptions.filter((text): text is string => typeof text === "string" && text.trim() !== "");
+  // Variants listed under one description (A and B market versions, say)
+  // share its paint too.
+  const distinct = new Set(given.map((text) => text.trim().replace(/\s+/g, " ").toUpperCase()));
+  if (distinct.size === 1) return [...distinct][0];
+  const names = given.map((text) => text.split(/\s+-\s+/)[0].trim());
   if (names.length === 0) return null;
   const words = (name: string) => name.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
   const [first, ...rest] = names.map(words);
   const others = rest.map((list) => new Set(list));
   const shared = first.filter((word) => others.every((set) => set.has(word)));
   return shared.some((word) => /[A-Z]/.test(word)) ? shared.join(" ") : names[0].toUpperCase();
+}
+
+// A model number's year, from its characters 2-3 (1997 on: A23SEE57A1 is
+// 2023, W98AE50A 1998); null for an older or odd one, which a VIN can't be
+// compared with.
+export function modelNumberYear(modelNumber: string): number | null {
+  const match = /^[A-Z](\d\d)[A-HJ-NPR-Z0-9]{5}/.exec(modelNumber.toUpperCase().replace(/\s+/g, ""));
+  if (!match) return null;
+  const yy = Number(match[1]);
+  return yy >= 80 ? 1900 + yy : 2000 + yy;
+}
+
+// What the screen says when a VIN and a model number given for the same
+// unit are for different models (their codes in characters 4-8, or their
+// years, differ), or null when they agree or can't be compared (a model
+// number from before 1997, or something that isn't one). The VIN's year is
+// the one that fits the model number's, or else the newest that isn't in
+// the future.
+export function vinDisagreement(vin: string, modelNumber: string, thisYear = new Date().getUTCFullYear()): string | null {
+  const number = modelNumber.toUpperCase().replace(/\s+/g, "");
+  const numberYear = modelNumberYear(number);
+  if (numberYear === null || checkVin(vin).status !== "ok") return null;
+  if (vinMatchesModelNumber(vin, number)) return null;
+  const years = vinYears(vin);
+  const year = years.find((candidate) => candidate === numberYear) ?? years.find((candidate) => candidate <= thisYear + 1) ?? years.at(-1);
+  return `This VIN reads as ${year ? `a ${year}, ` : ""}model code ${vinModelCode(vin)}; ${number} is a ${numberYear}, model code ${number.slice(3, 8)}. One of them may be off: check both on the frame.`;
 }
