@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Fragment, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 
+import { causeSteps, howToCheckQuestion, type CauseStep } from "@/lib/diagnose-cause-steps";
 import {
   EFFORT_LABELS,
   checkGroups,
@@ -56,9 +57,10 @@ import { UnitPicker } from "./unit-picker";
 import { useHistoryParam } from "./use-history-param";
 
 // The diagnosis at a glance, beside the chat (or on its own tab on a
-// tablet): the unit drawing with its suspect systems lit, Claude's likely
-// causes with the tech's "Ruled out" / "This was it", the checks to do next
-// with their specs, safety notes, and the unit and manuals in use.
+// tablet): the unit drawing with its suspect systems lit, safety notes,
+// Claude's likely causes, each with the checks that confirm or rule it out
+// (with their specs) and the tech's "Ruled out" / "This was it", and the
+// unit and manuals in use.
 
 // --- Pieces ----------------------------------------------------------------------
 
@@ -345,6 +347,9 @@ function CauseItem({
   onMark,
   onSelectZone,
   onHoverZone,
+  steps,
+  refs,
+  onAsk,
   pictures = "inline",
 }: {
   row: CauseRow;
@@ -353,6 +358,15 @@ function CauseItem({
   onMark: (verdict: CauseVerdict, viaKeyboard: boolean) => void;
   onSelectZone: (system: CauseSystem) => void;
   onHoverZone: (system: CauseSystem | null) => void;
+  // The checks that confirm or rule it out, quickest first, while it's
+  // open (an empty list when Claude gave none yet); null for a reply whose
+  // checks don't say which causes they're for, or a cause that's settled.
+  steps: CauseStep<Check>[] | null;
+  // The causes by their numbers, for a step that also checks others.
+  refs: CauseRef[];
+  // Puts "How do I check cause N, …?" in the message box (not while the
+  // conversation is full).
+  onAsk?: () => void;
   // The pictures of the pages it cites: in its row of buttons (the list),
   // or a gallery of large ones under it (the full-screen sheet).
   pictures?: "inline" | "large";
@@ -444,13 +458,16 @@ function CauseItem({
           </div>
           <div onClick={(event) => event.stopPropagation()} className="space-y-2">
             <WhyLine text={cause.why} lead={status === "open" && cause.checkEffort ? <EffortLead effort={cause.checkEffort} /> : undefined} />
-            <div className="flex flex-wrap items-start gap-2">
+            <div data-cause-chips className="flex flex-wrap items-start gap-2">
               <StatusChip status={status} />
               <SystemChip system={system} active={highlight} onSelect={() => onSelectZone(system)} />
               {/* Beside the system chip while there's room for one. */}
               <SourceChips sources={cause.sources} className="min-w-0 flex-1 basis-32" />
             </div>
             {pictures === "large" && <PageThumbs sources={cause.sources} size="large" />}
+            {status === "open" && steps && (
+              <HowToCheck rank={index + 1} steps={steps} refs={refs} large={pictures === "large"} shownPages={cause.sources} onAsk={onAsk} />
+            )}
           </div>
         </div>
       </div>
@@ -537,52 +554,83 @@ function UnitCard({
   );
 }
 
-// --- Checks and safety --------------------------------------------------------
+// --- Checks ---------------------------------------------------------------------
 
-// A cause as the checks refer to it: its number in the list (the drawing's
-// callouts carry the same), its title and where it stands.
-type CauseRef = { rank: number; title: string; status: CauseState };
+// A cause as a step refers to it: its number in the list (the drawing's
+// callouts carry the same) and its title.
+type CauseRef = { rank: number; title: string };
 
-// "For cause 2: Water in the speed sensor connector", or "For causes 2 and
-// 4": which causes a check rules in or out, numbered as in the list above.
-function CheckCauses({ refs }: { refs: CauseRef[] }) {
-  const badge = (ref: CauseRef) => (
-    <span key={ref.rank} className="inline-grid size-5 place-items-center rounded-md bg-white/5 font-mono text-[11px] text-ink-muted">
-      {ref.rank}
-    </span>
-  );
+// Causes by their numbers, in the cause list's own small squares: "3", or
+// "2 and 4", "1, 2 and 4".
+function CauseNumbers({ refs }: { refs: CauseRef[] }) {
+  return refs.map((ref, index) => (
+    <Fragment key={ref.rank}>
+      {index > 0 && <span>{index === refs.length - 1 ? "and" : ","}</span>}
+      <span className="inline-grid size-5 shrink-0 place-items-center rounded-md bg-white/5 font-mono text-[11px] text-ink-muted">{ref.rank}</span>
+    </Fragment>
+  ));
+}
+
+// "Also checks cause 3", or "causes 2 and 4": a check that settles several
+// causes is in each of their cards (each complete on its own), and says so,
+// so one test is done once.
+function AlsoChecks({ refs }: { refs: CauseRef[] }) {
   return (
     <p
-      data-check-causes={refs.map((ref) => ref.rank).join(" ")}
+      data-also-checks={refs.map((ref) => ref.rank).join(" ")}
       title={refs.map((ref) => `${ref.rank}. ${ref.title}`).join("\n")}
-      className="flex min-w-0 items-center gap-1.5 text-xs leading-5 text-ink-muted"
+      className="flex flex-wrap items-center gap-1.5 text-xs leading-5 text-ink-muted"
     >
-      <span className="shrink-0">{refs.length === 1 ? "For cause" : "For causes"}</span>
-      {refs.length === 1 ? (
-        <>
-          {badge(refs[0])}
-          <span className="min-w-0 truncate">{refs[0].title}</span>
-        </>
-      ) : (
-        refs.map((ref, index) => (
-          <Fragment key={ref.rank}>
-            {index > 0 && <span aria-hidden>{index === refs.length - 1 ? "and" : ","}</span>}
-            {badge(ref)}
-          </Fragment>
-        ))
-      )}
+      <span>{refs.length === 1 ? "Also checks cause" : "Also checks causes"}</span>
+      <CauseNumbers refs={refs} />
     </p>
   );
 }
 
-// A next check: its step (numbered on across the tiers, and called a step so
-// it isn't taken for a cause's number), what to do, which causes it's for
-// (stepped back once they're all ruled out), and its spec and sources.
-function CheckItem({ check, step, causes }: { check: Check; step: number; causes: CauseRef[] }) {
-  const refs = (check.causes ?? []).flatMap((rank) => causes.filter((cause) => cause.rank === rank));
-  const moot = refs.length > 0 && refs.every((ref) => ref.status === "ruled_out");
+// A check's expected reading or spec: teal SPEC from the shop's manuals, or
+// amber and dashed VERIFY, never the manual spec's teal, so a number Claude
+// gave from general knowledge doesn't pass for one.
+function SpecChip({ check }: { check: Check }) {
+  if (check.expected) {
+    return check.unverifiedSpec ? (
+      <span
+        data-spec="unverified"
+        title="Not from your manuals — verify before you rely on it"
+        className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail"
+      >
+        <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-semibold tracking-wide text-trail/90 uppercase">
+          <WarningIcon className="size-3" />
+          Verify
+        </span>
+        <span className="min-w-0 break-words">{check.expected}</span>
+        <span className="sr-only">Not from your manuals — verify</span>
+      </span>
+    ) : (
+      <span
+        data-spec="manual"
+        className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow"
+      >
+        <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">Spec</span>
+        <span className="min-w-0 break-words">{check.expected}</span>
+      </span>
+    );
+  }
+  if (!check.unverifiedSpec) return null;
   return (
-    <li data-step={step} data-moot={moot || undefined} className={`flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3 ${moot ? "opacity-60" : ""}`}>
+    <span className="inline-flex items-center gap-1 rounded-full bg-trail/15 px-2 py-1 text-xs font-medium text-trail">
+      <WarningIcon className="size-3.5" />
+      Not from your manuals — verify
+    </span>
+  );
+}
+
+// A next check of a reply saved before checks said which causes they're
+// for, in its list of its own: its step (numbered on across the tiers, and
+// called a step so it isn't taken for a cause's number), what to do, and its
+// spec and sources.
+function CheckItem({ check, step }: { check: Check; step: number }) {
+  return (
+    <li data-step={step} className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
       <span className="flex w-8 shrink-0 flex-col items-center pt-0.5 leading-none" aria-label={`Step ${step}`}>
         <span aria-hidden className="text-[10px] font-semibold tracking-wide text-ink-muted uppercase">
           Step
@@ -593,41 +641,9 @@ function CheckItem({ check, step, causes }: { check: Check; step: number; causes
       </span>
       <div className="min-w-0 flex-1 space-y-2">
         <p className="text-sm leading-6 break-words text-ink">{check.action}</p>
-        {refs.length > 0 && <CheckCauses refs={refs} />}
-        {moot && <p className="text-xs text-ink-muted">{refs.length === 1 ? "That cause is" : "Those causes are"} ruled out.</p>}
         {(check.expected || check.unverifiedSpec || check.sources.length > 0) && (
           <div className="flex flex-wrap items-center gap-2">
-            {check.expected &&
-              (check.unverifiedSpec ? (
-                // Not from the shop's manuals: amber and dashed, never the
-                // manual spec's teal, so it doesn't pass for one.
-                <span
-                  data-spec="unverified"
-                  title="Not from your manuals — verify before you rely on it"
-                  className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail"
-                >
-                  <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-semibold tracking-wide text-trail/90 uppercase">
-                    <WarningIcon className="size-3" />
-                    Verify
-                  </span>
-                  <span className="min-w-0 break-words">{check.expected}</span>
-                  <span className="sr-only">Not from your manuals — verify</span>
-                </span>
-              ) : (
-                <span
-                  data-spec="manual"
-                  className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow"
-                >
-                  <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">Spec</span>
-                  <span className="min-w-0 break-words">{check.expected}</span>
-                </span>
-              ))}
-            {check.unverifiedSpec && !check.expected && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-trail/15 px-2 py-1 text-xs font-medium text-trail">
-                <WarningIcon className="size-3.5" />
-                Not from your manuals — verify
-              </span>
-            )}
+            <SpecChip check={check} />
             <SourceChips sources={check.sources} />
           </div>
         )}
@@ -637,16 +653,16 @@ function CheckItem({ check, step, causes }: { check: Check; step: number; causes
   );
 }
 
-// The next checks under their tiers (quick checks, tests, teardown), numbered
-// on across them; a reply saved before checks had tiers is one list in
-// Claude's order.
-function CheckList({ checks, causes }: { checks: Check[]; causes: CauseRef[] }) {
+// An older reply's next checks, listed on their own under their tiers
+// (quick checks, tests, teardown), numbered on across them; one saved
+// before checks had tiers is one list in Claude's order.
+function CheckList({ checks }: { checks: Check[] }) {
   const groups = checkGroups(checks);
   if (!groups) {
     return (
       <ol className="space-y-2">
         {checks.map((check, index) => (
-          <CheckItem key={index} check={check} step={index + 1} causes={causes} />
+          <CheckItem key={index} check={check} step={index + 1} />
         ))}
       </ol>
     );
@@ -666,13 +682,141 @@ function CheckList({ checks, causes }: { checks: Check[]; causes: CauseRef[] }) 
             </h3>
             <ol start={items[0].step} className="space-y-2">
               {items.map((item) => (
-                <CheckItem key={item.step} check={item.check} step={item.step} causes={causes} />
+                <CheckItem key={item.step} check={item.check} step={item.step} />
               ))}
             </ol>
           </section>
         );
       })}
     </div>
+  );
+}
+
+// A step's tier as a small tag at the start of it (the cause's own effort
+// marks, and one word), so the quick ones stand out without a header per
+// tier. Quiet and square-cornered: the round chips here are buttons and
+// links.
+function TierTag({ tier }: { tier: Effort }) {
+  const Icon = EFFORT_ICONS[tier];
+  const label = EFFORT_LABELS[tier];
+  return (
+    <span
+      data-tier-tag={tier}
+      title={`${label.heading}: ${label.detail}`}
+      className="mr-1.5 inline-flex h-5 items-center gap-1 rounded bg-white/[0.07] px-1.5 align-middle text-[11px] leading-none font-medium text-ink/80"
+    >
+      <Icon className="size-3" />
+      {label.step}
+    </span>
+  );
+}
+
+// One step of a cause's "How to check", or of Start here: its number in the
+// card (a list's "1." rather than a square, so it isn't taken for a
+// cause's number), its tier, what to do, then in one row that wraps (so a
+// short step takes one line) its spec, sources, the other causes it also
+// settles, and pictures of the pages it cites that the card doesn't show
+// already (small, at the row's end; under it in the full-screen sheet).
+function StepItem({
+  step,
+  number,
+  refs,
+  large,
+  shownPages = [],
+}: {
+  step: CauseStep<Check>;
+  number: number;
+  refs: CauseRef[];
+  large: boolean;
+  shownPages?: SourceView[];
+}) {
+  const { check, tier, also } = step;
+  const alsoRefs = also.flatMap((rank) => refs.filter((ref) => ref.rank === rank));
+  const shown = new Set(manualPages(shownPages).map((page) => `${page.manualId}:${page.page}`));
+  const pages = manualPages(check.sources).filter((page) => !shown.has(`${page.manualId}:${page.page}`));
+  // The number hangs off the action's first line (wherever the row centres
+  // it beside a chip), in the step's left margin.
+  return (
+    <li data-cause-step={number} data-step-tier={tier ?? undefined} className="pl-6">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+        <p className="relative min-w-0 text-sm leading-6 break-words text-ink">
+          <span aria-hidden data-step-number className="absolute top-0 -left-6 w-4 text-right font-mono text-xs leading-6 text-ink-muted">
+            {number}.
+          </span>
+          {tier && <TierTag tier={tier} />}
+          {check.action}
+        </p>
+        <SpecChip check={check} />
+        <SourceChips sources={check.sources} />
+        {alsoRefs.length > 0 && <AlsoChecks refs={alsoRefs} />}
+        {pages.length > 0 && <PageThumbs sources={pages} size={large ? "small" : "inline"} className={large ? "basis-full" : "ml-auto gap-1.5"} />}
+      </div>
+    </li>
+  );
+}
+
+// An open cause's own steps, quickest first, under its why line and chips;
+// or, when no check settles it yet, a way to ask Claude for one (the
+// question goes in the message box, to send or change).
+function HowToCheck({
+  rank,
+  steps,
+  refs,
+  large,
+  shownPages,
+  onAsk,
+}: {
+  rank: number;
+  steps: CauseStep<Check>[];
+  refs: CauseRef[];
+  large: boolean;
+  // The pages the cause's own pictures show already.
+  shownPages: SourceView[];
+  onAsk?: () => void;
+}) {
+  if (steps.length === 0) {
+    return (
+      <div data-no-check className="flex min-h-11 flex-wrap items-center gap-x-3 border-t border-white/[0.06] pt-1">
+        <p className="text-xs leading-5 text-ink-muted">No check from Claude yet</p>
+        {onAsk && (
+          <button type="button" data-ask-how onClick={onAsk} className={`${smallButtonClass} -mx-2 border-transparent px-2 text-glow/90 hover:text-glow hover:underline`}>
+            Ask how to check
+          </button>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div data-how-to-check className="border-t border-white/[0.06] pt-2">
+      <h3 className="text-[11px] leading-4 font-semibold tracking-wide text-ink-muted uppercase">How to check</h3>
+      <ol aria-label={`How to check cause ${rank}`} className="mt-1.5 space-y-2.5">
+        {steps.map((step, index) => (
+          <StepItem key={index} step={step} number={index + 1} refs={refs} large={large} shownPages={shownPages} />
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+// "Start here": the checks for no cause in particular (stored codes, the
+// battery's charge), quickest first, before cause 1.
+function StartHere({ steps, refs, hasCauses }: { steps: CauseStep<Check>[]; refs: CauseRef[]; hasCauses: boolean }) {
+  return (
+    <section data-start-here aria-label="Start here" className="mb-2 rounded-lg border border-white/10 bg-forest-950/40 p-3">
+      <h3 className="flex flex-wrap items-center gap-x-1.5 text-sm leading-5">
+        <ChecksIcon className="size-4 text-ink-muted" />
+        <span className="font-semibold text-ink">Start here</span>
+        <span aria-hidden className="text-ink-muted max-sm:hidden">
+          ·
+        </span>
+        <span className="text-ink-muted max-sm:basis-full max-sm:pl-[1.375rem]">{hasCauses ? "covers every cause, quickest first" : "quickest first"}</span>
+      </h3>
+      <ol className="mt-2 space-y-2.5">
+        {steps.map((step, index) => (
+          <StepItem key={index} step={step} number={index + 1} refs={refs} large={false} />
+        ))}
+      </ol>
+    </section>
   );
 }
 
@@ -820,20 +964,52 @@ function inSight(element: Element) {
   return rect.top >= top - 1 && rect.bottom <= bottom + 1;
 }
 
+// What scrolls an element: beside the chat, the diagnosis pane; otherwise
+// (null) the page.
+function scrollerOf(element: Element) {
+  const pane = document.getElementById("diagnosis-pane");
+  return pane?.contains(element) && getComputedStyle(pane).overflowY !== "visible" ? pane : null;
+}
+
 // Where an element is on screen now, and a way to put it back there after
-// what's above it changes height: the page (or, beside the chat, the
+// what's around it changes height: the page (or, beside the chat, the
 // diagnosis pane) scrolls by however far it moved. The browser's own scroll
 // anchoring can't be left to it: it may hold on to a cause that just moved.
-function holdOnScreen(element: Element | null) {
+// When a cause near the end of the list folds up (ruled out, its steps
+// gone), a page scrolled to its end gets shorter and the browser pulls it
+// down: the element's column is padded at its foot for the difference, so
+// it can be scrolled back, until that padding is out of sight.
+function holdOnScreen(element: HTMLElement | null) {
   if (!element) return () => {};
   const top = element.getBoundingClientRect().top;
   return () => {
     const moved = element.getBoundingClientRect().top - top;
     if (Math.abs(moved) < 1) return;
-    const pane = document.getElementById("diagnosis-pane");
-    if (pane?.contains(element) && pane.scrollHeight > pane.clientHeight) pane.scrollBy(0, moved);
+    const pane = scrollerOf(element);
+    const room = pane
+      ? pane.scrollHeight - pane.clientHeight - pane.scrollTop
+      : document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
+    if (moved > room && element.parentElement) padFoot(element.parentElement, moved - room, pane);
+    if (pane) pane.scrollBy(0, moved);
     else window.scrollBy(0, moved);
   };
+}
+
+// Extra room at the foot of a column (see holdOnScreen), taken away once
+// it's scrolled out of sight below, when nothing on screen moves for it.
+function padFoot(column: HTMLElement, extra: number, pane: HTMLElement | null) {
+  const before = parseFloat(column.style.paddingBottom) || 0;
+  column.style.paddingBottom = `${before + Math.ceil(extra)}px`;
+  if (before > 0) return;
+  const scroller = pane ?? window;
+  const release = () => {
+    const padding = parseFloat(column.style.paddingBottom) || 0;
+    const bottom = pane ? pane.getBoundingClientRect().bottom : window.innerHeight;
+    if (column.isConnected && padding > 0 && column.getBoundingClientRect().bottom - padding < bottom) return;
+    column.style.paddingBottom = "";
+    scroller.removeEventListener("scroll", release);
+  };
+  scroller.addEventListener("scroll", release, { passive: true });
 }
 
 export function CausesPanel({
@@ -844,6 +1020,7 @@ export function CausesPanel({
   busy,
   afterCauses,
   onConversation,
+  onAsk,
 }: {
   conversation: ConversationView;
   reply: DiagnosisReply | null;
@@ -854,6 +1031,9 @@ export function CausesPanel({
   busy: boolean;
   afterCauses?: ReactNode;
   onConversation: (update: Partial<ConversationView>) => void;
+  // Puts a question for Claude in the message box, unsent (a cause's "Ask
+  // how to check"); none while the conversation is full.
+  onAsk?: (question: string) => void;
 }) {
   const [pending, setPending] = useState<number | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -871,6 +1051,13 @@ export function CausesPanel({
   // Confirmed first, then open, ruled-out ones at the bottom; Claude's
   // order within each.
   const ordered = [...rows].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || a.index - b.index);
+  const refs: CauseRef[] = rows.map((row) => ({ rank: row.index + 1, title: row.cause.title }));
+  // Each open cause's checks in its card, and the ones for no cause in
+  // particular first; null for a reply whose checks don't say which causes
+  // they're for, which keeps its own Next checks list.
+  const plan = reply ? causeSteps(reply.nextChecks, rows) : null;
+  const stepsOf = (row: CauseRow) => plan?.byCause.get(row.index + 1) ?? null;
+  const askFor = (row: CauseRow) => (onAsk ? () => onAsk(howToCheckQuestion(row.index + 1, row.cause.title)) : undefined);
 
   async function mark(index: number, verdict: CauseVerdict, viaKeyboard: boolean) {
     if (!replyTurnId) return;
@@ -935,26 +1122,39 @@ export function CausesPanel({
     ...citedBy(null).map((source): [string, string] => [source.manualId, source.title]),
   ]);
 
-  // A system's causes, each with pictures of the manual pages it cites, in
-  // the full-screen view.
+  // A system's causes, each with its steps and pictures of the manual pages
+  // it cites, in the full-screen view. Asking how to check one closes the
+  // view, so the message box is there to see.
   function sheet(system: DrawnSystem) {
     const mine = ordered.filter((row) => row.system === system);
     if (mine.length === 0) return <p className="text-sm text-ink-muted">No causes point here.</p>;
     return (
       <div className="space-y-4">
         <ol className="space-y-2">
-          {mine.map((row) => (
-            <CauseItem
-              key={`${row.cause.title}-${row.index}`}
-              row={row}
-              highlight={false}
-              pending={pending === row.index}
-              onMark={(verdict, viaKeyboard) => void mark(row.index, verdict, viaKeyboard)}
-              onSelectZone={() => {}}
-              onHoverZone={() => {}}
-              pictures="large"
-            />
-          ))}
+          {mine.map((row) => {
+            const ask = askFor(row);
+            return (
+              <CauseItem
+                key={`${row.cause.title}-${row.index}`}
+                row={row}
+                highlight={false}
+                pending={pending === row.index}
+                onMark={(verdict, viaKeyboard) => void mark(row.index, verdict, viaKeyboard)}
+                onSelectZone={() => {}}
+                onHoverZone={() => {}}
+                steps={stepsOf(row)}
+                refs={refs}
+                onAsk={
+                  ask &&
+                  (() => {
+                    closeExamine();
+                    ask();
+                  })
+                }
+                pictures="large"
+              />
+            );
+          })}
         </ol>
         {message && (
           <p role="status" className="text-sm text-trail">
@@ -965,8 +1165,8 @@ export function CausesPanel({
     );
   }
 
-  // Wide screens: the causes and checks, and beside them the unit, its
-  // safety notes and the manual pictures. Narrower: the unit and safety
+  // Wide screens: the causes with their checks, and beside them the unit,
+  // its safety notes and the manual pictures. Narrower: the unit and safety
   // above the causes.
   return (
     <ManualPictures titles={titles}>
@@ -1024,6 +1224,7 @@ export function CausesPanel({
 
         <div className="space-y-4 xl:col-start-1 xl:row-start-1">
           <Section id="likely-causes" label="Likely causes" icon={<CausesIcon />} count={rows.length > 0 ? rows.length : undefined}>
+            {plan && plan.general.length > 0 && <StartHere steps={plan.general} refs={refs} hasCauses={rows.length > 0} />}
             {!reply || reply.likelyCauses.length === 0 ? (
               <p className="text-sm leading-6 text-ink-muted">
                 {reply ? "None yet. Tell Claude more about what the unit is doing." : "Claude's list shows here after its first reply."}
@@ -1039,6 +1240,9 @@ export function CausesPanel({
                     onMark={(verdict, viaKeyboard) => void mark(row.index, verdict, viaKeyboard)}
                     onSelectZone={(system) => selectZone(system, "list")}
                     onHoverZone={setHovered}
+                    steps={stepsOf(row)}
+                    refs={refs}
+                    onAsk={askFor(row)}
                   />
                 ))}
               </ol>
@@ -1053,9 +1257,11 @@ export function CausesPanel({
 
           {afterCauses}
 
-          {reply && reply.nextChecks.length > 0 && (
+          {/* A reply saved before checks said which causes they're for:
+              its checks as a list of their own, as they always were. */}
+          {reply && !plan && reply.nextChecks.length > 0 && (
             <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
-              <CheckList checks={reply.nextChecks} causes={rows.map((row) => ({ rank: row.index + 1, title: row.cause.title, status: row.status }))} />
+              <CheckList checks={reply.nextChecks} />
             </Section>
           )}
 

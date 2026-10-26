@@ -6,6 +6,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent,
 
 import { Badge, Notice, PageHeading } from "@/components/app/ui";
 import { inputBaseClass, labelClass, primaryLinkClass } from "@/components/hud";
+import { addAsk } from "@/lib/diagnose-cause-steps";
 import {
   DIAGNOSE_LIMITS,
   activityCounts,
@@ -954,16 +955,36 @@ export function DiagnoseChat({
     });
   }
 
+  // The message box, focused at the end of what's in it and in view.
+  function focusBox() {
+    const field = box.current;
+    if (!field) return;
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+    field.scrollIntoView({ block: "nearest" });
+  }
+
   // One of Claude's questions, quoted into the reply box to answer.
   function quote(question: string) {
     setDraft((old) => addQuote(old, question));
-    requestAnimationFrame(() => {
-      const field = box.current;
-      if (!field) return;
-      field.focus();
-      field.setSelectionRange(field.value.length, field.value.length);
-      field.scrollIntoView({ block: "nearest" });
-    });
+    requestAnimationFrame(focusBox);
+  }
+
+  // A question for Claude from the diagnosis ("How do I check cause 2, …?"),
+  // put in the message box to send or change, never sent from here. On a
+  // tablet or phone the box is behind the Chat tab, so that opens. From the
+  // full-screen view the page behind is still inert for a moment while the
+  // view closes: the box is focused once it can be.
+  function ask(question: string) {
+    setDraft((old) => addAsk(old, question));
+    const tabbed = (document.querySelector("[data-tabbar]")?.getBoundingClientRect().height ?? 0) > 0;
+    if (tabbed) setTab("chat");
+    let frames = 30;
+    const focusWhenFree = () => {
+      if (box.current?.closest("[inert]") && frames-- > 0) requestAnimationFrame(focusWhenFree);
+      else focusBox();
+    };
+    requestAnimationFrame(focusWhenFree);
   }
 
   function upsertTurn(turn: TurnView) {
@@ -1308,6 +1329,7 @@ export function DiagnoseChat({
             ) : null
           }
           onConversation={(update) => setConversation((old) => (old ? { ...old, ...update } : old))}
+          onAsk={conversation.full ? undefined : ask}
         />
       </aside>
     </div>

@@ -56,12 +56,13 @@ export type CauseStatus = (typeof CAUSE_STATUSES)[number];
 export const EFFORTS = ["quick", "test", "teardown"] as const;
 export type Effort = (typeof EFFORTS)[number];
 
-// The tiers' headers over the next checks, and how a cause says what it
-// takes to rule it in or out.
-export const EFFORT_LABELS: Record<Effort, { heading: string; detail: string; cause: string }> = {
-  quick: { heading: "Quick checks", detail: "minutes, no tools", cause: "Quick to rule out" },
-  test: { heading: "Tests", detail: "meter or scan tool", cause: "Needs a test" },
-  teardown: { heading: "Teardown", detail: "parts off", cause: "Needs teardown" },
+// The tiers' headers over an older reply's list of next checks, the short
+// tag on each of a cause's steps, and how a cause says what it takes to rule
+// it in or out.
+export const EFFORT_LABELS: Record<Effort, { heading: string; detail: string; step: string; cause: string }> = {
+  quick: { heading: "Quick checks", detail: "minutes, no tools", step: "Quick", cause: "Quick to rule out" },
+  test: { heading: "Tests", detail: "meter or scan tool", step: "Test", cause: "Needs a test" },
+  teardown: { heading: "Teardown", detail: "parts off", step: "Teardown", cause: "Needs teardown" },
 };
 
 // Where a piece of advice comes from, after the server has checked it: a
@@ -92,8 +93,10 @@ export type Check = {
   tier?: Effort;
   action: string;
   // The likely causes it confirms or rules out, by their numbers in the
-  // list (1 is the first; the drawing's callouts carry the same numbers).
-  // Replies saved before checks carried it don't have it.
+  // list (1 is the first; the drawing's callouts carry the same numbers):
+  // it's shown in each of their cards, and an empty list (a check for no
+  // cause in particular) under "Start here". Replies saved before checks
+  // carried it don't have it: their checks show as a list of their own.
   causes?: number[];
   // Expected values and specs ("0.6-0.8 ohms primary"); blank when none.
   expected: string;
@@ -464,9 +467,11 @@ export function listedEffort(value: unknown): Effort | null {
   return null;
 }
 
-// The next checks as the screen lists them: under their tiers, quick
-// first, numbered on across the tiers (step). Null for a reply saved before
-// checks had tiers, which is one list in Claude's order.
+// The next checks of a reply saved before checks carried causes, as the
+// screen lists them on their own: under their tiers, quick first, numbered
+// on across the tiers (step). Null for a reply saved before checks had
+// tiers, which is one list in Claude's order. (A newer reply's checks go in
+// its causes' cards: see diagnose-cause-steps.)
 export function checkGroups<T extends { tier?: Effort }>(checks: T[]) {
   if (checks.length === 0 || !checks.every((check) => check.tier)) return null;
   const tiers = EFFORTS.map((effort) => checks.filter((check) => check.tier === effort));
@@ -533,8 +538,10 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
   causes.forEach((cause, index) => {
     if (cause.title) rankOf.set(index + 1, likelyCauses.indexOf(cause) + 1);
   });
+  // Every open cause gets at least one check of its own (of up to ten
+  // causes), and there can be general ones besides.
   const nextChecks: Check[] = (Array.isArray(value.next_checks) ? value.next_checks : [])
-    .slice(0, 10)
+    .slice(0, 16)
     .map((item) => {
       const check = (item ?? {}) as Record<string, unknown>;
       const checked = checkSources(check.sources, seen);

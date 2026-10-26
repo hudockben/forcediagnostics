@@ -2310,8 +2310,8 @@ describe("VINs, lookups and searches after review", () => {
       type: "array",
       items: { type: "integer" },
       description:
-        "The numbers of the likely causes this check confirms or rules out (1 is the first in likely_causes), or an empty list for a check that isn't about one.",
+        "The number of every likely cause this check confirms or rules out (1 is the first in likely_causes); the tech sees it under each of them. An empty list only for a check that isn't about any one cause (stored codes, the battery's state of charge), which is shown first, as \"Start here\".",
     });
-    assert.match(SYSTEM_PROMPT, /Give each check its tier and the numbers of the causes it rules in or out/);
+    assert.match(SYSTEM_PROMPT, /put on each check the number of every cause it settles/);
   });
 });

@@ -24,7 +24,7 @@ How the work usually goes:
 
 - Identify the unit first. When the tech gives a model number (it's on the frame or VIN plate, like Z19VDE99AM), a VIN, or a year and model, call find_unit_manuals so your searches go to that unit's manuals. If nothing matches, ask for the model number, or carry on with the vehicle line or the whole library and say so.
 - Look things up before you give specs or procedures: search for the fault code itself, the system involved and the test's name as a manual would put it ("ignition coil resistance", "fuel pressure test"), then read the pages that look right. Procedures often run onto the next page.
-- Rank the likely causes by how likely they are: that's the diagnosis. Order the next checks by effort, the way an experienced tech works, so the quick fixes get ruled in or out first: quick checks (minutes, no tools or teardown: a visual inspection, connectors, loose or damaged sensors, wiring, fuses, grounds, fluid levels, stored codes), then tests (a meter, pressure gauge, scan tool or Digital Wrench, or a road test), then teardown (panels, covers or parts off, swapping parts). Within a tier, put the most useful check first. A two-minute check of a somewhat less likely cause comes before a likely one that needs teardown. Give each check its tier and the numbers of the causes it rules in or out, and each cause how much work it takes to confirm or rule out (check_effort), with the same three values.
+- Rank the likely causes by how likely they are: that's the diagnosis. The next checks are the steps that confirm or rule out those causes: the tech sees each cause with its own checks under it, so give every open cause at least one check, the quickest one that settles it first, and put on each check the number of every cause it settles. Give a check an empty list of causes only when it isn't about any one cause (pulling stored codes, the battery's state of charge): those are shown first, as "Start here". Order the next checks by effort, the way an experienced tech works, so the quick fixes get ruled in or out first: quick checks (minutes, no tools or teardown: a visual inspection, connectors, loose or damaged sensors, wiring, fuses, grounds, fluid levels, stored codes), then tests (a meter, pressure gauge, scan tool or Digital Wrench, or a road test), then teardown (panels, covers or parts off, swapping parts). Within a tier, put the most useful check first. A two-minute check of a somewhat less likely cause comes before a likely one that needs teardown. Give each check its tier, and each cause how much work it takes to confirm or rule out (check_effort), with the same three values.
 - If one missing detail would change what you'd recommend (hours or miles, exactly when the symptom shows up, recent work or aftermarket parts), ask for that one detail rather than guessing. Don't ask for things that wouldn't change your advice.
 - Be honest when sources disagree, or when the manuals you can reach don't cover something: say it wasn't found and where the tech might look. Don't fill a spec in from memory, and never make up part numbers, specifications or bulletin numbers.
 - Mention safety where it matters: fuel and fuel pressure, hot exhaust, batteries and charging, lifting and supporting the machine, rotating parts.
@@ -174,7 +174,8 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
         },
         next_checks: {
           type: "array",
-          description: "What to check next, in the order to do it: quick checks, then tests, then teardown; within a tier, the most useful first.",
+          description:
+            "The steps that confirm or rule out the likely causes, at least one for every open cause (the quickest that settles it first), in the order to do them: quick checks, then tests, then teardown; within a tier, the most useful first.",
           items: {
             type: "object",
             properties: {
@@ -184,7 +185,7 @@ const CUSTOM_TOOLS: Anthropic.Beta.Messages.BetaTool[] = [
                 type: "array",
                 items: { type: "integer" },
                 description:
-                  "The numbers of the likely causes this check confirms or rules out (1 is the first in likely_causes), or an empty list for a check that isn't about one.",
+                  "The number of every likely cause this check confirms or rules out (1 is the first in likely_causes); the tech sees it under each of them. An empty list only for a check that isn't about any one cause (stored codes, the battery's state of charge), which is shown first, as \"Start here\".",
               },
               expected: {
                 type: "string",
