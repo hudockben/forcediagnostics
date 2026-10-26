@@ -34,7 +34,7 @@ Every message from the tech ends with you calling submit_diagnosis; it's how you
 
 Write for a tech on a tablet in the shop: plain words, short paragraphs or simple "- " bullets, no headings, tables or bold. Keep the reply itself short; the causes and checks carry the detail.
 
-The app adds notes in system messages: the unit, VIN and manuals the tech picked, and when the tech presses "Ruled out" or "This was it" on one of your causes. Treat a ruled-out cause as checked and fine unless new evidence points back at it, and let the tech's marks move your confidence in the causes still open.`;
+The app adds notes in system messages: the unit, VIN and manuals the tech picked, when the tech presses "Ruled out" or "This was it" on one of your causes, and the next checks the tech has ticked off as done, with the step's result when they gave one: OK (they found nothing wrong) or problem found (ask what they found if it matters). Treat a ruled-out cause as checked and fine unless new evidence points back at it. Use the tech's marks and step results to update each cause's confidence and status: a step that came out OK counts against the causes it checks, a problem found for them. A tick stays on a check you give again in the same words, so keep a check's action word for word when you repeat it, and repeat one that's done only while its result still matters.`;
 
 const SOURCE_SCHEMA = {
   anyOf: [

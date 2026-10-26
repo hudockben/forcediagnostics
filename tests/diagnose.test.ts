@@ -21,11 +21,13 @@ import { streamFromClaude } from "../src/lib/claude";
 import { attemptCounters, diagnosisConversations, diagnosisTurns, shops, users } from "../src/db/schema";
 import {
   STALE_AFTER_MS,
+  carryOver,
   changeUnit,
   getConversation,
   isProblem,
   listConversations,
   markCause,
+  markStep,
   monthStats,
   prepareTurn,
   requestStop,
@@ -70,6 +72,7 @@ import {
   type SeenSources,
   type StreamEvent,
 } from "../src/lib/diagnose-rules";
+import { stepStateOf, stepStates } from "../src/lib/diagnose-step-checks";
 import { findUnitManuals, previewVin, readScopedPage, searchScopedPages, suggestUnits, unitVehicle } from "../src/lib/diagnose-tools";
 import { countMatchesElsewhere, isCodeTerm, listReadyManuals, modelFilterWords } from "../src/lib/library";
 import { vinCheckDigit, vinDisagreement } from "../src/lib/vin";
@@ -2313,5 +2316,201 @@ describe("VINs, lookups and searches after review", () => {
         "The number of every likely cause this check confirms or rules out (1 is the first in likely_causes); the tech sees it under each of them. An empty list only for a check that isn't about any one cause (stored codes, the battery's state of charge), which is shown first, as \"Start here\".",
     });
     assert.match(SYSTEM_PROMPT, /put on each check the number of every cause it settles/);
+  });
+});
+
+describe("ticking off checks", () => {
+  // Their own techs, so the hourly allowance of the others isn't touched.
+  let techS: CurrentUser;
+  let techS2: CurrentUser;
+  const WATER = "Water in the speed sensor connector";
+  const CHAFE = "Harness chafed at the frame";
+  const cause = (title: string, confidence: number) => ({
+    title,
+    system: "electrical",
+    confidence,
+    likelihood: confidence >= 60 ? "high" : "medium",
+    based_on: ["tech_report"],
+    why: "Fits a speedo that drops out over bumps.",
+    status: "open",
+    check_effort: "quick",
+    sources: [{ type: "general" }],
+  });
+  const quick = (action: string, causes: number[]) => ({ tier: "quick", action, causes, expected: "", sources: [{ type: "general" }] });
+  // The app's note in a turn's first request (after the tech's text).
+  const noteOf = (params: RequestParams) => {
+    const last = params.messages.at(-1)!;
+    return last.role === "system" ? JSON.stringify(last.content) : "";
+  };
+  const brief = (entries: { index: number; done: boolean; result: string | null; sentInSeq: number | null }[]) =>
+    entries.map((entry) => [entry.index, entry.done, entry.result, entry.sentInSeq]);
+
+  before(async () => {
+    techS = await createUser(techA.shop, "tech", "Sid");
+    techS2 = await createUser(techA.shop, "tech", "Tao");
+  });
+
+  test("a tick, its result and taking it back are saved for every device; Claude hears what changed with the next message, once; a tick stays on a check Claude gives again", async () => {
+    const first = await startTurn(techS, { start: { message: "Speedo drops out over bumps" } }, [
+      () =>
+        message(
+          [
+            submit({
+              likely_causes: [cause(WATER, 70), cause(CHAFE, 35)],
+              next_checks: [
+                quick("Read the stored codes on the gauge.", []),
+                quick("Wiggle the sensor harness while watching the speedo.", [1, 2]),
+                quick("Unplug the sensor connector and look for water.", [1]),
+              ],
+            }),
+          ],
+          "tool_use",
+        ),
+    ]);
+    const conversationId = first.conversation.id;
+    const turnId = first.turn.id;
+    assert.deepEqual(first.conversation.stepChecks, []);
+    const tick = (user: CurrentUser, index: number, done: boolean, result: "ok" | "problem" | null = null) =>
+      markStep(user, { conversationId, turnId, index, done, result });
+
+    // The wiggle test, done; then OK from the other tech's tablet: the
+    // entry Claude hasn't heard is replaced.
+    let marked = await tick(techS, 1, true);
+    assert.ok("stepChecks" in marked, JSON.stringify(marked));
+    assert.equal(marked.stepChecks.length, 1);
+    const [entry] = marked.stepChecks;
+    assert.deepEqual(
+      { turnId: entry.turnId, seq: entry.seq, index: entry.index, action: entry.action, causes: entry.causes, done: entry.done, result: entry.result, userName: entry.userName, sentInSeq: entry.sentInSeq },
+      { turnId, seq: 1, index: 1, action: "Wiggle the sensor harness while watching the speedo.", causes: [WATER, CHAFE], done: true, result: null, userName: "Sid", sentInSeq: null },
+    );
+    marked = await tick(techS2, 1, true, "ok");
+    assert.ok("stepChecks" in marked);
+    assert.deepEqual(brief(marked.stepChecks), [[1, true, "ok", null]]);
+    assert.equal(marked.stepChecks[0].userName, "Tao");
+    // A problem found on the connector; the codes ticked and taken back
+    // before Claude heard: nothing left of them.
+    await tick(techS, 2, true, "problem");
+    await tick(techS, 0, true);
+    marked = await tick(techS, 0, false);
+    assert.ok("stepChecks" in marked);
+    assert.deepEqual(brief(marked.stepChecks), [
+      [1, true, "ok", null],
+      [2, true, "problem", null],
+    ]);
+    // A result without the tick is no result.
+    marked = await tick(techS, 0, false, "ok");
+    assert.ok("stepChecks" in marked && marked.stepChecks.length === 2);
+    // The office PC sees what the bay tablet saved.
+    const elsewhere = await getConversation(techS2, conversationId);
+    assert.deepEqual(elsewhere!.conversation.stepChecks, marked.stepChecks);
+    // A step that isn't there, a choice that isn't one, another shop.
+    assert.ok("error" in (await tick(techS, 3, true)));
+    assert.ok("error" in (await markStep(techS, { conversationId, turnId, index: 1, done: true, result: "maybe" as "ok" })));
+    assert.ok("error" in (await markStep(techB, { conversationId, turnId, index: 1, done: true, result: null })));
+
+    // The next message: Claude hears the wiggle test OK and the connector's
+    // problem, each with the causes it's for, and nothing of the codes.
+    const second = await startTurn(techS, { conversationId, text: "Done those two." }, [
+      (params) => {
+        const note = JSON.parse(noteOf(params))[0].text as string;
+        assert.equal(
+          note,
+          "Since your last reply the tech checked:\n" +
+            `- “Wiggle the sensor harness while watching the speedo.” (for causes “${WATER}” and “${CHAFE}”): OK (found nothing wrong)\n` +
+            `- “Unplug the sensor connector and look for water.” (for cause “${WATER}”): problem found`,
+        );
+        // Claude gives the wiggle test again, its words a little tidied.
+        return message(
+          [submit({ likely_causes: [cause(WATER, 85), cause(CHAFE, 20)], next_checks: [quick("wiggle the sensor harness, while watching the speedo", [2]), quick("Dry the connector and fit dielectric grease.", [1])] })],
+          "tool_use",
+        );
+      },
+    ]);
+    assert.equal(second.turn.status, "done", second.turn.error ?? "");
+    const [heard] = await systemDb.select().from(diagnosisConversations).where(eq(diagnosisConversations.id, conversationId));
+    assert.deepEqual(brief(heard.stepChecks), [
+      [1, true, "ok", 2],
+      [2, true, "problem", 2],
+    ]);
+    // The check Claude gave again still shows done, OK; the new one isn't.
+    const states = stepStates(heard.stepChecks);
+    const [wiggle, dry] = second.turn.reply!.nextChecks;
+    assert.deepEqual(stepStateOf(states, wiggle.action), { done: true, result: "ok" });
+    assert.deepEqual(stepStateOf(states, dry.action), { done: false, result: null });
+    // Carried on into a new diagnosis, the checks say what was found.
+    const carried = await carryOver(techS, conversationId);
+    assert.match(carried!.text, /Checks that were next:\n- wiggle the sensor harness, while watching the speedo \(done: OK\)\n- Dry the connector and fit dielectric grease\.$/);
+
+    // Once Claude has heard, a change is a new entry; putting it back as
+    // Claude heard it leaves no change; taking the tick back is an entry.
+    const turn2 = second.turn.id;
+    const tick2 = (index: number, done: boolean, result: "ok" | "problem" | null = null) =>
+      markStep(techS, { conversationId, turnId: turn2, index, done, result });
+    marked = await tick2(0, true, "problem");
+    assert.ok("stepChecks" in marked && marked.stepChecks.length === 3 && marked.stepChecks[2].sentInSeq === null);
+    marked = await tick2(0, true, "ok");
+    assert.ok("stepChecks" in marked);
+    assert.deepEqual(brief(marked.stepChecks), [
+      [1, true, "ok", 2],
+      [2, true, "problem", 2],
+    ]);
+    marked = await tick2(0, false);
+    assert.ok("stepChecks" in marked);
+    assert.deepEqual(brief(marked.stepChecks).at(-1), [0, false, null, null]);
+    // (Its index is in the second reply; its words are the first's check's.)
+    assert.equal(stepStateOf(stepStates(marked.stepChecks), "Wiggle the sensor harness while watching the speedo.").done, false);
+
+    const third = await startTurn(techS, { conversationId, text: "Hang on, not the wiggle." }, [
+      (params) => {
+        const note = JSON.parse(noteOf(params))[0].text as string;
+        assert.equal(note, "Since your last reply the tech checked:\n- “wiggle the sensor harness, while watching the speedo” (for cause “Harness chafed at the frame”): unticked (not done after all)");
+        return message([submit({ likely_causes: [cause(WATER, 85)], next_checks: [quick("Dry the connector and fit dielectric grease.", [1])] })], "tool_use");
+      },
+    ]);
+    assert.equal(third.turn.status, "done", third.turn.error ?? "");
+    // The message after hears nothing more about them.
+    const fourth = await startTurn(techS, { conversationId, text: "Greased it." }, [
+      (params) => {
+        assert.doesNotMatch(noteOf(params), /the tech checked/);
+        return message([submit({})], "tool_use");
+      },
+    ]);
+    assert.equal(fourth.turn.status, "done", fourth.turn.error ?? "");
+    const [after] = await systemDb.select().from(diagnosisConversations).where(eq(diagnosisConversations.id, conversationId));
+    assert.ok(after.stepChecks.every((item) => item.sentInSeq !== null), JSON.stringify(after.stepChecks));
+  });
+
+  test("a tick taken back while Claude is answering isn't lost: the ticks on their way to Claude stay, and Claude hears the change with the message after", async () => {
+    const first = await startTurn(techS, { start: { message: "Speedo drops out" } }, [
+      () => message([submit({ likely_causes: [cause(WATER, 70)], next_checks: [quick("Unplug the sensor connector and look for water.", [1])] })], "tool_use"),
+    ]);
+    const conversationId = first.conversation.id;
+    const ticked = await markStep(techS, { conversationId, turnId: first.turn.id, index: 0, done: true, result: "ok" });
+    assert.ok("stepChecks" in ticked);
+    const prepared = await prepareTurn(techS, { conversationId, text: "Connector's dry." });
+    assert.ok(!isProblem(prepared));
+    assert.match(prepared.notes.join("\n"), /look for water\.” \(for cause “Water in the speed sensor connector”\): OK/);
+    // While Claude works on it, the tech takes the tick back: kept after it.
+    const undone = await markStep(techS2, { conversationId, turnId: first.turn.id, index: 0, done: false, result: null });
+    assert.ok("stepChecks" in undone);
+    assert.deepEqual(brief(undone.stepChecks), [
+      [0, true, "ok", null],
+      [0, false, null, null],
+    ]);
+    const fake = fakeClaude([() => message([submit({})], "tool_use")]);
+    const outcome = await runTurn(prepared, { client: fake.client, emit: () => {} });
+    assert.equal(outcome.turn.status, "done");
+    assert.deepEqual(brief(outcome.conversation.stepChecks), [
+      [0, true, "ok", 2],
+      [0, false, null, null],
+    ]);
+    const next = await startTurn(techS, { conversationId, text: "Next?" }, [
+      (params) => {
+        assert.match(noteOf(params), /look for water\.” \(for cause “Water in the speed sensor connector”\): unticked \(not done after all\)/);
+        return message([submit({})], "tool_use");
+      },
+    ]);
+    assert.equal(next.turn.status, "done");
+    assert.deepEqual(brief(next.conversation.stepChecks).map((item) => item[3]), [2, 3]);
   });
 });

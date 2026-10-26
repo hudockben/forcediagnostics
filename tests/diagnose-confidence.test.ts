@@ -248,7 +248,7 @@ describe("the prompt and submit_diagnosis ask for a confidence", () => {
     assert.match(SYSTEM_PROMPT, /Say in based_on what the number rests on/);
     assert.match(SYSTEM_PROMPT, /Work it out again with every reply from what's new \(a check that came out fine or found a problem, a cause the tech ruled out, a new symptom or code\)/);
     assert.match(SYSTEM_PROMPT, /with each one's confidence and status/);
-    assert.match(SYSTEM_PROMPT, /let the tech's marks move your confidence in the causes still open/);
+    assert.match(SYSTEM_PROMPT, /Use the tech's marks and step results to update each cause's confidence and status/);
     const list = buildRequest({ messages: [], webSearch: false }).tools as Anthropic.Beta.Messages.BetaTool[];
     const causes = (list.find((tool) => tool.name === TOOL_NAMES.submit)!.input_schema as Schema).properties!.likely_causes;
     assert.match(String(causes.description), /most likely first \(by confidence\)/);

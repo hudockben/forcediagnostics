@@ -30,6 +30,7 @@ import {
   type FeedbackEntry,
   type ProgressStep,
   type SeenSources,
+  type StepCheckEntry,
   type TurnStatus,
   type TurnUsage,
 } from "../lib/diagnose-rules";
@@ -709,6 +710,9 @@ export const diagnosisConversations = pgTable(
     } | null>(),
     // Every "Ruled out" / "This was it" press, in order.
     feedback: jsonb("feedback").$type<FeedbackEntry[]>().notNull().default([]),
+    // Every tick on one of Claude's checks (done, and OK or a problem found),
+    // in order: what the bay tablet and the office PC both show.
+    stepChecks: jsonb("step_checks").$type<StepCheckEntry[]>().notNull().default([]),
     // App notes for Claude's next message (a unit changed by the tech, say),
     // cleared once a message carrying them finishes.
     pendingNotes: jsonb("pending_notes").$type<string[]>().notNull().default([]),
@@ -741,7 +745,8 @@ export const diagnosisConversations = pgTable(
       withCheck: sql`${t.shopId} = ${currentShopId}`,
     }),
     // Which columns can change is set by the grants in
-    // drizzle/0019_diagnosis_grants.sql and 0023_diagnosis_vin_grants.sql.
+    // drizzle/0019_diagnosis_grants.sql, 0023_diagnosis_vin_grants.sql and
+    // 0025_diagnosis_step_checks_grants.sql.
     pgPolicy("diagnosis_conversations_update_own_shop", {
       for: "update",
       to: appUser,

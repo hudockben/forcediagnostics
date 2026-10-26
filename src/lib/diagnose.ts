@@ -29,10 +29,13 @@ import {
   type ProgressStep,
   type ScopeView,
   type SeenSources,
+  type StepCheckEntry,
+  type StepResult,
   type StreamEvent,
   type TurnUsage,
   type TurnView,
 } from "@/lib/diagnose-rules";
+import { applyStepCheck, stepNotes, stepStateOf, stepStates } from "@/lib/diagnose-step-checks";
 import {
   describeScope,
   findUnitManuals,
@@ -50,7 +53,8 @@ import type { CurrentUser } from "@/lib/session";
 import { VIN_LENGTH, checkVin, vinMatchesModelNumber, vinModelCode, vinYears } from "@/lib/vin";
 
 // Diagnose's conversations: starting one, each tech message (a turn) and
-// Claude's work on it, the tech's feedback on causes, and the shop's usage.
+// Claude's work on it, the tech's feedback on causes and ticks on checks, and
+// the shop's usage.
 // Callers check diagnostics.work first; everything here runs inside withShop
 // for the user's own shop.
 
@@ -134,6 +138,7 @@ function toConversationView(
     model,
     scope,
     feedback: conversation.feedback,
+    stepChecks: conversation.stepChecks,
     outcome: conversation.outcome ? { title: conversation.outcome.title, seq: conversation.outcome.seq } : null,
     techMessages: conversation.techMessages,
     full: fullReason(conversation),
@@ -311,8 +316,9 @@ type Prepared = {
   previousSeen: SeenSources;
   previousReply: DiagnosisReply | null;
   notes: string[];
-  // The feedback entries this turn tells Claude about.
+  // The feedback entries and ticks on checks this turn tells Claude about.
   feedbackSent: Set<string>;
+  stepsSent: Set<string>;
   removeWebSearch: boolean;
   conversationView: ConversationView;
   turnView: TurnView;
@@ -558,7 +564,7 @@ function openingMessages(techText: string, notes: string[], removeWebSearch: boo
   return opening;
 }
 
-const feedbackKey = (entry: FeedbackEntry) => `${entry.at}|${entry.turnId}|${entry.index}`;
+const feedbackKey = (entry: FeedbackEntry | StepCheckEntry) => `${entry.at}|${entry.turnId}|${entry.index}`;
 
 function feedbackNotes(feedback: FeedbackEntry[]) {
   const said: Record<CauseVerdict, string> = {
@@ -706,6 +712,10 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
         .returning();
     }
     const unsent = conversation.feedback.filter((entry) => entry.sentInSeq === null);
+    // Every tick Claude hasn't heard is marked heard once this message is
+    // done, also one the note leaves out (it put a check back as Claude
+    // last heard it).
+    const unsentSteps = conversation.stepChecks.filter((entry) => entry.sentInSeq === null);
     return {
       user,
       conversation,
@@ -713,8 +723,9 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
       history: done.flatMap((row) => (row.history ?? []) as MessageParam[]),
       previousSeen: mergeSeen(...done.map((row) => row.seen)),
       previousReply: done.at(-1)?.reply ?? null,
-      notes: [...conversation.pendingNotes, ...feedbackNotes(unsent)],
+      notes: [...conversation.pendingNotes, ...feedbackNotes(unsent), ...stepNotes(conversation.stepChecks)],
       feedbackSent: new Set(unsent.map(feedbackKey)),
+      stepsSent: new Set(unsentSteps.map(feedbackKey)),
       removeWebSearch: conversation.webSearch && !conversation.webSearchRemoved && !webSearchEnabled(),
     };
   });
@@ -960,6 +971,11 @@ async function saveOutcome(
               entry.sentInSeq === null && prepared.feedbackSent.has(feedbackKey(entry)) ? { ...entry, sentInSeq: turn.seq } : entry,
             )
           : current.feedback,
+        stepChecks: done
+          ? current.stepChecks.map((entry) =>
+              entry.sentInSeq === null && prepared.stepsSent.has(feedbackKey(entry)) ? { ...entry, sentInSeq: turn.seq } : entry,
+            )
+          : current.stepChecks,
       })
       .where(eq(diagnosisConversations.id, conversation.id))
       .returning();
@@ -1043,6 +1059,63 @@ export async function markCause(
       outcome: updated.outcome ? { title: updated.outcome.title, seq: updated.outcome.seq } : null,
       status: updated.status,
     };
+  });
+}
+
+// A tick on one of Claude's checks (done, with OK or a problem found if the
+// tech says), or taking one back (done false), as on the bay tablet or the
+// office PC. The same people can as can mark a cause. Claude hears about it
+// with the next message; the check is found by its turn and its place in
+// that turn's reply, and stands for every check with the same words.
+export async function markStep(
+  user: CurrentUser,
+  input: { conversationId: string; turnId: string; index: number; done: boolean; result: StepResult | null },
+): Promise<{ stepChecks: StepCheckEntry[] } | { error: string }> {
+  const { conversationId, turnId, index, done } = input;
+  if (!isUuid(conversationId) || !isUuid(turnId) || !Number.isInteger(index) || index < 0) {
+    return { error: "That step isn't there any more. Reload the page." };
+  }
+  const result = input.result ?? null;
+  if (typeof done !== "boolean" || (result !== null && result !== "ok" && result !== "problem")) return { error: "That isn't a choice." };
+  return withShop(user.shop.id, async (tx) => {
+    const [conversation] = await tx
+      .select()
+      .from(diagnosisConversations)
+      .where(eq(diagnosisConversations.id, conversationId))
+      .for("update");
+    const [turn] = await tx
+      .select({ seq: diagnosisTurns.seq, reply: diagnosisTurns.reply })
+      .from(diagnosisTurns)
+      .where(and(eq(diagnosisTurns.id, turnId), eq(diagnosisTurns.conversationId, conversationId)));
+    const check = turn?.reply?.nextChecks[index];
+    if (!conversation || !turn || !check) return { error: "That step isn't there any more. Reload the page." };
+    // A message with Claude now read the ticks it hasn't heard when it
+    // started (the conversation's row is locked while one starts).
+    const [running] = await tx
+      .select({ id: diagnosisTurns.id })
+      .from(diagnosisTurns)
+      .where(and(eq(diagnosisTurns.conversationId, conversationId), eq(diagnosisTurns.status, "running")))
+      .limit(1);
+    const causes = turn.reply!.likelyCauses;
+    const entry: StepCheckEntry = {
+      turnId,
+      seq: turn.seq,
+      index,
+      action: check.action,
+      causes: (check.causes ?? []).flatMap((rank) => (causes[rank - 1]?.title ? [causes[rank - 1].title] : [])),
+      done,
+      result: done ? result : null,
+      userId: user.id,
+      userName: user.name,
+      at: nowIso(),
+      sentInSeq: null,
+    };
+    const [updated] = await tx
+      .update(diagnosisConversations)
+      .set({ stepChecks: applyStepCheck(conversation.stepChecks, entry, { inFlight: Boolean(running) }) })
+      .where(eq(diagnosisConversations.id, conversationId))
+      .returning({ stepChecks: diagnosisConversations.stepChecks });
+    return { stepChecks: updated.stepChecks };
   });
 }
 
@@ -1146,7 +1219,8 @@ export async function changeUnit(
 }
 
 // What a new diagnosis starts with when it carries on from a full one: the
-// unit and a summary of where things stood.
+// unit and a summary of where things stood, with the checks the tech has
+// ticked off and what they found.
 export async function carryOver(user: CurrentUser, id: string) {
   const detail = await getConversation(user, id);
   if (!detail) return null;
@@ -1161,6 +1235,13 @@ export async function carryOver(user: CurrentUser, id: string) {
       ),
     );
   }
-  if (reply?.nextChecks.length) lines.push("Checks that were next:", ...reply.nextChecks.map((check) => `- ${check.action}`));
+  if (reply?.nextChecks.length) {
+    const ticks = stepStates(detail.conversation.stepChecks);
+    const said = (check: { action: string }) => {
+      const state = stepStateOf(ticks, check.action);
+      return state.done ? ` (done${state.result === "ok" ? ": OK" : state.result === "problem" ? ": problem found" : ""})` : "";
+    };
+    lines.push("Checks that were next:", ...reply.nextChecks.map((check) => `- ${check.action}${said(check)}`));
+  }
   return { id: detail.conversation.id, unit: detail.conversation.unit, text: lines.join("\n") };
 }

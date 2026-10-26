@@ -217,6 +217,30 @@ export type FeedbackEntry = {
   sentInSeq: number | null;
 };
 
+// The tech ticking off one of Claude's checks as done, with what it found if
+// they say: OK (nothing wrong) or a problem. done false is a tick taken back
+// after Claude heard it. A check is the same check from one reply to the
+// next when its words are (see stepKey in diagnose-step-checks), so a tick
+// stays on a check Claude gives again. Claude hears about it in the next
+// message (sentInSeq says which).
+export const STEP_RESULTS = ["ok", "problem"] as const;
+export type StepResult = (typeof STEP_RESULTS)[number];
+export type StepCheckEntry = {
+  turnId: string;
+  seq: number;
+  // The check's place in that turn's reply.nextChecks, and its words.
+  index: number;
+  action: string;
+  // The titles of the causes it's for, when it was ticked (for Claude's note).
+  causes: string[];
+  done: boolean;
+  result: StepResult | null;
+  userId: string;
+  userName: string;
+  at: string;
+  sentInSeq: number | null;
+};
+
 // Prices per million tokens. Cache writes cost the input price times the
 // multiplier for their TTL. Claude Opus 5 and Opus 4.8 are the models a
 // refusal fallback can hand a message to. Web search isn't priced in the API
@@ -707,6 +731,8 @@ export type ConversationView = {
   model: UnitSpec | null;
   scope: ScopeView;
   feedback: FeedbackEntry[];
+  // Every tick on a check, in order (the latest for a check is how it is).
+  stepChecks: StepCheckEntry[];
   outcome: { title: string; seq: number } | null;
   techMessages: number;
   // Why no more messages can be sent, if so.

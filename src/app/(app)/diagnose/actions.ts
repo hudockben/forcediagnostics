@@ -3,8 +3,17 @@
 import { DrizzleQueryError } from "drizzle-orm";
 import { unstable_rethrow } from "next/navigation";
 
-import { changeUnit, getConversation, markCause, requestStop, type ConversationDetail } from "@/lib/diagnose";
-import type { CauseVerdict, ConversationView, FeedbackEntry, ScopeView, UnitSuggestion, VinPreview } from "@/lib/diagnose-rules";
+import { changeUnit, getConversation, markCause, markStep, requestStop, type ConversationDetail } from "@/lib/diagnose";
+import type {
+  CauseVerdict,
+  ConversationView,
+  FeedbackEntry,
+  ScopeView,
+  StepCheckEntry,
+  StepResult,
+  UnitSuggestion,
+  VinPreview,
+} from "@/lib/diagnose-rules";
 import { previewVin, suggestUnits } from "@/lib/diagnose-tools";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { requireCapability } from "@/lib/session";
@@ -54,6 +63,27 @@ export async function markCauseAction(input: {
       turnId: String(input?.turnId ?? ""),
       index: Number(input?.index),
       verdict: input?.verdict,
+    }),
+  );
+}
+
+// A tick on one of Claude's checks, or taking one back: the same people can
+// as can mark a cause.
+export async function markStepAction(input: {
+  conversationId: string;
+  turnId: string;
+  index: number;
+  done: boolean;
+  result: StepResult | null;
+}): Promise<{ stepChecks: StepCheckEntry[] } | Failed> {
+  const user = await requireCapability("diagnostics.work");
+  return attempt("save the step", () =>
+    markStep(user, {
+      conversationId: String(input?.conversationId ?? ""),
+      turnId: String(input?.turnId ?? ""),
+      index: Number(input?.index),
+      done: input?.done,
+      result: input?.result ?? null,
     }),
   );
 }

@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
+import { Fragment, useId, useRef, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 
 import { causeSteps, howToCheckQuestion, specText, type CauseStep } from "@/lib/diagnose-cause-steps";
 import { SOURCE_LEVEL_LABELS, evidenceParts, sourceLevel, type SourceLevel } from "@/lib/diagnose-evidence";
 import {
   EFFORT_LABELS,
+  STEP_RESULTS,
   checkGroups,
   type Cause,
   type CauseVerdict,
@@ -17,8 +18,10 @@ import {
   type Effort,
   type FeedbackEntry,
   type SourceView,
+  type StepResult,
   type UnitSuggestion,
 } from "@/lib/diagnose-rules";
+import { markHint, nextStep, stepKey, stepStateOf, stepStates, type MarkHint, type StepState } from "@/lib/diagnose-step-checks";
 import {
   SYSTEM_LABELS,
   VEHICLE_DRAWING_NAMES,
@@ -35,7 +38,7 @@ import type { UnitSpec } from "@/lib/unit-vehicle";
 import { drawingFor } from "@/lib/unit-graphic/drawing";
 import { checkVin, vinDisagreement } from "@/lib/vin";
 
-import { changeUnitAction, markCauseAction } from "./actions";
+import { changeUnitAction, markCauseAction, markStepAction } from "./actions";
 import { ManualPictures, PageThumbs, manualPages } from "./manual-pictures";
 import {
   BookIcon,
@@ -61,8 +64,9 @@ import { useHistoryParam } from "./use-history-param";
 // tablet): the unit drawing with its suspect systems lit, safety notes,
 // Claude's likely causes (each with its confidence and what that rests on),
 // each with the checks that confirm or rule it out (with their specs and
-// where those come from) and the tech's "Ruled out" / "This was it", and
-// the unit and manuals in use.
+// where those come from, each ticked off as the tech does it, with what it
+// found) and the tech's "Ruled out" / "This was it", and the unit and
+// manuals in use.
 
 // --- Pieces ----------------------------------------------------------------------
 
@@ -237,38 +241,75 @@ function verdictFor(feedback: FeedbackEntry[], title: string): CauseVerdict | nu
 const markClass =
   "inline-flex min-h-11 items-center gap-1.5 rounded-lg border px-3 text-sm font-medium transition focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60";
 
+// What a cause's steps suggest, as a small tag on the button's top edge
+// (over the gap above the row, so it moves nothing), and for screen readers.
+const HINTS: Record<Exclude<MarkHint, null>, { tag: string; detail: string }> = {
+  ruled_out: { tag: "All steps OK", detail: "Every step came out OK" },
+  confirmed: { tag: "Problem found", detail: "A step found a problem" },
+};
+
 function MarkButton({
   mark,
   verdict,
   pending,
+  hint = null,
   onMark,
 }: {
   mark: "ruled_out" | "confirmed";
   verdict: CauseVerdict | null;
   pending: boolean;
+  // This button is what the cause's steps suggest (never pressed for the
+  // tech).
+  hint?: MarkHint;
   onMark: (verdict: CauseVerdict, viaKeyboard: boolean) => void;
 }) {
+  const hintId = useId();
   const pressed = verdict === mark;
+  const suggested = hint === mark && !pressed;
   const style =
     mark === "ruled_out"
       ? pressed
         ? "border-ink-muted/70 bg-white/10 text-ink"
-        : "border-white/15 text-ink-muted hover:text-ink"
+        : suggested
+          ? "border-white/45 text-ink hover:bg-white/[0.06]"
+          : "border-white/15 text-ink-muted hover:text-ink"
       : pressed
         ? "border-suspect/70 bg-suspect/20 text-[#ffd0d2]"
-        : "border-glow/30 text-glow hover:bg-glow/10";
+        : suggested
+          ? "border-glow/70 bg-glow/10 text-glow hover:bg-glow/15"
+          : "border-glow/30 text-glow hover:bg-glow/10";
   return (
-    <button
-      type="button"
-      data-mark={mark}
-      aria-pressed={pressed}
-      disabled={pending}
-      onClick={(event) => onMark(pressed ? "open" : mark, event.detail === 0)}
-      className={`${markClass} ${style}`}
-    >
-      {mark === "ruled_out" ? <CrossIcon /> : <CheckIcon />}
-      {mark === "ruled_out" ? "Ruled out" : "This was it"}
-    </button>
+    <>
+      <button
+        type="button"
+        data-mark={mark}
+        data-suggested={suggested || undefined}
+        aria-pressed={pressed}
+        aria-describedby={suggested ? hintId : undefined}
+        disabled={pending}
+        onClick={(event) => onMark(pressed ? "open" : mark, event.detail === 0)}
+        className={`${markClass} relative ${style}`}
+      >
+        {mark === "ruled_out" ? <CrossIcon /> : <CheckIcon />}
+        {mark === "ruled_out" ? "Ruled out" : "This was it"}
+        {suggested && (
+          <span
+            aria-hidden
+            data-mark-hint={mark}
+            className={`pointer-events-none absolute -top-2 left-2 rounded border bg-charcoal-800 px-1 text-[11px] leading-[14px] font-medium whitespace-nowrap ${
+              mark === "ruled_out" ? "border-white/25 text-ink" : "border-trail/60 text-trail"
+            }`}
+          >
+            {HINTS[mark].tag}
+          </span>
+        )}
+      </button>
+      {suggested && (
+        <span id={hintId} className="sr-only">
+          {HINTS[mark].detail}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -363,6 +404,7 @@ function CauseItem({
   onHoverZone,
   steps,
   refs,
+  ticks,
   onAsk,
   pictures = "inline",
 }: {
@@ -378,6 +420,8 @@ function CauseItem({
   steps: CauseStep<Check>[] | null;
   // The causes by their numbers, for a step that also checks others.
   refs: CauseRef[];
+  // The tech's ticks on the steps; none without a reply to tick them on.
+  ticks: Ticks | null;
   // Puts "How do I check cause N, …?" in the message box (not while the
   // conversation is full).
   onAsk?: () => void;
@@ -450,6 +494,9 @@ function CauseItem({
   // confirmed one says so already, and a ruled-out one has been checked).
   const confidence = status === "open" && typeof cause.confidence === "number" ? cause.confidence : undefined;
   const evidence = confidence !== undefined ? evidenceParts(cause) : [];
+  // What its steps suggest, by its buttons: every one OK, ruled out; a
+  // problem found, this was it. Only a suggestion: the tech decides.
+  const hint = status === "open" && steps && ticks ? markHint(steps.map((step) => ticks.stateOf(step.check))) : null;
   return (
     <li
       {...common}
@@ -502,15 +549,29 @@ function CauseItem({
             {/* The steps before the full-screen sheet's large pictures, so
                 what to do is in view first on a phone. */}
             {status === "open" && steps && (
-              <HowToCheck rank={index + 1} title={cause.title} steps={steps} refs={refs} large={pictures === "large"} shownPages={cause.sources} onAsk={onAsk} />
+              <HowToCheck
+                rank={index + 1}
+                title={cause.title}
+                steps={steps}
+                refs={refs}
+                ticks={ticks}
+                large={pictures === "large"}
+                shownPages={cause.sources}
+                onAsk={onAsk}
+              />
             )}
             {pictures === "large" && <PageThumbs sources={cause.sources} size="large" />}
           </div>
         </div>
       </div>
-      <div className="mt-2.5 flex flex-wrap items-center gap-2 pl-8" onClick={(event) => event.stopPropagation()}>
-        <MarkButton mark="ruled_out" verdict={verdict} pending={pending} onMark={onMark} />
-        <MarkButton mark="confirmed" verdict={verdict} pending={pending} onMark={onMark} />
+      {/* A little more room above the buttons when the steps can suggest
+          one, for the tag on its top edge. */}
+      <div
+        className={`${status === "open" && steps?.length && ticks ? "mt-4" : "mt-2.5"} flex flex-wrap items-center gap-2 pl-8`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <MarkButton mark="ruled_out" verdict={verdict} pending={pending} hint={hint} onMark={onMark} />
+        <MarkButton mark="confirmed" verdict={verdict} pending={pending} hint={hint} onMark={onMark} />
         {pictures === "inline" && <PageThumbs sources={cause.sources} size="inline" className="ml-auto gap-1.5" />}
         {status === "ruled_out" && (
           <button type="button" aria-expanded onClick={() => setExpanded(false)} className={`${markClass} border-transparent text-ink-muted hover:text-ink`}>
@@ -614,12 +675,12 @@ function CauseNumbers({ refs }: { refs: CauseRef[] }) {
 // "Also checks cause 3", or "causes 2 and 4": a check that settles several
 // causes is in each of their cards (each complete on its own), and says so,
 // so one test is done once.
-function AlsoChecks({ refs }: { refs: CauseRef[] }) {
+function AlsoChecks({ refs, className = "" }: { refs: CauseRef[]; className?: string }) {
   return (
     <p
       data-also-checks={refs.map((ref) => ref.rank).join(" ")}
       title={refs.map((ref) => `${ref.rank}. ${ref.title}`).join("\n")}
-      className="flex flex-wrap items-center gap-1.5 text-xs leading-5 text-ink-muted"
+      className={`flex flex-wrap items-center gap-1.5 text-xs leading-5 text-ink-muted ${className}`}
     >
       <span>{refs.length === 1 ? "Also checks cause" : "Also checks causes"}</span>
       <CauseNumbers refs={refs} />
@@ -633,7 +694,7 @@ function AlsoChecks({ refs }: { refs: CauseRef[] }) {
 // from memory doesn't pass for one). A spec carries it as its chip's label:
 // MANUAL, or VERIFY for one with no manual page behind it (from the web
 // too: the web is for patterns, not specs).
-function SpecChip({ check }: { check: Check }) {
+function SpecChip({ check, className = "" }: { check: Check; className?: string }) {
   if (!check.expected) return null;
   if (sourceLevel(check) === "manual") {
     return (
@@ -641,7 +702,7 @@ function SpecChip({ check }: { check: Check }) {
         data-spec="manual"
         data-source-level="manual"
         title={SOURCE_LEVEL_LABELS.manual.detail}
-        className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow"
+        className={`inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow ${className}`}
       >
         <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">{SOURCE_LEVEL_LABELS.manual.label}</span>
         <span className="min-w-0 break-words">{specText(check.expected)}</span>
@@ -654,7 +715,7 @@ function SpecChip({ check }: { check: Check }) {
       data-spec="unverified"
       data-source-level="general"
       title={`${web ? "From the web, not your manuals" : "Not from your manuals"} — verify before you rely on it`}
-      className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail"
+      className={`inline-flex max-w-full items-baseline gap-2 rounded-md border border-dashed border-trail/70 bg-trail/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-trail ${className}`}
     >
       <span className="flex shrink-0 items-center gap-1 self-center text-[10px] font-semibold tracking-wide text-trail/90 uppercase">
         <WarningIcon className="size-3" />
@@ -691,15 +752,114 @@ function LevelTag({ check }: { check: Check }) {
   );
 }
 
+// The tech's ticks on the reply's checks: how a check stands (as saved, or
+// as just tapped while that's saving), who ticked it, and ticking it (done,
+// with OK or a problem found, or taken back). A check that settles several
+// causes is one check: ticked in every card it's in.
+type Ticks = {
+  stateOf: (check: Check) => StepState;
+  byOf: (check: Check) => string | null;
+  tick: (check: Check, done: boolean, result: StepResult | null, from: HTMLElement) => void;
+};
+
+const resultClass =
+  "inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border px-2.5 text-sm font-medium transition focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
+
+const RESULT_LOOK: Record<StepResult, { label: string; pressed: string }> = {
+  ok: { label: "OK", pressed: "border-glow/60 bg-glow/15 text-glow" },
+  problem: { label: "Problem found", pressed: "border-trail/70 bg-trail/15 text-trail" },
+};
+
+// A step's tick at the end of its row, 44px for gloved hands: the box, and
+// once it's ticked, what the tech found, OK or Problem found (optional; tap
+// the one pressed to take it back). Those two keep their room while the
+// step isn't done, where "Next" marks the step to do next, so a tick moves
+// nothing on the list.
+function StepControls({
+  number,
+  state,
+  next,
+  by,
+  onTick,
+}: {
+  number: number;
+  state: StepState;
+  next: boolean;
+  by: string | null;
+  onTick: (done: boolean, result: StepResult | null, from: HTMLElement) => void;
+}) {
+  return (
+    <div data-step-controls className="ml-auto flex shrink-0 items-center gap-1.5">
+      <div
+        role={state.done ? "group" : undefined}
+        aria-label={state.done ? `What step ${number} found` : undefined}
+        className="relative flex items-center gap-1.5"
+      >
+        {STEP_RESULTS.map((result) => {
+          const pressed = state.result === result;
+          return (
+            <button
+              key={result}
+              type="button"
+              data-result={result}
+              aria-pressed={pressed}
+              disabled={!state.done}
+              onClick={(event) => onTick(true, pressed ? null : result, event.currentTarget)}
+              className={`${resultClass} ${state.done ? "" : "invisible"} ${
+                pressed ? RESULT_LOOK[result].pressed : "border-white/15 text-ink-muted hover:border-white/30 hover:text-ink"
+              }`}
+            >
+              {RESULT_LOOK[result].label}
+            </button>
+          );
+        })}
+        {next && !state.done && (
+          <span data-next-label className="absolute inset-y-0 right-0 flex items-center pr-0.5 text-[11px] font-semibold tracking-wide text-glow uppercase">
+            Next
+          </span>
+        )}
+      </div>
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={state.done}
+        aria-label={`Step ${number} done`}
+        title={state.done ? `Done${by ? ` · ${by}` : ""}` : "Mark done"}
+        data-step-check={state.done ? "done" : "open"}
+        onClick={(event) => onTick(!state.done, null, event.currentTarget)}
+        className="group grid size-11 shrink-0 place-items-center rounded-lg focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+      >
+        <span
+          className={`grid size-6 place-items-center rounded-md border-2 transition ${
+            state.done ? "border-glow bg-glow text-forest-950" : next ? "border-glow/80 group-hover:bg-glow/10" : "border-white/35 group-hover:border-white/60"
+          }`}
+        >
+          {state.done && <CheckIcon className="size-4 [stroke-width:2.25]" />}
+        </span>
+      </button>
+    </div>
+  );
+}
+
+// A done step reads as done, where it was: dimmed, its tick checked.
+const doneDim = (state: StepState | null) => `transition-opacity ${state?.done ? "opacity-55" : ""}`;
+
+// How a step stands, as data attributes for the end-to-end checks: done,
+// its result, and whether it's the one to do next.
+const tickData = (state: StepState | null, next: boolean) =>
+  state ? { "data-step-done": String(state.done), "data-step-result": state.result ?? undefined, "data-next-step": next || undefined } : {};
+
 // A next check of a reply saved before checks said which causes they're
 // for, in its list of its own: its step (numbered on across the tiers, and
 // called a step so it isn't taken for a cause's number), what to do, and its
 // spec and sources, with where they come from as a cause's steps have it
 // (so no General chip: its tag says so).
-function CheckItem({ check, step }: { check: Check; step: number }) {
+function CheckItem({ check, step, ticks, next }: { check: Check; step: number; ticks: Ticks | null; next: boolean }) {
   const sources = check.sources.filter((source) => source.type !== "general");
+  const state = ticks?.stateOf(check) ?? null;
+  const dim = doneDim(state);
   return (
-    <li data-step={step} className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
+    <li data-step={step} {...tickData(state, next)} className="flex gap-3 rounded-lg border border-white/5 bg-forest-950/40 p-3">
       <span className="flex w-8 shrink-0 flex-col items-center pt-0.5 leading-none" aria-label={`Step ${step}`}>
         <span aria-hidden className="text-[10px] font-semibold tracking-wide text-ink-muted uppercase">
           Step
@@ -709,17 +869,20 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
         </span>
       </span>
       <div className="min-w-0 flex-1 space-y-2">
-        <p className="text-sm leading-6 break-words text-ink">
+        <p className={`text-sm leading-6 break-words text-ink ${dim}`}>
           {check.action}
           <LevelTag check={check} />
         </p>
-        {(check.expected || sources.length > 0) && (
+        {(check.expected || sources.length > 0 || ticks) && (
           <div className="flex flex-wrap items-center gap-2">
-            <SpecChip check={check} />
-            <SourceChips sources={sources} />
+            <SpecChip check={check} className={dim} />
+            <SourceChips sources={sources} className={dim} />
+            {ticks && state && (
+              <StepControls number={step} state={state} next={next} by={ticks.byOf(check)} onTick={(done, result, from) => ticks.tick(check, done, result, from)} />
+            )}
           </div>
         )}
-        <PageThumbs sources={check.sources} />
+        <PageThumbs sources={check.sources} className={dim} />
       </div>
     </li>
   );
@@ -728,13 +891,16 @@ function CheckItem({ check, step }: { check: Check; step: number }) {
 // An older reply's next checks, listed on their own under their tiers
 // (quick checks, tests, teardown), numbered on across them; one saved
 // before checks had tiers is one list in Claude's order.
-function CheckList({ checks }: { checks: Check[] }) {
+function CheckList({ checks, ticks }: { checks: Check[]; ticks: Ticks | null }) {
   const groups = checkGroups(checks);
+  // The step to do next, in the order they're listed.
+  const shown = groups ? groups.flatMap((group) => group.items.map((item) => item.check)) : checks;
+  const next = ticks ? shown[nextStep(shown.map((check) => ticks.stateOf(check)))] : undefined;
   if (!groups) {
     return (
       <ol className="space-y-2">
         {checks.map((check, index) => (
-          <CheckItem key={index} check={check} step={index + 1} />
+          <CheckItem key={index} check={check} step={index + 1} ticks={ticks} next={check === next} />
         ))}
       </ol>
     );
@@ -754,7 +920,7 @@ function CheckList({ checks }: { checks: Check[] }) {
             </h3>
             <ol start={items[0].step} className="space-y-2">
               {items.map((item) => (
-                <CheckItem key={item.step} check={item.check} step={item.step} />
+                <CheckItem key={item.step} check={item.check} step={item.step} ticks={ticks} next={item.check === next} />
               ))}
             </ol>
           </section>
@@ -802,23 +968,31 @@ function StepItem({
   refs,
   large,
   shownPages = [],
+  ticks,
+  next,
 }: {
   step: CauseStep<Check>;
   number: number;
   refs: CauseRef[];
   large: boolean;
   shownPages?: SourceView[];
+  ticks: Ticks | null;
+  // The first in its list that isn't done.
+  next: boolean;
 }) {
   const { check, tier, also } = step;
   const alsoRefs = also.flatMap((rank) => refs.filter((ref) => ref.rank === rank));
   const shown = new Set(manualPages(shownPages).map((page) => `${page.manualId}:${page.page}`));
   const pages = manualPages(check.sources).filter((page) => !shown.has(`${page.manualId}:${page.page}`));
+  const state = ticks?.stateOf(check) ?? null;
+  const dim = doneDim(state);
   // The number hangs off the action's first line (wherever the row centres
-  // it beside a chip), in the step's left margin.
+  // it beside a chip), in the step's left margin. The tick is last in the
+  // row, at its right end (on a line of its own when the row is full).
   return (
-    <li data-cause-step={number} data-step-tier={tier ?? undefined} className="pl-6">
+    <li data-cause-step={number} data-step-tier={tier ?? undefined} {...tickData(state, next)} className="pl-6">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-        <p className="relative min-w-0 text-sm leading-6 break-words text-ink">
+        <p className={`relative min-w-0 text-sm leading-6 break-words text-ink ${dim}`}>
           <span aria-hidden data-step-number className="absolute top-0 -left-6 w-4 text-right font-mono text-xs leading-6 text-ink-muted">
             {number}.
           </span>
@@ -826,10 +1000,15 @@ function StepItem({
           {check.action}
           <LevelTag check={check} />
         </p>
-        <SpecChip check={check} />
-        <SourceChips sources={check.sources.filter((source) => source.type !== "general")} />
-        {alsoRefs.length > 0 && <AlsoChecks refs={alsoRefs} />}
-        {pages.length > 0 && <PageThumbs sources={pages} size={large ? "small" : "inline"} className={large ? "basis-full" : "ml-auto gap-1.5"} />}
+        <SpecChip check={check} className={dim} />
+        <SourceChips sources={check.sources.filter((source) => source.type !== "general")} className={dim} />
+        {alsoRefs.length > 0 && <AlsoChecks refs={alsoRefs} className={dim} />}
+        {pages.length > 0 && (
+          <PageThumbs sources={pages} size={large ? "small" : "inline"} className={`${large ? "basis-full" : ticks ? "gap-1.5" : "ml-auto gap-1.5"} ${dim}`} />
+        )}
+        {ticks && state && (
+          <StepControls number={number} state={state} next={next} by={ticks.byOf(check)} onTick={(done, result, from) => ticks.tick(check, done, result, from)} />
+        )}
       </div>
     </li>
   );
@@ -843,6 +1022,7 @@ function HowToCheck({
   title,
   steps,
   refs,
+  ticks,
   large,
   shownPages,
   onAsk,
@@ -851,11 +1031,13 @@ function HowToCheck({
   title: string;
   steps: CauseStep<Check>[];
   refs: CauseRef[];
+  ticks: Ticks | null;
   large: boolean;
   // The pages the cause's own pictures show already.
   shownPages: SourceView[];
   onAsk?: () => void;
 }) {
+  const next = ticks ? nextStep(steps.map((step) => ticks.stateOf(step.check))) : -1;
   if (steps.length === 0) {
     return (
       <div data-no-check className="flex min-h-11 flex-wrap items-center gap-x-3 border-t border-white/[0.06] pt-1">
@@ -883,7 +1065,7 @@ function HowToCheck({
       </p>
       <ol aria-label={`How to check cause ${rank}`} className="mt-1.5 space-y-2.5">
         {steps.map((step, index) => (
-          <StepItem key={index} step={step} number={index + 1} refs={refs} large={large} shownPages={shownPages} />
+          <StepItem key={index} step={step} number={index + 1} refs={refs} large={large} shownPages={shownPages} ticks={ticks} next={index === next} />
         ))}
       </ol>
     </div>
@@ -892,7 +1074,8 @@ function HowToCheck({
 
 // "Start here": the checks for no cause in particular (stored codes, the
 // battery's charge), quickest first, before cause 1.
-function StartHere({ steps, refs, hasCauses }: { steps: CauseStep<Check>[]; refs: CauseRef[]; hasCauses: boolean }) {
+function StartHere({ steps, refs, hasCauses, ticks }: { steps: CauseStep<Check>[]; refs: CauseRef[]; hasCauses: boolean; ticks: Ticks | null }) {
+  const next = ticks ? nextStep(steps.map((step) => ticks.stateOf(step.check))) : -1;
   return (
     <section data-start-here aria-label="Start here" className="mb-2 rounded-lg border border-white/10 bg-forest-950/40 p-3">
       <h3 className="flex flex-wrap items-center gap-x-1.5 text-sm leading-5">
@@ -905,7 +1088,7 @@ function StartHere({ steps, refs, hasCauses }: { steps: CauseStep<Check>[]; refs
       </h3>
       <ol className="mt-2 space-y-2.5">
         {steps.map((step, index) => (
-          <StepItem key={index} step={step} number={index + 1} refs={refs} large={false} />
+          <StepItem key={index} step={step} number={index + 1} refs={refs} large={false} ticks={ticks} next={index === next} />
         ))}
       </ol>
     </section>
@@ -1134,6 +1317,12 @@ export function CausesPanel({
   const [message, setMessage] = useState<string | null>(null);
   const [selected, setSelected] = useState<CauseSystem | null>(null);
   const [hovered, setHovered] = useState<CauseSystem | null>(null);
+  // Ticks the tech just tapped, by their checks' words, shown at once while
+  // they save (in order: the app sends one at a time); the saved copy takes
+  // over when the last one for a check comes back, and an error puts the
+  // check back as saved.
+  const [ticking, setTicking] = useState<Map<string, { state: StepState; request: number }>>(() => new Map());
+  const requests = useRef(0);
 
   const rows: CauseRow[] = (reply?.likelyCauses ?? []).map((cause, index) => ({
     cause,
@@ -1153,6 +1342,52 @@ export function CausesPanel({
   const plan = reply ? causeSteps(reply.nextChecks, rows) : null;
   const stepsOf = (row: CauseRow) => plan?.byCause.get(row.index + 1) ?? null;
   const askFor = (row: CauseRow) => (onAsk ? () => onAsk(howToCheckQuestion(row.index + 1, row.cause.title)) : undefined);
+
+  // How each check stands: the latest tick on a check with its words, from
+  // this reply or an earlier one, so a check Claude gives again stays ticked.
+  const saved = stepStates(conversation.stepChecks ?? []);
+  const stateOf = (check: Check): StepState => ticking.get(stepKey(check.action))?.state ?? stepStateOf(saved, check.action);
+  const ticks: Ticks | null =
+    reply && replyTurnId
+      ? {
+          stateOf,
+          byOf: (check) => saved.get(stepKey(check.action))?.userName ?? null,
+          tick: (check, done, result, from) => void tick(check, done, result, from),
+        }
+      : null;
+
+  // Ticks a step (or takes the tick back) at once, and saves it. The tapped
+  // control stays where it is on screen whatever changes around it (the
+  // note under the list that Claude will hear, say).
+  async function tick(check: Check, done: boolean, result: StepResult | null, from: HTMLElement) {
+    const index = reply?.nextChecks.indexOf(check) ?? -1;
+    if (!replyTurnId || index < 0) return;
+    const key = stepKey(check.action);
+    const request = ++requests.current;
+    const steady = (update: () => void) => {
+      const hold = from.isConnected ? holdOnScreen(from) : () => {};
+      flushSync(update);
+      hold();
+    };
+    steady(() => {
+      setMessage(null);
+      setTicking((old) => new Map(old).set(key, { state: { done, result: done ? result : null }, request }));
+    });
+    const outcome = await markStepAction({ conversationId: conversation.id, turnId: replyTurnId, index, done, result });
+    // Only the last tap on a check settles it; one before it is overtaken.
+    const settle = () =>
+      setTicking((old) => {
+        if (old.get(key)?.request !== request) return old;
+        const next = new Map(old);
+        next.delete(key);
+        return next;
+      });
+    steady(() => {
+      if ("error" in outcome) setMessage(outcome.error);
+      else onConversation({ stepChecks: outcome.stepChecks });
+      settle();
+    });
+  }
 
   async function mark(index: number, verdict: CauseVerdict, viaKeyboard: boolean) {
     if (!replyTurnId) return;
@@ -1197,7 +1432,15 @@ export function CausesPanel({
     });
   }
 
-  const unsent = conversation.feedback.filter((entry) => entry.sentInSeq === null).length;
+  // Presses and ticks Claude hasn't heard yet (counting ticks still saving),
+  // said under the last list on the screen: the causes, or an older reply's
+  // own list of checks below them, so the line coming never moves a list.
+  const unsent =
+    conversation.feedback.filter((entry) => entry.sentInSeq === null).length +
+    (conversation.stepChecks ?? []).filter((entry) => entry.sentInSeq === null).length +
+    ticking.size;
+  const heard = unsent > 0 ? <p className="mt-3 text-xs text-ink-muted">Claude hears about your marks with your next message.</p> : null;
+  const oldChecks = reply !== null && !plan && reply.nextChecks.length > 0;
   const active = hovered ?? selected;
 
   // The full-screen unit, in the address so Back closes it.
@@ -1239,6 +1482,7 @@ export function CausesPanel({
                 onHoverZone={() => {}}
                 steps={stepsOf(row)}
                 refs={refs}
+                ticks={ticks}
                 onAsk={
                   ask &&
                   (() => {
@@ -1319,7 +1563,7 @@ export function CausesPanel({
 
         <div className="space-y-4 xl:col-start-1 xl:row-start-1">
           <Section id="likely-causes" label="Likely causes" icon={<CausesIcon />} count={rows.length > 0 ? rows.length : undefined}>
-            {plan && plan.general.length > 0 && <StartHere steps={plan.general} refs={refs} hasCauses={rows.length > 0} />}
+            {plan && plan.general.length > 0 && <StartHere steps={plan.general} refs={refs} hasCauses={rows.length > 0} ticks={ticks} />}
             {!reply || reply.likelyCauses.length === 0 ? (
               <p className="text-sm leading-6 text-ink-muted">
                 {reply ? "None yet. Tell Claude more about what the unit is doing." : "Claude's list shows here after its first reply."}
@@ -1337,12 +1581,13 @@ export function CausesPanel({
                     onHoverZone={setHovered}
                     steps={stepsOf(row)}
                     refs={refs}
+                    ticks={ticks}
                     onAsk={askFor(row)}
                   />
                 ))}
               </ol>
             )}
-            {unsent > 0 && <p className="mt-3 text-xs text-ink-muted">Claude hears about your marks with your next message.</p>}
+            {!oldChecks && heard}
             {message && (
               <p role="status" className="mt-2 text-sm text-trail">
                 {message}
@@ -1354,9 +1599,10 @@ export function CausesPanel({
 
           {/* A reply saved before checks said which causes they're for:
               its checks as a list of their own, as they always were. */}
-          {reply && !plan && reply.nextChecks.length > 0 && (
+          {oldChecks && (
             <Section label="Next checks" icon={<ChecksIcon />} count={reply.nextChecks.length}>
-              <CheckList checks={reply.nextChecks} />
+              <CheckList checks={reply.nextChecks} ticks={ticks} />
+              {heard}
             </Section>
           )}
 
