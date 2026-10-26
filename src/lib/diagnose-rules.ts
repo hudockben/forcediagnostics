@@ -552,11 +552,11 @@ export function finalizeReply(input: unknown, seen: SeenSources): DiagnosisReply
         tier: listedEffort(check.tier) ?? inferEffort(action, expected),
         action,
         // Causes it's about, once each, in order; numbers that aren't a
-        // cause's are left out.
+        // cause's are left out. Every one of them is kept (as many as there
+        // are causes): the check shows in each of their cards.
         causes: [...new Set((Array.isArray(check.causes) ? check.causes : []).map((n) => rankOf.get(Number(n))))]
           .filter((n): n is number => n !== undefined)
-          .sort((a, b) => a - b)
-          .slice(0, 5),
+          .sort((a, b) => a - b),
         expected,
         sources: checked.sources,
         unverifiedSpec: expected !== "" && !checked.sources.some((source) => source.type === "manual"),

@@ -39,7 +39,6 @@ export type CauseStep<T> = {
 
 export type CauseSteps<T> = {
   // "Start here": the checks for no cause in particular, quickest first.
-  // None once a cause is confirmed (the work is done).
   general: CauseStep<T>[];
   // Each open cause's steps, by its number in the list, quickest first: an
   // empty list for an open cause no check settles yet. Ruled-out and
@@ -56,19 +55,23 @@ export function causeSteps<T extends { tier?: Effort; causes?: unknown }>(checks
   causes.forEach((cause, index) => {
     if (cause.status === "open") byCause.set(index + 1, []);
   });
-  const solved = causes.some((cause) => cause.status === "confirmed");
   const general: CauseStep<T>[] = [];
   for (const check of byEffort(checks)) {
     const tier = check.tier ?? null;
     const ranks = causeRanks(check, causes.length);
     if (ranks.length === 0) {
-      if (!solved) general.push({ check, tier, also: [] });
+      general.push({ check, tier, also: [] });
       continue;
     }
     for (const rank of ranks) byCause.get(rank)?.push({ check, tier, also: ranks.filter((other) => other !== rank && byCause.has(other)) });
   }
   return { general, byCause };
 }
+
+// A spec as its chip shows it: each number kept on one line with the word
+// after it ("5 V", "25 Nm"), so a narrow card never wraps a reading away
+// from its unit. For showing only: the stored text is as Claude gave it.
+export const specText = (expected: string) => expected.replace(/(\d)\s+(?=[A-Za-zΩµ°%])/g, "$1\u00a0");
 
 // What "Ask how to check" puts in the message box for a cause with no
 // check yet: "How do I check cause 2, Fouled or worn spark plugs?".

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Fragment, useState, type FocusEvent, type PointerEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 
-import { causeSteps, howToCheckQuestion, type CauseStep } from "@/lib/diagnose-cause-steps";
+import { causeSteps, howToCheckQuestion, specText, type CauseStep } from "@/lib/diagnose-cause-steps";
 import {
   EFFORT_LABELS,
   checkGroups,
@@ -464,10 +464,12 @@ function CauseItem({
               {/* Beside the system chip while there's room for one. */}
               <SourceChips sources={cause.sources} className="min-w-0 flex-1 basis-32" />
             </div>
-            {pictures === "large" && <PageThumbs sources={cause.sources} size="large" />}
+            {/* The steps before the full-screen sheet's large pictures, so
+                what to do is in view first on a phone. */}
             {status === "open" && steps && (
-              <HowToCheck rank={index + 1} steps={steps} refs={refs} large={pictures === "large"} shownPages={cause.sources} onAsk={onAsk} />
+              <HowToCheck rank={index + 1} title={cause.title} steps={steps} refs={refs} large={pictures === "large"} shownPages={cause.sources} onAsk={onAsk} />
             )}
+            {pictures === "large" && <PageThumbs sources={cause.sources} size="large" />}
           </div>
         </div>
       </div>
@@ -561,12 +563,15 @@ function UnitCard({
 type CauseRef = { rank: number; title: string };
 
 // Causes by their numbers, in the cause list's own small squares: "3", or
-// "2 and 4", "1, 2 and 4".
+// "2 and 4", "1, 2 and 4" (a comma hangs on the square before it).
 function CauseNumbers({ refs }: { refs: CauseRef[] }) {
   return refs.map((ref, index) => (
     <Fragment key={ref.rank}>
-      {index > 0 && <span>{index === refs.length - 1 ? "and" : ","}</span>}
-      <span className="inline-grid size-5 shrink-0 place-items-center rounded-md bg-white/5 font-mono text-[11px] text-ink-muted">{ref.rank}</span>
+      {index > 0 && index === refs.length - 1 && <span>and</span>}
+      <span className="inline-flex shrink-0 items-baseline">
+        <span className="inline-grid size-5 place-items-center rounded-md bg-white/5 font-mono text-[11px] text-ink-muted">{ref.rank}</span>
+        {index < refs.length - 2 && <span>,</span>}
+      </span>
     </Fragment>
   ));
 }
@@ -602,7 +607,7 @@ function SpecChip({ check }: { check: Check }) {
           <WarningIcon className="size-3" />
           Verify
         </span>
-        <span className="min-w-0 break-words">{check.expected}</span>
+        <span className="min-w-0 break-words">{specText(check.expected)}</span>
         <span className="sr-only">Not from your manuals — verify</span>
       </span>
     ) : (
@@ -611,7 +616,7 @@ function SpecChip({ check }: { check: Check }) {
         className="inline-flex max-w-full items-baseline gap-2 rounded-md border border-glow/45 bg-glow/10 px-2.5 py-1 font-mono text-sm font-semibold break-words text-glow"
       >
         <span className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">Spec</span>
-        <span className="min-w-0 break-words">{check.expected}</span>
+        <span className="min-w-0 break-words">{specText(check.expected)}</span>
       </span>
     );
   }
@@ -694,8 +699,8 @@ function CheckList({ checks }: { checks: Check[] }) {
 
 // A step's tier as a small tag at the start of it (the cause's own effort
 // marks, and one word), so the quick ones stand out without a header per
-// tier. Quiet and square-cornered: the round chips here are buttons and
-// links.
+// tier: a quick one brighter and bolder, as the causes' effort words are.
+// Square-cornered: the round chips here are buttons and links.
 function TierTag({ tier }: { tier: Effort }) {
   const Icon = EFFORT_ICONS[tier];
   const label = EFFORT_LABELS[tier];
@@ -703,7 +708,9 @@ function TierTag({ tier }: { tier: Effort }) {
     <span
       data-tier-tag={tier}
       title={`${label.heading}: ${label.detail}`}
-      className="mr-1.5 inline-flex h-5 items-center gap-1 rounded bg-white/[0.07] px-1.5 align-middle text-[11px] leading-none font-medium text-ink/80"
+      className={`mr-1.5 inline-flex h-5 items-center gap-1 rounded px-1.5 align-middle text-xs leading-none ${
+        tier === "quick" ? "bg-white/[0.12] font-semibold text-ink" : "bg-white/[0.07] font-medium text-ink/80"
+      }`}
     >
       <Icon className="size-3" />
       {label.step}
@@ -714,9 +721,12 @@ function TierTag({ tier }: { tier: Effort }) {
 // One step of a cause's "How to check", or of Start here: its number in the
 // card (a list's "1." rather than a square, so it isn't taken for a
 // cause's number), its tier, what to do, then in one row that wraps (so a
-// short step takes one line) its spec, sources, the other causes it also
-// settles, and pictures of the pages it cites that the card doesn't show
-// already (small, at the row's end; under it in the full-screen sheet).
+// short step takes one line) its spec, the manual pages and web pages it
+// cites, the other causes it also settles, and pictures of the pages that
+// the card doesn't show already (small, at the row's end; under it in the
+// full-screen sheet). No "General" chip: most steps would have one, a row
+// each, and it cites nothing (a spec from general knowledge says so in its
+// VERIFY chip; the cause's own chips still say where its idea came from).
 function StepItem({
   step,
   number,
@@ -747,7 +757,7 @@ function StepItem({
           {check.action}
         </p>
         <SpecChip check={check} />
-        <SourceChips sources={check.sources} />
+        <SourceChips sources={check.sources.filter((source) => source.type !== "general")} />
         {alsoRefs.length > 0 && <AlsoChecks refs={alsoRefs} />}
         {pages.length > 0 && <PageThumbs sources={pages} size={large ? "small" : "inline"} className={large ? "basis-full" : "ml-auto gap-1.5"} />}
       </div>
@@ -760,6 +770,7 @@ function StepItem({
 // question goes in the message box, to send or change).
 function HowToCheck({
   rank,
+  title,
   steps,
   refs,
   large,
@@ -767,6 +778,7 @@ function HowToCheck({
   onAsk,
 }: {
   rank: number;
+  title: string;
   steps: CauseStep<Check>[];
   refs: CauseRef[];
   large: boolean;
@@ -779,7 +791,13 @@ function HowToCheck({
       <div data-no-check className="flex min-h-11 flex-wrap items-center gap-x-3 border-t border-white/[0.06] pt-1">
         <p className="text-xs leading-5 text-ink-muted">No check from Claude yet</p>
         {onAsk && (
-          <button type="button" data-ask-how onClick={onAsk} className={`${smallButtonClass} -mx-2 border-transparent px-2 text-glow/90 hover:text-glow hover:underline`}>
+          <button
+            type="button"
+            data-ask-how
+            aria-label={`Ask how to check cause ${rank}: ${title}`}
+            onClick={onAsk}
+            className={`${smallButtonClass} -mx-2 border-transparent px-2 text-glow/90 hover:text-glow hover:underline`}
+          >
             Ask how to check
           </button>
         )}
@@ -788,7 +806,11 @@ function HowToCheck({
   }
   return (
     <div data-how-to-check className="border-t border-white/[0.06] pt-2">
-      <h3 className="text-[11px] leading-4 font-semibold tracking-wide text-ink-muted uppercase">How to check</h3>
+      {/* A label, not a heading: every card has one, and the list below is
+          named for its cause. */}
+      <p data-steps-label className="text-[11px] leading-4 font-semibold tracking-wide text-ink-muted uppercase">
+        How to check
+      </p>
       <ol aria-label={`How to check cause ${rank}`} className="mt-1.5 space-y-2.5">
         {steps.map((step, index) => (
           <StepItem key={index} step={step} number={index + 1} refs={refs} large={large} shownPages={shownPages} />
@@ -977,8 +999,10 @@ function scrollerOf(element: Element) {
 // anchoring can't be left to it: it may hold on to a cause that just moved.
 // When a cause near the end of the list folds up (ruled out, its steps
 // gone), a page scrolled to its end gets shorter and the browser pulls it
-// down: the element's column is padded at its foot for the difference, so
-// it can be scrolled back, until that padding is out of sight.
+// down: the panel is padded at its foot for the difference, so it can be
+// scrolled back, until that padding is out of sight. The panel, not the
+// causes' column: on a wide screen the unit's column beside it can be the
+// taller one, and then a longer causes column wouldn't lengthen the page.
 function holdOnScreen(element: HTMLElement | null) {
   if (!element) return () => {};
   const top = element.getBoundingClientRect().top;
@@ -989,24 +1013,25 @@ function holdOnScreen(element: HTMLElement | null) {
     const room = pane
       ? pane.scrollHeight - pane.clientHeight - pane.scrollTop
       : document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
-    if (moved > room && element.parentElement) padFoot(element.parentElement, moved - room, pane);
+    const panel = element.closest<HTMLElement>("[data-causes-panel]") ?? element.parentElement;
+    if (moved > room && panel) padFoot(panel, moved - room, pane);
     if (pane) pane.scrollBy(0, moved);
     else window.scrollBy(0, moved);
   };
 }
 
-// Extra room at the foot of a column (see holdOnScreen), taken away once
+// Extra room at the foot of the panel (see holdOnScreen), taken away once
 // it's scrolled out of sight below, when nothing on screen moves for it.
-function padFoot(column: HTMLElement, extra: number, pane: HTMLElement | null) {
-  const before = parseFloat(column.style.paddingBottom) || 0;
-  column.style.paddingBottom = `${before + Math.ceil(extra)}px`;
+function padFoot(panel: HTMLElement, extra: number, pane: HTMLElement | null) {
+  const before = parseFloat(panel.style.paddingBottom) || 0;
+  panel.style.paddingBottom = `${before + Math.ceil(extra)}px`;
   if (before > 0) return;
   const scroller = pane ?? window;
   const release = () => {
-    const padding = parseFloat(column.style.paddingBottom) || 0;
+    const padding = parseFloat(panel.style.paddingBottom) || 0;
     const bottom = pane ? pane.getBoundingClientRect().bottom : window.innerHeight;
-    if (column.isConnected && padding > 0 && column.getBoundingClientRect().bottom - padding < bottom) return;
-    column.style.paddingBottom = "";
+    if (panel.isConnected && padding > 0 && panel.getBoundingClientRect().bottom - padding < bottom) return;
+    panel.style.paddingBottom = "";
     scroller.removeEventListener("scroll", release);
   };
   scroller.addEventListener("scroll", release, { passive: true });
@@ -1170,7 +1195,7 @@ export function CausesPanel({
   // above the causes.
   return (
     <ManualPictures titles={titles}>
-      <div className="space-y-4 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] xl:items-start xl:gap-4 xl:space-y-0">
+      <div data-causes-panel className="space-y-4 xl:grid xl:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] xl:items-start xl:gap-4 xl:space-y-0">
         <div className="space-y-4 xl:sticky xl:top-0 xl:col-start-2 xl:row-start-1">
           {conversation.vehicle && (
             <UnitCard

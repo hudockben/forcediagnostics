@@ -8,7 +8,7 @@ import { describe, test } from "node:test";
 
 import type Anthropic from "@anthropic-ai/sdk";
 
-import { addAsk, causeRanks, causeSteps, checksHaveCauses, howToCheckQuestion } from "../src/lib/diagnose-cause-steps";
+import { addAsk, causeRanks, causeSteps, checksHaveCauses, howToCheckQuestion, specText } from "../src/lib/diagnose-cause-steps";
 import { SYSTEM_PROMPT, TOOL_NAMES, buildRequest } from "../src/lib/diagnose-prompt";
 import { addQuote, finalizeReply, type Check } from "../src/lib/diagnose-rules";
 import type { CauseState } from "../src/lib/diagnose-zones";
@@ -91,7 +91,7 @@ describe("each cause's steps", () => {
     assert.equal(shown.size, reply.nextChecks.length);
   });
 
-  test("ruled-out and confirmed causes show no steps; a check for them only goes, and Start here goes once one is confirmed", () => {
+  test("ruled-out and confirmed causes show no steps, and a check for them only goes; Start here stays", () => {
     const reply = speedo();
     const marked = (statuses: CauseState[]) => reply.likelyCauses.map((c, index) => ({ ...c, status: statuses[index] }));
     const ruledOut = causeSteps(reply.nextChecks, marked(["ruled_out", "open", "open", "open"]))!;
@@ -103,9 +103,12 @@ describe("each cause's steps", () => {
     const shown = [...ruledOut.general, ...[...ruledOut.byCause.values()].flat()].map((step) => step.check.action);
     assert.ok(!shown.some((action) => action.startsWith("Unplug") || action.startsWith("Look at")), JSON.stringify(shown));
     assert.equal(ruledOut.general.length, 2);
+    // Once one is confirmed, the causes still open keep their steps, and
+    // Start here its checks, as before.
     const solved = causeSteps(reply.nextChecks, marked(["confirmed", "open", "ruled_out", "open"]))!;
     assert.deepEqual([...solved.byCause.keys()], [2, 4]);
-    assert.deepEqual(solved.general, []);
+    assert.deepEqual(actions(solved.byCause.get(2)), ["Back-probe the", "Swap in"]);
+    assert.deepEqual(actions(solved.general), ["Read the", "Check the"]);
   });
 
   test("a reply saved before checks carried causes keeps its own list; one with no checks goes cause by cause", () => {
@@ -138,6 +141,30 @@ describe("each cause's steps", () => {
     assert.ok(many.nextChecks.every((c) => JSON.stringify(c.causes) === "[1,2]"));
     // Quick ones first, in Claude's order.
     assert.deepEqual(many.nextChecks.slice(0, 3).map((c) => c.action), ["Check 1", "Check 3", "Check 5"]);
+    // A check keeps every cause it settles, so it's in each of their cards.
+    const seven = finalizeReply(
+      {
+        reply: "x",
+        likely_causes: Array.from({ length: 7 }, (_, index) => cause(`Cause ${index + 1}`)),
+        next_checks: [check("quick", "Read the stored codes", [7, 6, 5, 4, 3, 2, 1])],
+        safety_notes: [],
+        questions_for_tech: [],
+      },
+      { pages: [], urls: [] },
+    );
+    assert.deepEqual(seven.nextChecks[0].causes, [1, 2, 3, 4, 5, 6, 7]);
+    const sevenSteps = causeSteps(seven.nextChecks, seven.likelyCauses)!;
+    assert.deepEqual(sevenSteps.byCause.get(7)!.map((step) => step.also), [[1, 2, 3, 4, 5, 6]]);
+  });
+
+  test("a spec keeps each number on one line with its unit", () => {
+    assert.equal(specText("Square wave, 0 to 5 V"), "Square wave, 0\u00a0to 5\u00a0V");
+    assert.equal(specText("0.6 to 0.8 ohms primary"), "0.6\u00a0to 0.8\u00a0ohms primary");
+    assert.equal(specText("25 Nm; 12.6 V or more; 90 °C; 5 %"), "25\u00a0Nm; 12.6\u00a0V or more; 90\u00a0°C; 5\u00a0%");
+    // Nothing else changes: two numbers, words, or none.
+    assert.equal(specText("1 2 3"), "1 2 3");
+    assert.equal(specText("Within spec"), "Within spec");
+    assert.equal(specText(""), "");
   });
 });
 
@@ -173,6 +200,10 @@ describe("the prompt and submit_diagnosis", () => {
     assert.match(SYSTEM_PROMPT, /an empty list of causes only when it isn't about any one cause \(pulling stored codes, the battery's state of charge\): those are shown first, as "Start here"/);
     // The tiers are still how the checks are ordered.
     assert.match(SYSTEM_PROMPT, /quick checks \(minutes, no tools or teardown.*\), then tests \(.*\), then teardown \(.*\)\. Within a tier, put the most useful check first\./);
+    // A cause's effort words agree with the steps beside them.
+    assert.match(SYSTEM_PROMPT, /a cause's check_effort is the tier of the quickest check you give for it/);
+    const effort = submitSchema().properties!.likely_causes.items!.properties!.check_effort;
+    assert.match(String(effort.description), /The tier of the quickest check you give for it\.$/);
     const checks = submitSchema().properties!.next_checks;
     assert.match(String(checks.description), /^The steps that confirm or rule out the likely causes, at least one for every open cause \(the quickest that settles it first\)/);
     assert.match(String(checks.description), /quick checks, then tests, then teardown/);
