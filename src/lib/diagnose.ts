@@ -44,6 +44,8 @@ import {
   unitMachine,
   type ManualScope,
 } from "@/lib/diagnose-tools";
+import { listSearchCondition } from "@/lib/diagnose-list";
+import { LIST_PAGE_SIZE, listPage, type ListPage } from "@/lib/diagnose-list-rules";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 import { cleanLibraryFilters, hasLibraryFilters, listReadyManuals } from "@/lib/library";
@@ -181,29 +183,106 @@ export type ConversationSummary = {
   lastTurn: TurnView["status"] | null;
 };
 
-// The shop's conversations, most recently used first.
-export async function listConversations(shopId: string, limit = 50): Promise<ConversationSummary[]> {
+const summaryColumns = {
+  id: diagnosisConversations.id,
+  title: diagnosisConversations.title,
+  unit: diagnosisConversations.unitLabel,
+  status: diagnosisConversations.status,
+  startedBy: users.name,
+  techMessages: diagnosisConversations.techMessages,
+  updatedAt: diagnosisConversations.updatedAt,
+  lastTurn: sql<TurnView["status"] | null>`(
+    select t.status from ${diagnosisTurns} t
+    where t.conversation_id = ${diagnosisConversations.id} order by t.seq desc limit 1
+  )`,
+};
+
+const toSummary = (row: Omit<ConversationSummary, "updatedAt"> & { updatedAt: Date }): ConversationSummary => ({
+  ...row,
+  updatedAt: row.updatedAt.toISOString(),
+});
+
+// What a search of the list looks through: the title (which holds the
+// complaint), the unit, its model number and VIN, and who started it.
+const SEARCHED = [
+  diagnosisConversations.title,
+  diagnosisConversations.unitLabel,
+  diagnosisConversations.unitModelNumber,
+  diagnosisConversations.unitVin,
+  users.name,
+];
+
+export type ConversationList = ListPage & {
+  items: ConversationSummary[];
+  // How many the search finds (or the shop has), on every page.
+  total: number;
+};
+
+// One page of the shop's conversations, most recently used first, or of
+// those a search finds (see src/lib/diagnose-list-rules.ts). A page past the
+// end gives the last one.
+export async function listConversations(
+  shopId: string,
+  { query = "", page = 1, perPage = LIST_PAGE_SIZE }: { query?: string; page?: number; perPage?: number } = {},
+): Promise<ConversationList> {
+  const where = listSearchCondition(query, SEARCHED);
   return withShop(shopId, async (tx) => {
     await failStaleTurns(tx);
-    const rows = await tx
-      .select({
-        id: diagnosisConversations.id,
-        title: diagnosisConversations.title,
-        unit: diagnosisConversations.unitLabel,
-        status: diagnosisConversations.status,
-        startedBy: users.name,
-        techMessages: diagnosisConversations.techMessages,
-        updatedAt: diagnosisConversations.updatedAt,
-        lastTurn: sql<TurnView["status"] | null>`(
-          select t.status from ${diagnosisTurns} t
-          where t.conversation_id = ${diagnosisConversations.id} order by t.seq desc limit 1
-        )`,
-      })
+    const [{ total }] = await tx
+      .select({ total: sql<number>`count(*)::int` })
       .from(diagnosisConversations)
       .innerJoin(users, eq(users.id, diagnosisConversations.userId))
-      .orderBy(desc(diagnosisConversations.updatedAt))
+      .where(where);
+    const at = listPage(total, page, perPage);
+    const rows =
+      total === 0
+        ? []
+        : await tx
+            .select(summaryColumns)
+            .from(diagnosisConversations)
+            .innerJoin(users, eq(users.id, diagnosisConversations.userId))
+            .where(where)
+            // The id keeps rows used at the same moment in one order, so
+            // none shows on two pages or on none.
+            .orderBy(desc(diagnosisConversations.updatedAt), desc(diagnosisConversations.id))
+            .limit(perPage)
+            .offset(at.offset);
+    return { ...at, total, items: rows.map(toSummary) };
+  });
+}
+
+// The open conversations this user started, most recently used first, for
+// Home.
+export async function listOwnOpenConversations(user: CurrentUser, limit = 4): Promise<ConversationSummary[]> {
+  return withShop(user.shop.id, async (tx) => {
+    await failStaleTurns(tx);
+    const rows = await tx
+      .select(summaryColumns)
+      .from(diagnosisConversations)
+      .innerJoin(users, eq(users.id, diagnosisConversations.userId))
+      .where(and(eq(diagnosisConversations.userId, user.id), eq(diagnosisConversations.status, "open")))
+      .orderBy(desc(diagnosisConversations.updatedAt), desc(diagnosisConversations.id))
       .limit(limit);
-    return rows.map((row) => ({ ...row, updatedAt: row.updatedAt.toISOString() }));
+    return rows.map(toSummary);
+  });
+}
+
+export type ShopGlance = { open: number; startedThisMonth: number; solvedThisMonth: number };
+
+// Home's strip for managers and admins: what's open across the shop, and
+// this month's started and solved counted as the This month card counts
+// them (see monthStats).
+export async function shopGlance(shopId: string): Promise<ShopGlance> {
+  return withShop(shopId, async (tx) => {
+    const month = sql`date_trunc('month', now())`;
+    const [row] = await tx
+      .select({
+        open: sql<number>`(count(*) filter (where ${diagnosisConversations.status} = 'open'))::int`,
+        started: sql<number>`(count(*) filter (where ${diagnosisConversations.createdAt} >= ${month}))::int`,
+        solved: sql<number>`(count(*) filter (where ${diagnosisConversations.createdAt} >= ${month} and ${diagnosisConversations.status} = 'solved'))::int`,
+      })
+      .from(diagnosisConversations);
+    return { open: row.open, startedThisMonth: row.started, solvedThisMonth: row.solved };
   });
 }
 

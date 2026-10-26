@@ -284,7 +284,7 @@ export async function resetStaffPassword(
   password: string,
 ): Promise<Result> {
   if (id === actor.id) {
-    return { error: "Use Change password on the Home tab for your own password." };
+    return { error: "Use Change password on your account page for your own password." };
   }
   const problem = checkPassword(password);
   if (problem) return { error: problem };

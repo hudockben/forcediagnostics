@@ -42,12 +42,18 @@ export async function AppHeader() {
     <HeaderFrame
       user={
         <div className="flex items-center gap-3">
-          <div className="text-right text-sm leading-5">
-            <p className="font-medium text-ink">{user.name}</p>
-            <p className="text-xs text-ink-muted">
+          {/* The person's own account page (password, PIN), which has no tab. */}
+          <Link
+            href="/account"
+            data-account-link
+            className="-my-1 rounded-lg px-2 py-1 text-right text-sm leading-5 transition hover:bg-white/5 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+          >
+            <span className="sr-only">Your account: </span>
+            <span className="block font-medium text-ink">{user.name}</span>
+            <span className="block text-xs text-ink-muted">
               {user.bay ? user.bay.deviceName : `${ROLE_LABELS[user.role]} · ${user.shop.name}`}
-            </p>
-          </div>
+            </span>
+          </Link>
           <SignOutButton compact switchUser={user.bay !== null} />
         </div>
       }

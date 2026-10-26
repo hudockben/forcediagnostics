@@ -151,7 +151,7 @@ function NewPasswordField({ label, onEdit }: { label: string; onEdit?: () => voi
         {generated ? (
           <>
             Generated <span className="font-mono text-ink">{generated}</span>. Save it, then give it
-            to them; they can change it on their Home tab.
+            to them; they can change it on their account page.
           </>
         ) : (
           `At least ${MIN_PASSWORD_LENGTH} characters.`

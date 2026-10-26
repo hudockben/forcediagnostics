@@ -248,7 +248,7 @@ export function BayPicker({
       {people.length === 0 ? (
         <p className="mt-4 text-sm leading-6 text-ink-muted">
           No one has a PIN yet. Sign in with your password on a computer or your phone, then set a PIN
-          on the Home tab.
+          on your account page (your name at the top).
         </p>
       ) : (
         <ul className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -270,7 +270,7 @@ export function BayPicker({
       )}
       <p className="mt-6 text-sm leading-6 text-ink-muted">
         No PIN yet, or locked out? Sign in at forcediagnostics.ai on a computer or your phone and set
-        your PIN on the Home tab. A manager can also unlock a locked PIN.
+        your PIN on your account page (your name at the top). A manager can also unlock a locked PIN.
       </p>
     </HudCard>
   );

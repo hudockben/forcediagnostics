@@ -4,7 +4,8 @@
 // web search blocks, the structured reply, append-only replay across
 // messages, refusal, max_tokens, pause_turn, API errors, step limits, the
 // time limit, usage and cost from usage.iterations, retries' cost), stuck
-// turns, rate limits, and that conversations stay inside their shop.
+// turns, rate limits, that conversations stay inside their shop, and the
+// Diagnose list's search and pages and Home's lists.
 // Needs DATABASE_URL pointing at a disposable Postgres database; run with
 // `npm test`, which migrates it first.
 import assert from "node:assert/strict";
@@ -26,12 +27,14 @@ import {
   getConversation,
   isProblem,
   listConversations,
+  listOwnOpenConversations,
   markCause,
   markStep,
   monthStats,
   prepareTurn,
   requestStop,
   runTurn,
+  shopGlance,
   type TurnRequest,
 } from "../src/lib/diagnose";
 import {
@@ -1391,7 +1394,7 @@ describe("limits and housekeeping", () => {
     assert.equal(await requestStop(techA, alive.id), true);
     assert.equal(await requestStop(techB, alive.id), false);
     await systemDb.update(diagnosisTurns).set({ status: "stopped" }).where(eq(diagnosisTurns.id, alive.id));
-    const list = await listConversations(techA.shop.id);
+    const list = (await listConversations(techA.shop.id, { perPage: 1000 })).items;
     assert.ok(list.some((item) => item.id === id && item.lastTurn === "stopped"));
   });
 
@@ -1498,7 +1501,7 @@ describe("Diagnose and shops", () => {
     const run = await startTurn(techA, { start: { message: "Shop A's" } }, [() => message([submit({})], "tool_use")]);
     const id = run.conversation.id;
     assert.equal(await getConversation(techB, id), null);
-    assert.ok(!(await listConversations(techB.shop.id)).some((item) => item.id === id));
+    assert.ok(!(await listConversations(techB.shop.id, { perPage: 1000 })).items.some((item) => item.id === id));
     const prepared = await prepareTurn(techB, { conversationId: id, text: "Sneaky" });
     assert.ok(isProblem(prepared) && prepared.status === 404);
     assert.ok("error" in (await markCause(techB, { conversationId: id, turnId: run.turn.id, index: 0, verdict: "confirmed" })));
@@ -2551,5 +2554,161 @@ describe("ticking off checks", () => {
     ]);
     assert.equal(next.turn.status, "done");
     assert.deepEqual(brief(next.conversation.stepChecks).map((item) => item[3]), [2, 3]);
+  });
+});
+
+describe("the Diagnose list and Home", () => {
+  let dale: CurrentUser;
+  let rae: CurrentUser;
+  let lou: CurrentUser;
+  let other: CurrentUser;
+  // Newest first, as the list shows them.
+  const titles: string[] = [];
+
+  before(async () => {
+    const shop = await createShop(`dl${suffix}`);
+    dale = await createUser(shop, "tech", "Dale Okafor");
+    rae = await createUser(shop, "tech", "Rae Lind");
+    lou = await createUser(shop, "manager", "Lou Grant");
+    other = await createUser(await createShop(`dm${suffix}`), "tech", "Dale Okafor");
+    const rows: (typeof diagnosisConversations.$inferInsert)[] = [];
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000);
+    for (let n = 0; n < 17; n++) {
+      rows.push({
+        shopId: shop.id,
+        userId: n % 3 === 0 ? rae.id : dale.id,
+        title: `2019 RZR XP 1000 EPS — Misfire number ${n}`,
+        unitModelNumber: "Z19VDE99AM",
+        unitLabel: "2019 RZR XP 1000 EPS — Z19VDE99AM",
+        webSearch: true,
+        status: n % 4 === 0 ? "solved" : "open",
+        updatedAt: at(100 + n),
+      });
+    }
+    rows.push(
+      {
+        shopId: shop.id,
+        userId: lou.id,
+        title: "Ranger Crew XP 1000 — Front diff grinds when 4WD engages",
+        unitModelNumber: "R21RSU99A1",
+        unitLabel: "2021 RANGER CREW XP 1000 — R21RSU99A1",
+        unitVin: "3NSRSU991ME123457",
+        webSearch: true,
+        updatedAt: at(5),
+      },
+      {
+        shopId: shop.id,
+        userId: rae.id,
+        title: "Sportsman 570 — Winch clicks but won't pull, 100% of the time",
+        unitModelNumber: "A22SEE57A1",
+        unitLabel: "2022 SPORTSMAN 570 — A22SEE57A1",
+        webSearch: true,
+        status: "solved",
+        updatedAt: at(1),
+        createdAt: new Date(Date.UTC(2020, 0, 15)),
+      },
+    );
+    await systemDb.insert(diagnosisConversations).values(rows);
+    await systemDb.insert(diagnosisConversations).values({
+      shopId: other.shop.id,
+      userId: other.id,
+      title: "Other shop — Winch clicks too",
+      unitLabel: "2022 SPORTSMAN 570 — A22SEE57A1",
+      webSearch: true,
+    });
+    titles.push(
+      "Sportsman 570 — Winch clicks but won't pull, 100% of the time",
+      "Ranger Crew XP 1000 — Front diff grinds when 4WD engages",
+      ...Array.from({ length: 17 }, (_, n) => `2019 RZR XP 1000 EPS — Misfire number ${n}`),
+    );
+  });
+
+  const titlesOf = (list: { items: { title: string }[] }) => list.items.map((item) => item.title);
+
+  test("eight to a page, newest first; a page past the end gives the last page", async () => {
+    const first = await listConversations(dale.shop.id);
+    assert.equal(first.total, 19);
+    assert.deepEqual([first.page, first.pages, first.from, first.to], [1, 3, 1, 8]);
+    assert.deepEqual(titlesOf(first), titles.slice(0, 8));
+    const second = await listConversations(dale.shop.id, { page: 2 });
+    assert.deepEqual(titlesOf(second), titles.slice(8, 16));
+    assert.deepEqual([second.from, second.to], [9, 16]);
+    const last = await listConversations(dale.shop.id, { page: 3 });
+    assert.deepEqual(titlesOf(last), titles.slice(16));
+    const past = await listConversations(dale.shop.id, { page: 40 });
+    assert.equal(past.page, 3);
+    assert.deepEqual(titlesOf(past), titles.slice(16));
+    // Who started each, and its status, come along.
+    assert.deepEqual(
+      first.items.slice(0, 2).map((item) => [item.startedBy, item.status, item.unit]),
+      [
+        ["Rae Lind", "solved", "2022 SPORTSMAN 570 — A22SEE57A1"],
+        ["Lou Grant", "open", "2021 RANGER CREW XP 1000 — R21RSU99A1"],
+      ],
+    );
+  });
+
+  test("search: the complaint, model number, VIN and tech's name, any case, words in any order", async () => {
+    const found = async (query: string) => titlesOf(await listConversations(dale.shop.id, { query, perPage: 100 }));
+    assert.deepEqual(await found("winch pull"), [titles[0]]);
+    assert.deepEqual(await found("PULL Winch"), [titles[0]]);
+    assert.deepEqual(await found("grinds"), [titles[1]]);
+    // Part of a model number or a VIN.
+    assert.deepEqual(await found("r21rsu"), [titles[1]]);
+    assert.deepEqual(await found("me123457"), [titles[1]]);
+    assert.deepEqual(await found("A22SEE57"), [titles[0]]);
+    // The tech who started it: Rae has numbers 0, 3, 6, 9, 12, 15 and the winch.
+    const rae = await found("rae");
+    assert.equal(rae.length, 7);
+    assert.equal(rae[0], titles[0]);
+    // Every word somewhere, across fields: a tech and a complaint.
+    assert.deepEqual(await found("lind winch"), [titles[0]]);
+    assert.deepEqual(await found("okafor winch"), []);
+    assert.deepEqual(await found("misfire 12"), [titles[2 + 12]]);
+    // Punctuation round a word, and a dash on its own, don't get in the way.
+    assert.deepEqual(await found("“winch,” — pull."), [titles[0]]);
+    // Inside a word, an apostrophe is kept, and % and _ are only themselves
+    // (as LIKE's wildcards, "p_1" would find "XP 1000" and "1%0" "100").
+    assert.deepEqual(await found("won't"), [titles[0]]);
+    assert.deepEqual(await found("p_1"), []);
+    assert.deepEqual(await found("1%0"), []);
+    assert.deepEqual(await found("nothing like this"), []);
+    // An empty search is the whole list.
+    assert.equal((await found("  ")).length, 19);
+  });
+
+  test("a search has pages of its own and counts what it finds", async () => {
+    const okafor = await listConversations(dale.shop.id, { query: "okafor" });
+    // Dale has the 11 misfires Rae doesn't.
+    assert.equal(okafor.total, 11);
+    assert.deepEqual([okafor.page, okafor.pages, okafor.items.length], [1, 2, 8]);
+    const second = await listConversations(dale.shop.id, { query: "okafor", page: 2 });
+    assert.deepEqual([second.page, second.from, second.to, second.items.length], [2, 9, 11, 3]);
+    assert.ok(second.items.every((item) => item.startedBy === "Dale Okafor"));
+    const none = await listConversations(dale.shop.id, { query: "zzqx", page: 3 });
+    assert.deepEqual([none.total, none.page, none.pages, none.from, none.to, none.items.length], [0, 1, 1, 0, 0, 0]);
+  });
+
+  test("never another shop's, searching or not", async () => {
+    assert.ok(!titlesOf(await listConversations(dale.shop.id, { query: "winch", perPage: 100 })).includes("Other shop — Winch clicks too"));
+    const theirs = await listConversations(other.shop.id, { query: "winch" });
+    assert.deepEqual(titlesOf(theirs), ["Other shop — Winch clicks too"]);
+    assert.equal((await listConversations(other.shop.id)).total, 1);
+  });
+
+  test("Home: the user's own open ones, newest first, up to four; the shop at a glance", async () => {
+    const mine = await listOwnOpenConversations(dale);
+    assert.equal(mine.length, 4);
+    assert.ok(mine.every((item) => item.startedBy === "Dale Okafor" && item.status === "open"));
+    // Dale's open ones are numbers 1, 2, 5, 7, ...
+    assert.deepEqual(mine.map((item) => item.title), [1, 2, 5, 7].map((n) => `2019 RZR XP 1000 EPS — Misfire number ${n}`));
+    assert.deepEqual((await listOwnOpenConversations(lou, 10)).map((item) => item.title), [titles[1]]);
+    // Rae's winch is solved; her open misfires are 3, 6, 9 and 15.
+    assert.deepEqual((await listOwnOpenConversations(rae, 10)).map((item) => item.title.slice(-2).trim()), ["3", "6", "9", "15"]);
+    // The other shop's Dale has his own.
+    assert.deepEqual((await listOwnOpenConversations(other)).map((item) => item.title), ["Other shop — Winch clicks too"]);
+    const glance = await shopGlance(dale.shop.id);
+    // Misfires 0, 4, 8, 12 and 16 are solved, and the winch, started in 2020.
+    assert.deepEqual(glance, { open: 13, startedThisMonth: 18, solvedThisMonth: 5 });
   });
 });

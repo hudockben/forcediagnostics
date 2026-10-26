@@ -100,7 +100,7 @@ export async function adminSetPin(_previous: FormState, form: FormData): Promise
     const result = await setPin(admin, field(form, "id"), pin);
     if ("error" in result) return { error: result.error };
     refresh();
-    return { success: "PIN saved. Tell them what it is; they can change it on their Home tab." };
+    return { success: "PIN saved. Tell them what it is; they can change it on their account page." };
   });
 }
 

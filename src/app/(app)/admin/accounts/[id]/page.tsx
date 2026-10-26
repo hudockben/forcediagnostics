@@ -64,9 +64,9 @@ async function StaffMember({ params }: { params: PageProps<"/admin/accounts/[id]
       >
         {isSelf ? (
           <p className="text-sm leading-6 text-ink-muted">
-            Change your own password on the{" "}
-            <Link href="/home" className="text-glow hover:underline">
-              Home tab
+            Change your own password on{" "}
+            <Link href="/account" className="text-glow hover:underline">
+              your account page
             </Link>
             .
           </p>
@@ -103,9 +103,9 @@ async function StaffMember({ params }: { params: PageProps<"/admin/accounts/[id]
         </div>
         {isSelf ? (
           <p className="text-sm leading-6 text-ink-muted">
-            Set your own PIN on the{" "}
-            <Link href="/home" className="text-glow hover:underline">
-              Home tab
+            Set your own PIN on{" "}
+            <Link href="/account" className="text-glow hover:underline">
+              your account page
             </Link>
             .
           </p>

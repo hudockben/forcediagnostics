@@ -2,20 +2,24 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 
-import { LocalTime } from "@/components/app/local-time";
-import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
+import { Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { primaryLinkClass } from "@/components/hud";
 import { isClaudeConfigured } from "@/lib/claude";
-import { listConversations, monthStats, type ConversationSummary } from "@/lib/diagnose";
+import { listConversations, monthStats, type ConversationList } from "@/lib/diagnose";
+import { cleanListQuery, listHref, pageItems, parsePage } from "@/lib/diagnose-list-rules";
 import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
 import { allows, requireCapability } from "@/lib/session";
 
+import { ConversationRow } from "./conversation-row";
+import { BackIcon } from "./icons";
+import { ListSearch } from "./list-search";
+
 export const metadata: Metadata = { title: "Diagnose" };
 
-export default function DiagnosePage() {
+export default function DiagnosePage(props: PageProps<"/diagnose">) {
   return (
     <Suspense fallback={<LoadingLine />}>
-      <Diagnose />
+      <Diagnose searchParams={props.searchParams} />
     </Suspense>
   );
 }
@@ -23,9 +27,11 @@ export default function DiagnosePage() {
 const plural = (count: number, one: string, many: string) =>
   `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 
-async function Diagnose() {
+async function Diagnose({ searchParams }: { searchParams: PageProps<"/diagnose">["searchParams"] }) {
   const user = await requireCapability("diagnostics.work");
-  const conversations = await listConversations(user.shop.id);
+  const params = await searchParams;
+  const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
+  const list = await listConversations(user.shop.id, { query, page: parsePage(params.page) });
 
   return (
     <div className="space-y-6">
@@ -45,46 +51,118 @@ async function Diagnose() {
 
       {allows(user, "reports.kpis") && <MonthCard shopId={user.shop.id} />}
 
-      <Card title="Recent diagnoses" description={conversations.length === 0 ? undefined : "The whole shop's, newest first."}>
-        {conversations.length === 0 ? (
+      <Card title="Recent diagnoses" description={list.total === 0 && !query ? undefined : "The whole shop's, newest first."}>
+        {list.total === 0 && !query ? (
           <p className="text-sm leading-6 text-ink-muted">
             None yet. {isClaudeConfigured ? "Start one with New diagnosis." : ""}
           </p>
         ) : (
-          <ul className="-mx-5 -mb-5 divide-y divide-white/10 border-t border-white/10 sm:-mx-6 sm:-mb-6">
-            {conversations.map((conversation) => (
-              <ConversationRow key={conversation.id} conversation={conversation} />
-            ))}
-          </ul>
+          <ListSearch query={query}>
+            <Results list={list} query={query} />
+          </ListSearch>
         )}
       </Card>
     </div>
   );
 }
 
-function ConversationRow({ conversation }: { conversation: ConversationSummary }) {
+const quote = (query: string) => `“${query}”`;
+
+function Results({ list, query }: { list: ConversationList; query: string }) {
   return (
-    <li>
-      <Link
-        href={`/diagnose/${conversation.id}`}
-        className="flex min-h-14 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 py-3 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset sm:px-6"
-      >
-        <span className="min-w-0">
-          <span className="block font-medium break-words text-ink">{conversation.title}</span>
-          <span className="block text-xs text-ink-muted">
-            {[conversation.unit, `${conversation.startedBy}`, plural(conversation.techMessages, "message", "messages")]
-              .filter(Boolean)
-              .join(" · ")}{" "}
-            · <LocalTime value={conversation.updatedAt} />
+    <>
+      {/* Always there, so a new count is read out as the list changes. */}
+      <p role="status" data-result-count className="mt-3 text-sm text-ink-muted empty:hidden">
+        {query
+          ? list.total === 0
+            ? `Nothing matched ${quote(query)}.`
+            : `${plural(list.total, "diagnosis matches", "diagnoses match")} ${quote(query)}.`
+          : ""}
+      </p>
+      {list.total === 0 ? (
+        <p className="mt-2 text-sm leading-6 text-ink-muted" data-list-empty>
+          Try fewer words or another spelling, or{" "}
+          <Link href={listHref("")} className="text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none">
+            clear the search
+          </Link>
+          .
+        </p>
+      ) : (
+        <>
+          <ul className="-mx-5 mt-4 divide-y divide-white/10 border-y border-white/10 sm:-mx-6">
+            {list.items.map((conversation) => (
+              <ConversationRow key={conversation.id} conversation={conversation} />
+            ))}
+          </ul>
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+            <p className="font-mono text-xs text-ink-muted" data-list-range>
+              {list.from.toLocaleString("en-US")}–{list.to.toLocaleString("en-US")} of {list.total.toLocaleString("en-US")}
+            </p>
+            <Pagination query={query} page={list.page} pages={list.pages} />
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+const pageControl =
+  "flex h-11 min-w-11 items-center justify-center gap-1.5 rounded-lg px-3 text-sm font-medium transition focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
+const pageLink = `${pageControl} text-ink-muted hover:bg-white/5 hover:text-ink`;
+
+// Previous, the page numbers and Next, 44px to tap. On a phone only the
+// first, last and current page numbers show; wider, one either side too.
+function Pagination({ query, page, pages }: { query: string; page: number; pages: number }) {
+  if (pages <= 1) return null;
+  const numbers = (around: number, only: string) =>
+    pageItems(page, pages, around).map((item, index) => (
+      <li key={`${only}-${index}`} className={only}>
+        {item === null ? (
+          <span aria-hidden className="flex h-11 w-5 items-center justify-center text-sm text-ink-muted">
+            …
           </span>
-        </span>
-        <span className="flex gap-2">
-          {conversation.lastTurn === "running" && <Badge tone="glow">Working</Badge>}
-          {conversation.lastTurn === "failed" && <Badge tone="trail">Last message failed</Badge>}
-          {conversation.status === "solved" ? <Badge tone="glow">Solved</Badge> : <Badge>Open</Badge>}
-        </span>
+        ) : item === page ? (
+          <span aria-current="page" data-page={item} className={`${pageControl} bg-glow/15 font-mono text-glow`}>
+            <span className="sr-only">Page </span>
+            {item}
+          </span>
+        ) : (
+          <Link href={listHref(query, item)} data-page={item} className={`${pageLink} font-mono`}>
+            <span className="sr-only">Page </span>
+            {item}
+          </Link>
+        )}
+      </li>
+    ));
+  // On a phone the arrow alone (the label stays for screen readers).
+  const step = (to: number, label: string, rel: "prev" | "next") => {
+    const content = (
+      <>
+        <BackIcon className={`size-4 ${rel === "next" ? "order-last rotate-180" : ""}`} />
+        <span className="max-sm:sr-only">{label}</span>
+      </>
+    );
+    // There's nothing before the first page or after the last: shown dimmed
+    // so the row doesn't shift, and left out for screen readers.
+    return to < 1 || to > pages ? (
+      <span aria-hidden className={`${pageControl} text-ink-muted/40`}>
+        {content}
+      </span>
+    ) : (
+      <Link href={listHref(query, to)} rel={rel} data-page-step={rel} className={pageLink}>
+        {content}
       </Link>
-    </li>
+    );
+  };
+  return (
+    <nav aria-label="Pages of diagnoses" data-pagination>
+      <ul className="flex items-center gap-0.5">
+        <li>{step(page - 1, "Previous", "prev")}</li>
+        {numbers(0, "sm:hidden")}
+        {numbers(1, "max-sm:hidden")}
+        <li>{step(page + 1, "Next", "next")}</li>
+      </ul>
+    </nav>
   );
 }
 
