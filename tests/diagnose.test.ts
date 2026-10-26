@@ -2573,7 +2573,9 @@ describe("the Diagnose list and Home", () => {
     other = await createUser(await createShop(`dm${suffix}`), "tech", "Dale Okafor");
     const rows: (typeof diagnosisConversations.$inferInsert)[] = [];
     const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000);
+    const DAY = 24 * 60;
     for (let n = 0; n < 17; n++) {
+      const solved = n % 4 === 0;
       rows.push({
         shopId: shop.id,
         userId: n % 3 === 0 ? rae.id : dale.id,
@@ -2581,8 +2583,14 @@ describe("the Diagnose list and Home", () => {
         unitModelNumber: "Z19VDE99AM",
         unitLabel: "2019 RZR XP 1000 EPS — Z19VDE99AM",
         webSearch: true,
-        status: n % 4 === 0 ? "solved" : "open",
-        updatedAt: at(100 + n),
+        status: solved ? "solved" : "open",
+        // Number 12 was started and solved before this month began.
+        outcome: solved
+          ? { title: "Fouled plug", likelihood: "high", rank: 1, seq: 1, userId: dale.id, at: at(n === 12 ? 40 * DAY : 60).toISOString() }
+          : null,
+        // Numbers 15 and 16 were last used ten days ago.
+        updatedAt: at((n >= 15 ? 10 * DAY : 100) + n),
+        ...(n === 12 ? { createdAt: at(50 * DAY) } : {}),
       });
     }
     rows.push(
@@ -2604,11 +2612,16 @@ describe("the Diagnose list and Home", () => {
         unitLabel: "2022 SPORTSMAN 570 — A22SEE57A1",
         webSearch: true,
         status: "solved",
+        // Started in 2020, confirmed today.
+        outcome: { title: "Winch solenoid", likelihood: "high", rank: 1, seq: 1, userId: rae.id, at: at(1).toISOString() },
         updatedAt: at(1),
         createdAt: new Date(Date.UTC(2020, 0, 15)),
       },
     );
-    await systemDb.insert(diagnosisConversations).values(rows);
+    const inserted = await systemDb.insert(diagnosisConversations).values(rows).returning({ id: diagnosisConversations.id, title: diagnosisConversations.title });
+    // Dale took over Lou's Ranger and sent a message in it.
+    const ranger = inserted.find((row) => row.title.startsWith("Ranger"))!;
+    await systemDb.insert(diagnosisTurns).values({ conversationId: ranger.id, shopId: shop.id, seq: 1, userId: dale.id, techText: "Took this one over", status: "done" });
     await systemDb.insert(diagnosisConversations).values({
       shopId: other.shop.id,
       userId: other.id,
@@ -2696,19 +2709,24 @@ describe("the Diagnose list and Home", () => {
     assert.equal((await listConversations(other.shop.id)).total, 1);
   });
 
-  test("Home: the user's own open ones, newest first, up to four; the shop at a glance", async () => {
+  test("Home: the open ones the user started or sent a message in, newest first, up to four; the shop at a glance", async () => {
     const mine = await listOwnOpenConversations(dale);
     assert.equal(mine.length, 4);
-    assert.ok(mine.every((item) => item.startedBy === "Dale Okafor" && item.status === "open"));
-    // Dale's open ones are numbers 1, 2, 5, 7, ...
-    assert.deepEqual(mine.map((item) => item.title), [1, 2, 5, 7].map((n) => `2019 RZR XP 1000 EPS — Misfire number ${n}`));
+    assert.ok(mine.every((item) => item.status === "open"));
+    // Lou's Ranger, which Dale took over, then Dale's open ones: 1, 2, 5, ...
+    assert.deepEqual(mine.map((item) => item.title), [titles[1], ...[1, 2, 5].map((n) => `2019 RZR XP 1000 EPS — Misfire number ${n}`)]);
+    assert.deepEqual(mine.map((item) => item.startedBy), ["Lou Grant", "Dale Okafor", "Dale Okafor", "Dale Okafor"]);
+    // Lou still has it too.
     assert.deepEqual((await listOwnOpenConversations(lou, 10)).map((item) => item.title), [titles[1]]);
     // Rae's winch is solved; her open misfires are 3, 6, 9 and 15.
     assert.deepEqual((await listOwnOpenConversations(rae, 10)).map((item) => item.title.slice(-2).trim()), ["3", "6", "9", "15"]);
     // The other shop's Dale has his own.
     assert.deepEqual((await listOwnOpenConversations(other)).map((item) => item.title), ["Other shop — Winch clicks too"]);
     const glance = await shopGlance(dale.shop.id);
-    // Misfires 0, 4, 8, 12 and 16 are solved, and the winch, started in 2020.
-    assert.deepEqual(glance, { open: 13, startedThisMonth: 18, solvedThisMonth: 5 });
+    // Open: the Ranger and the twelve misfires that aren't solved (0, 4, 8,
+    // 12 and 16 are), less 15, not used this week. Started this month: all
+    // but the winch (2020) and 12. Solved this month, by when the fix was
+    // confirmed: 0, 4, 8, 16 and the winch, not 12.
+    assert.deepEqual(glance, { openThisWeek: 12, startedThisMonth: 17, solvedThisMonth: 5 });
   });
 });

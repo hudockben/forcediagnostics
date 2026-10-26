@@ -9,13 +9,16 @@ const plural = (count: number, one: string, many: string) =>
 
 // One diagnosis in a list (the Diagnose tab's, Home's own open ones): its
 // title, unit, who started it, how many messages, when, and where it's at.
-// Home leaves out who started it (always the viewer there).
+// Home leaves out who started it and the Open badge (a list of the viewer's
+// open ones).
 export function ConversationRow({
   conversation,
   startedBy = true,
+  openBadge = true,
 }: {
   conversation: ConversationSummary;
   startedBy?: boolean;
+  openBadge?: boolean;
 }) {
   return (
     <li data-diagnosis-row>
@@ -32,10 +35,10 @@ export function ConversationRow({
             · <LocalTime value={conversation.updatedAt} />
           </span>
         </span>
-        <span className="flex gap-2">
+        <span className="flex gap-2 empty:hidden">
           {conversation.lastTurn === "running" && <Badge tone="glow">Working</Badge>}
           {conversation.lastTurn === "failed" && <Badge tone="trail">Last message failed</Badge>}
-          {conversation.status === "solved" ? <Badge tone="glow">Solved</Badge> : <Badge>Open</Badge>}
+          {conversation.status === "solved" ? <Badge tone="glow">Solved</Badge> : openBadge && <Badge>Open</Badge>}
         </span>
       </Link>
     </li>

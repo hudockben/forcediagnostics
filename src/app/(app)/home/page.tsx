@@ -33,7 +33,8 @@ export default function HomePage() {
 async function Home() {
   const user = await getCurrentUser();
   const canDiagnose = allows(user, "diagnostics.work");
-  const adminSections = ADMIN_SECTIONS.filter((section) => allows(user, section.capability));
+  // System Admin opens where the header's tab does.
+  const adminSection = ADMIN_SECTIONS.find((section) => allows(user, section.capability));
   const [open, glance] = await Promise.all([
     canDiagnose ? listOwnOpenConversations(user) : [],
     allows(user, "reports.kpis") ? shopGlance(user.shop.id) : null,
@@ -43,22 +44,11 @@ async function Home() {
 
   return (
     <div className="space-y-6">
-      <PageHeading
-        eyebrow={user.shop.name}
-        title={<Greeting name={firstName(user.name)} />}
-        action={
-          <Link
-            href="/account"
-            data-home-account
-            className="flex h-11 items-center rounded-lg border border-white/15 px-4 text-sm text-ink-muted transition hover:border-white/30 hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
-          >
-            Your account
-          </Link>
-        }
-      />
+      <PageHeading eyebrow={user.shop.name} title={<Greeting name={firstName(user.name)} />} />
 
       {(canStart || latest) && (
-        <section aria-label="Quick actions" className="grid gap-4 sm:grid-cols-2">
+        // A tile on its own takes the whole row.
+        <section aria-label="Quick actions" className={`grid gap-4 ${canStart && latest ? "sm:grid-cols-2" : ""}`}>
           {canStart && (
             <ActionTile
               href="/diagnose/new"
@@ -91,7 +81,7 @@ async function Home() {
         >
           <span className="flex flex-wrap items-end justify-between gap-x-8 gap-y-3">
             <span className="grid grid-cols-3 gap-x-6 gap-y-1 sm:gap-x-10">
-              <Stat label="Open in the shop" value={glance.open} />
+              <Stat label="Open, used this week" value={glance.openThisWeek} />
               <Stat label="Started this month" value={glance.startedThisMonth} />
               <Stat label="Solved this month" value={glance.solvedThisMonth} />
             </span>
@@ -101,7 +91,7 @@ async function Home() {
       )}
 
       {canDiagnose && (
-        <Card title="Your open diagnoses" description={open.length > 0 ? "The ones you started, most recent first." : undefined}>
+        <Card title="Your open diagnoses" description={open.length > 0 ? "The ones you've worked on, most recent first." : undefined}>
           {open.length === 0 ? (
             <p className="text-sm leading-6 text-ink-muted">
               Nothing open.{canStart ? " Start one with New diagnosis." : ""}
@@ -109,7 +99,7 @@ async function Home() {
           ) : (
             <ul className="-mx-5 divide-y divide-white/10 border-y border-white/10 sm:-mx-6" data-own-open>
               {open.map((conversation) => (
-                <ConversationRow key={conversation.id} conversation={conversation} startedBy={false} />
+                <ConversationRow key={conversation.id} conversation={conversation} startedBy={false} openBadge={false} />
               ))}
             </ul>
           )}
@@ -125,25 +115,23 @@ async function Home() {
         </Card>
       )}
 
-      {adminSections.length > 0 && (
-        <Card title="System Admin">
-          <ul className="flex flex-wrap gap-2" data-home-admin>
-            {adminSections.map((section) => (
-              <li key={section.href}>
-                <Link
-                  href={section.href}
-                  className="flex h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
-                >
-                  {section.label}
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </Card>
-      )}
+      {/* Settings stay out of the way: one quiet line at the foot. */}
+      <p className="flex flex-wrap gap-x-6">
+        <Link href="/account" data-home-account className={footLink}>
+          {user.bay ? "Your account" : "Your account: password and bay tablet PIN"} ›
+        </Link>
+        {adminSection && (
+          <Link href={adminSection.href} data-home-admin className={footLink}>
+            System Admin ›
+          </Link>
+        )}
+      </p>
     </div>
   );
 }
+
+const footLink =
+  "inline-flex h-11 items-center text-sm text-ink-muted transition hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
 
 // A quick action sized for a finger on a bay tablet.
 function ActionTile({
@@ -197,7 +185,8 @@ function ContinueDetail({ conversation }: { conversation: ConversationSummary })
 }
 
 // Searches the Library the way its own box does (/library?q=…). A plain GET
-// form, so it works before the page's JavaScript has loaded.
+// form, so it works before the page's JavaScript has loaded; like the
+// Library's box, an empty search lists every manual.
 function ManualSearch() {
   return (
     <section aria-labelledby="home-manuals" className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6">
@@ -213,7 +202,6 @@ function ManualSearch() {
           id="home-manual-q"
           name="q"
           type="search"
-          required
           maxLength={MAX_QUERY_LENGTH}
           placeholder='P0300, 2205123, "fuel pump relay"'
           autoComplete="off"
@@ -224,6 +212,15 @@ function ManualSearch() {
           Search
         </button>
       </Form>
+      <p className="mt-2">
+        <Link
+          href="/library"
+          data-home-browse
+          className="inline-flex h-11 items-center text-sm font-medium text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        >
+          Browse all manuals ›
+        </Link>
+      </p>
     </section>
   );
 }

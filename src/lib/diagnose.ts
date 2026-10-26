@@ -1,7 +1,7 @@
 import "server-only";
 
 import type Anthropic from "@anthropic-ai/sdk";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
 import { diagnosisConversations, diagnosisTurns, users } from "@/db/schema";
@@ -251,8 +251,9 @@ export async function listConversations(
   });
 }
 
-// The open conversations this user started, most recently used first, for
-// Home.
+// The open conversations this user has worked on (started, or sent a
+// message in: one a manager started and a tech took over is the tech's
+// too), most recently used first, for Home.
 export async function listOwnOpenConversations(user: CurrentUser, limit = 4): Promise<ConversationSummary[]> {
   return withShop(user.shop.id, async (tx) => {
     await failStaleTurns(tx);
@@ -260,29 +261,39 @@ export async function listOwnOpenConversations(user: CurrentUser, limit = 4): Pr
       .select(summaryColumns)
       .from(diagnosisConversations)
       .innerJoin(users, eq(users.id, diagnosisConversations.userId))
-      .where(and(eq(diagnosisConversations.userId, user.id), eq(diagnosisConversations.status, "open")))
+      .where(
+        and(
+          eq(diagnosisConversations.status, "open"),
+          or(
+            eq(diagnosisConversations.userId, user.id),
+            sql`exists (select 1 from ${diagnosisTurns} t where t.conversation_id = ${diagnosisConversations.id} and t.user_id = ${user.id})`,
+          ),
+        ),
+      )
       .orderBy(desc(diagnosisConversations.updatedAt), desc(diagnosisConversations.id))
       .limit(limit);
     return rows.map(toSummary);
   });
 }
 
-export type ShopGlance = { open: number; startedThisMonth: number; solvedThisMonth: number };
+export type ShopGlance = { openThisWeek: number; startedThisMonth: number; solvedThisMonth: number };
 
-// Home's strip for managers and admins: what's open across the shop, and
-// this month's started and solved counted as the This month card counts
-// them (see monthStats).
+// Home's strip for managers and admins. Only confirming one of Claude's
+// causes solves a diagnosis, so one that ended any other way stays open for
+// good: "open" here is the ones used in the last 7 days. Solved this month
+// goes by when the fix was confirmed (the This month card counts the
+// diagnoses started this month, and how many of those are solved).
 export async function shopGlance(shopId: string): Promise<ShopGlance> {
   return withShop(shopId, async (tx) => {
     const month = sql`date_trunc('month', now())`;
     const [row] = await tx
       .select({
-        open: sql<number>`(count(*) filter (where ${diagnosisConversations.status} = 'open'))::int`,
+        open: sql<number>`(count(*) filter (where ${diagnosisConversations.status} = 'open' and ${diagnosisConversations.updatedAt} >= now() - interval '7 days'))::int`,
         started: sql<number>`(count(*) filter (where ${diagnosisConversations.createdAt} >= ${month}))::int`,
-        solved: sql<number>`(count(*) filter (where ${diagnosisConversations.createdAt} >= ${month} and ${diagnosisConversations.status} = 'solved'))::int`,
+        solved: sql<number>`(count(*) filter (where ${diagnosisConversations.status} = 'solved' and (${diagnosisConversations.outcome} ->> 'at')::timestamptz >= ${month}))::int`,
       })
       .from(diagnosisConversations);
-    return { open: row.open, startedThisMonth: row.started, solvedThisMonth: row.solved };
+    return { openThisWeek: row.open, startedThisMonth: row.started, solvedThisMonth: row.solved };
   });
 }
 

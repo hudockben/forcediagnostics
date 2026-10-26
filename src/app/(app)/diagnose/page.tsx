@@ -6,7 +6,7 @@ import { Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { primaryLinkClass } from "@/components/hud";
 import { isClaudeConfigured } from "@/lib/claude";
 import { listConversations, monthStats, type ConversationList } from "@/lib/diagnose";
-import { cleanListQuery, listHref, pageItems, parsePage } from "@/lib/diagnose-list-rules";
+import { MAX_LIST_WORDS, cleanListQuery, listHref, listSearchIsCut, listSearchWords, pageItems, parsePage } from "@/lib/diagnose-list-rules";
 import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
 import { allows, requireCapability } from "@/lib/session";
 
@@ -32,6 +32,8 @@ async function Diagnose({ searchParams }: { searchParams: PageProps<"/diagnose">
   const params = await searchParams;
   const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
   const list = await listConversations(user.shop.id, { query, page: parsePage(params.page) });
+  // A search with no words in it ("—") lists everything, so it says nothing.
+  const searching = listSearchWords(query).length > 0;
 
   return (
     <div className="space-y-6">
@@ -51,14 +53,14 @@ async function Diagnose({ searchParams }: { searchParams: PageProps<"/diagnose">
 
       {allows(user, "reports.kpis") && <MonthCard shopId={user.shop.id} />}
 
-      <Card title="Recent diagnoses" description={list.total === 0 && !query ? undefined : "The whole shop's, newest first."}>
-        {list.total === 0 && !query ? (
+      <Card title="Recent diagnoses" description={list.total === 0 && !searching ? undefined : "The whole shop's, most recently used first."}>
+        {list.total === 0 && !searching ? (
           <p className="text-sm leading-6 text-ink-muted">
             None yet. {isClaudeConfigured ? "Start one with New diagnosis." : ""}
           </p>
         ) : (
           <ListSearch query={query}>
-            <Results list={list} query={query} />
+            <Results list={list} query={query} searching={searching} />
           </ListSearch>
         )}
       </Card>
@@ -66,14 +68,17 @@ async function Diagnose({ searchParams }: { searchParams: PageProps<"/diagnose">
   );
 }
 
-const quote = (query: string) => `“${query}”`;
+// The search as typed; past MAX_LIST_WORDS words, saying the rest were
+// left out.
+const quote = (query: string) =>
+  `“${query}”${listSearchIsCut(query) ? ` (only its first ${MAX_LIST_WORDS} words are searched)` : ""}`;
 
-function Results({ list, query }: { list: ConversationList; query: string }) {
+function Results({ list, query, searching }: { list: ConversationList; query: string; searching: boolean }) {
   return (
     <>
       {/* Always there, so a new count is read out as the list changes. */}
       <p role="status" data-result-count className="mt-3 text-sm text-ink-muted empty:hidden">
-        {query
+        {searching
           ? list.total === 0
             ? `Nothing matched ${quote(query)}.`
             : `${plural(list.total, "diagnosis matches", "diagnoses match")} ${quote(query)}.`
@@ -156,7 +161,7 @@ function Pagination({ query, page, pages }: { query: string; page: number; pages
   };
   return (
     <nav aria-label="Pages of diagnoses" data-pagination>
-      <ul className="flex items-center gap-0.5">
+      <ul className="flex items-center gap-1.5">
         <li>{step(page - 1, "Previous", "prev")}</li>
         {numbers(0, "sm:hidden")}
         {numbers(1, "max-sm:hidden")}

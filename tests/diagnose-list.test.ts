@@ -14,6 +14,7 @@ import {
   containsPattern,
   listHref,
   listPage,
+  listSearchIsCut,
   listSearchWords,
   pageItems,
   parsePage,
@@ -45,8 +46,13 @@ describe("the list's search", () => {
     assert.deepEqual(listSearchWords(""), []);
     // Accented letters count as letters.
     assert.deepEqual(listSearchWords("Zoë."), ["zoë"]);
-    // At most eight words.
-    assert.equal(listSearchWords("a b c d e f g h i j").length, 8);
+    // At most eight words, and the count can say the rest were left out.
+    assert.deepEqual(listSearchWords("a b c d e f g h winch"), ["a", "b", "c", "d", "e", "f", "g", "h"]);
+    assert.equal(listSearchIsCut("a b c d e f g h winch"), true);
+    assert.equal(listSearchIsCut("a b c d e f g h"), false);
+    // Repeats and words with no letter or digit don't count towards it.
+    assert.equal(listSearchIsCut("a a b c d e f g h — ,"), false);
+    assert.equal(listSearchIsCut("——"), false);
   });
 
   test("LIKE patterns take %, _ and backslashes as typed", () => {

@@ -7,7 +7,7 @@ import { cutText } from "@/lib/manual-rules";
 export const LIST_PAGE_SIZE = 8;
 export const MAX_LIST_QUERY_LENGTH = 100;
 // Words past this many are left out of a search.
-const MAX_LIST_WORDS = 8;
+export const MAX_LIST_WORDS = 8;
 
 // The search as it goes in the address: one space between words, no longer
 // than the box allows.
@@ -15,19 +15,28 @@ export function cleanListQuery(text: string) {
   return cutText(text.replace(/\u0000/g, "").replace(/\s+/g, " ").trim(), MAX_LIST_QUERY_LENGTH).trim();
 }
 
-// "RZR  misfire, Mike" -> ["rzr", "misfire", "mike"]: the words a diagnosis
-// has to have somewhere to be found, in any order, each once, without the
-// punctuation round them. A word with no letter or digit in it ("—", "-",
-// pasted between a unit and its complaint) is left out.
-export function listSearchWords(query: string): string[] {
+// Every word in a search, each once, without the punctuation round it. A
+// word with no letter or digit in it ("—", "-", pasted between a unit and
+// its complaint) is left out.
+function searchWords(query: string) {
   const words = new Set<string>();
   for (const part of cleanListQuery(query).split(" ")) {
     const word = part.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase();
-    if (!word) continue;
-    words.add(word);
-    if (words.size === MAX_LIST_WORDS) break;
+    if (word) words.add(word);
   }
   return [...words];
+}
+
+// "RZR  misfire, Mike" -> ["rzr", "misfire", "mike"]: the words a diagnosis
+// has to have somewhere to be found, in any order; the first MAX_LIST_WORDS
+// of them. None means no search at all (the whole list).
+export function listSearchWords(query: string): string[] {
+  return searchWords(query).slice(0, MAX_LIST_WORDS);
+}
+
+// Whether a search has more words than it uses, so the count can say so.
+export function listSearchIsCut(query: string) {
+  return searchWords(query).length > MAX_LIST_WORDS;
 }
 
 // A LIKE pattern for the word anywhere in a text, with LIKE's own
