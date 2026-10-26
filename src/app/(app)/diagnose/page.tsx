@@ -7,7 +7,7 @@ import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/
 import { primaryLinkClass } from "@/components/hud";
 import { isClaudeConfigured } from "@/lib/claude";
 import { listConversations, monthStats, type ConversationSummary } from "@/lib/diagnose";
-import { SETUP_MESSAGE, formatCents } from "@/lib/diagnose-rules";
+import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
 import { allows, requireCapability } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Diagnose" };
@@ -94,15 +94,11 @@ async function MonthCard({ shopId }: { shopId: string }) {
     ["Diagnoses started", stats.conversations.toLocaleString("en-US")],
     ["Messages to Claude", stats.messages.toLocaleString("en-US")],
     ["Web searches", stats.webSearches.toLocaleString("en-US")],
-    ["Estimated cost", formatCents(stats.costCents)],
     ["Solved", stats.solved.toLocaleString("en-US"), `${stats.solvedTopCause.toLocaleString("en-US")} by Claude's top cause`],
   ];
   return (
-    <Card
-      title="This month"
-      description="Managers and admins see this. The cost is an estimate from token counts at Claude Opus 5.5's list prices."
-    >
-      <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
+    <Card title="This month" description="Managers and admins see this.">
+      <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
         {items.map(([label, value, note]) => (
           <div key={label}>
             <dt className="text-xs text-ink-muted">{label}</dt>
