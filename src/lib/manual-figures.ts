@@ -8,9 +8,10 @@
 // picture, takes in the callout numbers printed around one, and orders them
 // largest first. A page that's one image from edge to edge (a scan) has no
 // figures: it's shown as the page it is, as is a page whose drawings are
-// all lines (no image at all). Also how a figure is written in the
-// full-screen page's address and how that view zooms to it. Pure: shared by
-// the browser (src/app/(app)/diagnose/manual-pages.ts) and the tests.
+// all lines (no image at all). Also how a figure is cropped out of its
+// page, written in the full-screen page's address, and zoomed to in that
+// view. Pure: shared by the browser (src/app/(app)/diagnose/manual-pages.ts)
+// and the tests.
 
 // --- Transforms ---------------------------------------------------------------
 
@@ -259,8 +260,10 @@ export const FIGURE_LIMITS = {
   // height, and this share of the page.
   side: 0.12,
   size: 0.04,
-  // One image this much of the page is the page (a scan): no crop.
-  wholePage: 0.6,
+  // One image this much of the page is the page (a scan, from edge to edge
+  // or nearly): no crop. A raster drawing with its title and parts list
+  // round it is less, and cropped.
+  wholePage: 0.85,
   // Callout numbers this far from a drawing (of the page's width) are its.
   reach: 0.06,
   // Room left around a drawing's crop (of the page's width).
@@ -355,6 +358,27 @@ export function figuresOf(images: PageArea[], { aspect, labels = [] }: { aspect:
 // An area's own width over its height, on a page `aspect` wide for its
 // height.
 export const aspectOf = (area: PageArea, aspect: number) => (widthOf(area) * aspect) / Math.max(1e-6, heightOf(area));
+
+// How a drawing is cropped out of its page (only that part is drawn): the
+// scale to draw the page at and how far to move it so the area's top left
+// is the canvas's top left (pdf.js's getViewport({ scale, offsetX,
+// offsetY })), and the canvas's size. `page` is the page at scale 1 (its
+// viewport's width and height, turned as it's shown), `cssWidth` the width
+// the drawing is shown at; sharp at `ratio` screen pixels to a CSS pixel
+// (at most 2), within `pixels` in all and `most` times the page's size.
+export function cropOf(area: PageArea, page: { width: number; height: number }, cssWidth: number, { ratio = 1, pixels = 12_000_000, most = 8 } = {}) {
+  const width = Math.max(1e-6, widthOf(area) * page.width);
+  const height = Math.max(1e-6, heightOf(area) * page.height);
+  const sharp = Math.min(ratio || 1, 2, Math.sqrt(pixels / (cssWidth * cssWidth * (height / width))));
+  const scale = Math.min((cssWidth / width) * sharp, most);
+  return {
+    scale,
+    offsetX: -area.left * page.width * scale,
+    offsetY: -area.top * page.height * scale,
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
 
 // --- In the address and the full-screen page ------------------------------------
 

@@ -1,12 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { createContext, use, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent } from "react";
+import { createContext, use, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent } from "react";
 import { createPortal } from "react-dom";
 
 import { drawingsOf, type DrawingPage, type PartDrawing } from "@/lib/diagnose-parts";
 import type { SourceView } from "@/lib/diagnose-rules";
-import { areaParam, fitArea, parseAreaParam, type PageArea } from "@/lib/manual-figures";
+import { areaParam, fitArea, parseAreaParam, type PageArea, type PageFigures } from "@/lib/manual-figures";
 
 import { BackIcon, BookIcon, ZoomInIcon, ZoomOutIcon } from "./icons";
 import { drawPage, figurePicture, headingArea, holdManuals, pageFigures, pagePicture } from "./manual-pages";
@@ -146,20 +146,21 @@ export function usePagePicture(manualId: string, page: number, width: number | "
 
   useEffect(() => {
     if (!visible || drawnWidth <= 0) return;
-    let cancelled = false;
+    // Gone (scrolled away, another part picked, measured wider) before it's
+    // drawn: it's taken out of the queue.
+    const stop = new AbortController();
     // The area as written in its key (to a thousandth of the page), so one
     // drawing is one picture however its area object came.
     const cropped = crop === "page" ? null : parseAreaParam(crop);
-    (cropped ? figurePicture(manualId, page, cropped, drawnWidth) : pagePicture(manualId, page, drawnWidth)).then(
-      (url) => !cancelled && setState({ url, key }),
+    (cropped ? figurePicture(manualId, page, cropped, drawnWidth, stop.signal) : pagePicture(manualId, page, drawnWidth, stop.signal)).then(
+      (url) => !stop.signal.aborted && setState({ url, key }),
       (error) => {
+        if (stop.signal.aborted) return;
         console.error("Couldn't draw a manual page", error);
-        if (!cancelled) setState({ failed: key });
+        setState({ failed: key });
       },
     );
-    return () => {
-      cancelled = true;
-    };
+    return () => stop.abort();
   }, [visible, manualId, page, drawnWidth, crop, key]);
 
   const url = state && "url" in state && state.key === key ? state.url : null;
@@ -168,36 +169,47 @@ export function usePagePicture(manualId: string, page: number, width: number | "
 }
 
 // A part's drawings (see drawingsOf): found on its drawing pages, in their
-// order, once the pages are known; "finding" until then, "none" with no
-// drawing page at all. A page that can't be looked at (its manual
-// couldn't be opened) is left out. Pass the same array for the same pages
-// (the sheet's own): a new one looks again (from what's kept).
+// order, once the pages are known, and shown as they're found (each page's
+// once those before it are done, so they never change places); "finding"
+// until every page is looked at, "none" with no drawing page at all. A
+// page that can't be looked at (its manual couldn't be opened) is left
+// out. Pass the same array for the same pages (the sheet's own): a new one
+// looks again (from what's kept). Pages another part asked for, not looked
+// at yet when it's left, aren't looked at.
 const NO_DRAWINGS: PartDrawing[] = [];
+type Looked = { page: DrawingPage; figures: PageFigures | null };
 export function usePartDrawings(pages: DrawingPage[]): { state: "none" | "finding" | "found"; drawings: PartDrawing[] } {
   const key = pages.map((page) => `${page.manualId}:${page.page}:${page.kind}`).join("|");
-  const [found, setFound] = useState<{ key: string; drawings: PartDrawing[] } | null>(null);
+  const [found, setFound] = useState<{ key: string; looked: (Looked | undefined)[] } | null>(null);
   useEffect(() => {
     if (pages.length === 0) return;
-    let cancelled = false;
-    void Promise.all(
-      pages.map((page) =>
-        pageFigures(page.manualId, page.page).then(
+    const stop = new AbortController();
+    const looked: (Looked | undefined)[] = pages.map(() => undefined);
+    pages.forEach((page, index) => {
+      pageFigures(page.manualId, page.page, stop.signal)
+        .then(
           (figures) => ({ page, figures }),
           (error) => {
-            console.error("Couldn't find a manual page's drawings", error);
+            if (!stop.signal.aborted) console.error("Couldn't find a manual page's drawings", error);
             return { page, figures: null };
           },
-        ),
-      ),
-    ).then((results) => {
-      if (!cancelled) setFound({ key, drawings: drawingsOf(results) });
+        )
+        .then((result) => {
+          if (stop.signal.aborted) return;
+          looked[index] = result;
+          setFound({ key, looked: [...looked] });
+        });
     });
-    return () => {
-      cancelled = true;
-    };
+    return () => stop.abort();
   }, [pages, key]);
+  const looked = found?.key === key ? found.looked : null;
+  const drawings = useMemo(() => {
+    if (!looked) return NO_DRAWINGS;
+    const done = looked.findIndex((result) => result === undefined);
+    return drawingsOf((done === -1 ? looked : looked.slice(0, done)) as Looked[]);
+  }, [looked]);
   if (pages.length === 0) return { state: "none", drawings: NO_DRAWINGS };
-  return found?.key === key ? { state: "found", drawings: found.drawings } : { state: "finding", drawings: NO_DRAWINGS };
+  return { state: looked && looked.every((result) => result !== undefined) ? "found" : "finding", drawings };
 }
 
 function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) {

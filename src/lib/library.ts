@@ -456,34 +456,55 @@ export type DrawingHit = { manualId: string; pageNumber: number; rank: number; t
 // (a drawing's callouts): what a page that may be a drawing has.
 const DRAWING_VIEW = "\\mviews?\\M";
 const NUMBERS_LINE = "(^|\\n)[ \\t]*[0-9]{1,3}[A-Za-z]?([ \\t]+[0-9]{1,3}[A-Za-z]?)*[ \\t]*(?=\\n|$)";
+// A line that's a view's heading, as Diagnose reads one (isHeadingLine in
+// src/lib/diagnose-parts.ts): in capitals with no full stop ("TRANSMISSION
+// EXPLODED VIEW"), or its words capitalised ending in the view ("Starter
+// Motor Exploded View"), one line at a time (?n). And a line in capitals
+// with VIEW in it ("TRANSMISSION VIEW", but also a figure's "TOP VIEW").
+const VIEW_HEADING = "(?n)^[^a-z.]*\\m(EXPLODED|ASSEMBLY|COMPONENT|PARTS?)[ \\t]+VIEWS?\\M[^a-z.]*$";
+const TITLED_VIEW = "(?n)^[ \\t]*([A-Z][A-Za-z/-]*[ \\t]+)*(Exploded|Assembly|Component|Parts?)[ \\t]+Views?[ \\t]*$";
+const CAPITALS_VIEW = "(?n)^[^a-z.]*\\mVIEWS?\\M[^a-z.]*$";
+// Pages whose text is read for that: the best ranked, and the best ranked
+// with the word "view" (the index says which, without reading any text).
+const DRAWING_CANDIDATES = 60;
 
 // Pages that may be drawings of what's searched for, for Diagnose's part
 // sheet (src/lib/diagnose-part-sheet.ts, where drawingScore decides): pages
 // of the given manuals with every word of the search and a view's heading
-// or callout numbers in their text, best ranked first, each with the start
-// of its text (textLength) and its manual's title. One query, matched
-// through ready_manual_pages as searchQuery is, the text looked at only
-// for the pages that match.
+// or callout numbers in their text, those with a view's heading first
+// (however many procedure pages name the part more often), then best
+// ranked, each with the start of its text (textLength) and its manual's
+// title. One query, matched through ready_manual_pages as searchQuery is;
+// the text is read only for a bounded set of the best candidates.
 export async function searchDrawingPages(shopId: string, query: string, manualIds: string[], limit: number, textLength: number): Promise<DrawingHit[]> {
   const q = cleanSearchQuery(query);
   if (!q || manualIds.length === 0) return [];
   const result = await withShop(shopId, (tx) =>
     tx.execute<{ manual_id: string; page_number: number; rank: number; text: string; title: string }>(sql`
-      with query as (select websearch_to_tsquery('english', ${q}) as tsq),
+      with query as (select websearch_to_tsquery('english', ${q}) as tsq, to_tsquery('english', 'view') as view),
       matches as materialized (
-        select v.manual_id, v.page_number,
+        select v.manual_id, v.page_number, v.search_vector @@ query.view as viewed,
           case when v.manual_id = any(${uuidArray(manualIds)}) then ts_rank_cd(v.search_vector, query.tsq, 1) end as rank
         from ready_manual_pages v
         cross join query
         where v.search_vector @@ query.tsq
+      ),
+      top as materialized (
+        (select manual_id, page_number, rank from matches where rank is not null order by rank desc, manual_id, page_number limit ${DRAWING_CANDIDATES})
+        union
+        (select manual_id, page_number, rank from matches where rank is not null and viewed order by rank desc, manual_id, page_number limit ${DRAWING_CANDIDATES})
+      ),
+      looked as (
+        select top.manual_id, top.page_number, top.rank, p.text,
+          case when p.text ~ ${VIEW_HEADING} or p.text ~ ${TITLED_VIEW} then 2 when p.text ~ ${CAPITALS_VIEW} then 1 else 0 end as heading
+        from top
+        join manual_pages p on p.manual_id = top.manual_id and p.page_number = top.page_number
       )
-      select m.manual_id, m.page_number, m.rank::float8 as rank, left(p.text, ${textLength}) as text, ${manualDisplayTitle} as title
-      from matches m
-      join manual_pages p on p.manual_id = m.manual_id and p.page_number = m.page_number
-      join manuals on manuals.id = m.manual_id
-      where m.rank is not null
-        and (p.text ~* ${DRAWING_VIEW} or (select count(*) from regexp_matches(p.text, ${NUMBERS_LINE}, 'g')) >= 2)
-      order by m.rank desc, m.manual_id, m.page_number
+      select r.manual_id, r.page_number, r.rank::float8 as rank, left(r.text, ${textLength}) as text, ${manualDisplayTitle} as title
+      from looked r
+      join manuals on manuals.id = r.manual_id
+      where r.heading > 0 or r.text ~* ${DRAWING_VIEW} or (select count(*) from regexp_matches(r.text, ${NUMBERS_LINE}, 'g')) >= 2
+      order by r.heading desc, r.rank desc, r.manual_id, r.page_number
       limit ${limit}
     `),
   );

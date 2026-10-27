@@ -33,11 +33,14 @@ import {
   cardOf,
   cardSettled,
   causesIn,
+  VIEW_SCORE,
+  drawingLabel,
   drawingPages,
   drawingScore,
   drawingsOf,
   isContentsPage,
   isDrawnSystem,
+  isHeadingLine,
   largePage,
   mentionsPart,
   numberedSteps,
@@ -57,6 +60,7 @@ import {
 } from "../src/lib/diagnose-parts";
 import type { DiagnosisReply } from "../src/lib/diagnose-rules";
 import { CAUSE_SYSTEMS, type DrawnSystem } from "../src/lib/diagnose-zones";
+import { searchDrawingPages } from "../src/lib/library";
 import { finishCatalogImport, saveCatalogBatch } from "../src/lib/manual-catalog";
 import { PAGE_FACTS_LIMITS, readPageFacts, savedPageFacts } from "../src/lib/manual-facts";
 import { FACTS_NUDGE, FACTS_TOOL_NAME, PAGE_FACTS_MODEL, type FactsState, type PageAsk, type PageFacts, type PageRef } from "../src/lib/manual-facts-rules";
@@ -141,6 +145,34 @@ const STARTER_EXPLODED = `STARTER MOTOR EXPLODED VIEW\n1\n2\n3\n4 5\n6\n7\n8\n10
 // A drawing with no heading, only its callouts and the part's name.
 const STARTER_CALLOUTS = `Starter Motor\n1 2\n3\n4\n5\n6\n7\n10.67`;
 const RZR_PAGES = [CONTENTS, WIRING, SOLENOID, STARTER, TROUBLESHOOTING, BATTERY, DIAGRAM_ONLY, STARTER_EXPLODED, STARTER_CALLOUTS];
+// A General's manual as a real one has it: many transmission procedure
+// pages that name it again and again, with a photo's callouts (lines of
+// only a number) and a figure's "TOP VIEW", around the one exploded view,
+// which names it in its heading and its parts list.
+const GEARBOX_PROCEDURE = (n: number) => `TRANSMISSION REMOVAL ${n}
+1. Remove the transmission skid plate and the transmission guard.
+2. Disconnect the transmission shift linkage at the transmission.
+3. Support the transmission with a jack.
+4. Remove the transmission mounting bolts and lower the transmission.
+1
+2
+3
+TOP VIEW
+9.${10 + n}`;
+const GEARBOX_EXPLODED = `TRANSMISSION EXPLODED VIEW
+1
+2
+3
+4 5
+6
+7
+8
+9
+10
+1 Transmission case  2 Input shaft  3 Bearing  4 Seal  5 Gear
+9.40`;
+const GEARBOX_PAGES = [...Array.from({ length: 20 }, (_, i) => GEARBOX_PROCEDURE(i + 1)), GEARBOX_EXPLODED];
+
 // Another line's manual with its own starter-solenoid page.
 const RANGER_SOLENOID = `STARTER SOLENOID SERVICE
 STARTER SOLENOID REPLACEMENT
@@ -250,6 +282,9 @@ async function conversation(
 const manualSource = (manualId: string, number: number) => ({ type: "manual" as const, manualId, page: number, title: rzrTitle });
 
 let unitConversation: string;
+let gearbox: string;
+let gearboxElsewhere: string;
+let gearboxConversation: string;
 
 before(async () => {
   const shopA = await createShop(`pa${suffix}`);
@@ -281,6 +316,11 @@ before(async () => {
       ],
     },
   );
+  // A General's manual (its transmission pages), and another manual in the
+  // same shop, outside the conversation, with an exploded view of its own.
+  gearbox = await addManual(adminA, "9931000.pdf", GEARBOX_PAGES);
+  gearboxElsewhere = await addManual(adminA, "9932000.pdf", [GEARBOX_EXPLODED, GEARBOX_EXPLODED.replace("9.40", "9.41")]);
+  gearboxConversation = await conversation(techA, { modelNumber: null, label: "General 4 1000", scope: [gearbox] }, null);
 });
 
 after(async () => {
@@ -536,6 +576,44 @@ describe("a part's drawings", () => {
     ]) assert.equal(drawingScore(text, part), 0, text.slice(0, 30));
   });
 
+  test("only a heading is a view's heading: a step or a note that points to a view isn't, and callouts alone are a page of callouts, never an exploded view", () => {
+    const removal = `TRANSMISSION REMOVAL\n1. Remove the skid plate.\n2. Disconnect the shift linkage.\nRefer to the exploded view on page 8.12 for the transmission.\n8.10`;
+    assert.equal(drawingScore(removal, "Transmission"), 0);
+    for (const line of [
+      "2. Refer to the exploded view of the transmission.",
+      "REFER TO THE TRANSMISSION EXPLODED VIEW ON PAGE 8.12.",
+      "See the assembly view for the transmission",
+      "The transmission parts view shows every seal and the order they go in",
+    ]) assert.equal(drawingScore(`TRANSMISSION SERVICE\n${line}\n8.11`, "Transmission"), 0, line);
+    for (const heading of ["TRANSMISSION EXPLODED VIEW", "Transmission Exploded View", "Exploded View of the Transmission", "ASSEMBLY VIEW"]) {
+      assert.ok(drawingScore(`${heading}\nTransmission case\n8.12`, "Transmission") >= VIEW_SCORE, heading);
+      assert.equal(isHeadingLine(heading), true, heading);
+    }
+    for (const line of ["Refer to the exploded view", "1. EXPLODED VIEW", "Remove the transmission.", "TOP"]) assert.equal(isHeadingLine(line), false, line);
+    // A procedure page with a photo's callouts 1 to 6: a page of callouts, not a view.
+    const photo = `TRANSMISSION REMOVAL\n1. Remove the transmission skid plate.\n2. Remove the transmission.\n1\n2\n3\n4\n5\n6\n8.13`;
+    const score = drawingScore(photo, "Transmission");
+    assert.ok(score > 0 && score < VIEW_SCORE, String(score));
+    const asCandidate = (text: string, page: number): PageCandidate => ({ manualId: "00000000-0000-4000-8000-000000000003", page, title: "General Service Manual", text, rank: 0.2, own: true, cited: null });
+    const procedure = asCandidate(photo, 13);
+    const other = asCandidate(photo.replace("8.13", "8.14"), 14);
+    const best: PartPage = { manualId: procedure.manualId, page: 13, title: procedure.title, cited: false, about: true };
+    // The sheet's best page stays its procedure page; another such page is a page of callouts, after the views.
+    const view = asCandidate("TRANSMISSION EXPLODED VIEW\nTransmission case\n8.12", 12);
+    assert.deepEqual(
+      drawingPages([procedure, other, view, asCandidate(removal, 10)], [best], "Transmission").map((page) => [page.page, page.kind]),
+      [
+        [12, "exploded"],
+        [14, "callouts"],
+        [13, "procedure"],
+      ],
+    );
+    assert.equal(drawingLabel({ manualId: best.manualId, page: 14, title: best.title, kind: "callouts", area: null, aspect: 1 }), "Drawing");
+    // With nothing to crop, only an exploded view is shown as its page.
+    const whole = (kind: DrawingPage["kind"], page: number) => ({ manualId: best.manualId, page, title: best.title, kind, area: null, aspect: 0.77 });
+    assert.deepEqual(panelDrawings([whole("callouts", 14), whole("procedure", 13), whole("exploded", 12)], null).map((drawing) => drawing.page), [12]);
+  });
+
   test("the pages for a part's drawings: its exploded views, the heading naming it and the unit's own manual first, then its procedure page, then pages cited for it; never one that only names it, each once, at most four", () => {
     const exploded = candidate(STARTER_EXPLODED, { rank: 0.05 });
     const callouts = candidate(STARTER_CALLOUTS, { rank: 0.5 });
@@ -549,7 +627,7 @@ describe("a part's drawings", () => {
       [
         ["own", 8, "exploded"],
         ["other", 8, "exploded"],
-        ["own", 9, "exploded"],
+        ["own", 9, "callouts"],
         ["own", 4, "procedure"],
       ],
     );
@@ -670,7 +748,7 @@ describe("the part sheet", () => {
       motor.drawings.map((page) => [page.manualId === rzr ? "rzr" : page.manualId, page.page, page.kind]),
       [
         ["rzr", 8, "exploded"],
-        ["rzr", 9, "exploded"],
+        ["rzr", 9, "callouts"],
         ["rzr", 4, "procedure"],
       ],
     );
@@ -685,6 +763,23 @@ describe("the part sheet", () => {
     assert.deepEqual(frame.drawings, []);
     // Another shop's copy of the manual is never searched.
     assert.ok(!motor.drawings.some((page) => page.manualId === otherShopRzr));
+  });
+
+  test("a part's exploded view among many procedure pages that name the part more often, in the conversation's manuals only", async () => {
+    const sheet = sheetOf(await partSheet(techA, { conversationId: gearboxConversation, system: "transmission", part: "Transmission" }));
+    // The exploded view first, though twenty procedure pages rank higher in
+    // the search (and have callouts and a "TOP VIEW").
+    assert.deepEqual([sheet.drawings[0]?.manualId, sheet.drawings[0]?.page, sheet.drawings[0]?.kind], [gearbox, 21, "exploded"], JSON.stringify(sheet.drawings));
+    assert.equal(sheet.drawings.filter((page) => page.kind === "exploded").length, 1);
+    // The procedure page after it, as a procedure; never the other manual in the shop.
+    assert.equal(sheet.drawings.find((page) => page.page === sheet.pages[0]?.page)?.kind ?? "procedure", "procedure");
+    assert.ok(!sheet.drawings.some((page) => page.manualId === gearboxElsewhere), JSON.stringify(sheet.drawings));
+    // Straight from the search: the view first, at most the limit, all from the manuals asked for.
+    const hits = await searchDrawingPages(techA.shop.id, "transmission", [gearbox], 12, 20_000);
+    assert.equal(hits.length, 12);
+    assert.deepEqual([hits[0].manualId, hits[0].pageNumber], [gearbox, 21]);
+    assert.ok(hits.every((hit) => hit.manualId === gearbox));
+    assert.deepEqual(await searchDrawingPages(techB.shop.id, "transmission", [gearbox], 12, 20_000), []);
   });
 
   test("a part no page is about: the pages that name it, without a card", async () => {

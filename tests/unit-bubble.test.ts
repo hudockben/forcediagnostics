@@ -1,7 +1,10 @@
 // Where a part's drawing sits on the examine view's stage: beside the part,
 // never over its point, inside the stage, off the callouts' labels, kept
-// where it was while that holds; a strip across the top on a narrow stage;
-// and the leader from the bubble's edge to the part. Pure: no browser.
+// where it was while that holds (as drawn on whole pixels, through a slow
+// turn and a label sweeping by); off other flagged parts and the callouts'
+// leaders; a strip across the top on a narrow stage; and the leader from
+// the bubble's edge to the part, never through the part's own label.
+// Pure: no browser.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
@@ -13,8 +16,10 @@ import {
   bubbleFits,
   distanceTo,
   leaderOf,
+  lineCrosses,
   onStage,
   overlap,
+  piecesAlong,
   placeBubble,
   stripRect,
   stripTop,
@@ -87,6 +92,80 @@ describe("the bubble's place", () => {
     assert.equal(overlap(off, label), 0, JSON.stringify(off));
   });
 
+  // As the stage draws it: on whole pixels.
+  const drawn = (rect: Rect): Rect => ({ ...rect, x: Math.round(rect.x), y: Math.round(rect.y) });
+
+  test("kept where it was as drawn on whole pixels, the part's point between pixels, on either side of it", () => {
+    for (const x of [374.4, 374.7, 374.3, 374.5]) {
+      const anchor = { x, y: 390.6 };
+      const first = drawn(placeBubble({ stage, size, anchor, avoid: [], last: null }));
+      assert.deepEqual(placeBubble({ stage, size, anchor, avoid: [], last: first }), first, `right of ${x}`);
+      // On the part's left (a label on its right).
+      const beside: Rect = { x: x + 40, y: 100, w: 340, h: 600 };
+      const left = drawn(placeBubble({ stage, size, anchor, avoid: [beside], last: null }));
+      assert.ok(left.x + left.w <= x, JSON.stringify(left));
+      assert.deepEqual(placeBubble({ stage, size, anchor, avoid: [beside], last: left }), left, `left of ${x}`);
+    }
+    // Two hundred points anywhere: kept every time.
+    let seed = 7;
+    const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 200; i++) {
+      const anchor = { x: 100 + random() * 550, y: 100 + random() * 580 };
+      const first = drawn(placeBubble({ stage, size, anchor, avoid: [], last: null }));
+      assert.deepEqual(placeBubble({ stage, size, anchor, avoid: [], last: first }), first, JSON.stringify(anchor));
+    }
+  });
+
+  test("a slow turn of the camera with nothing in the way: it doesn't move at all", () => {
+    let last: Rect | null = null;
+    let moves = 0;
+    for (let frame = 0; frame < 120; frame++) {
+      const anchor = { x: 374.3 + Math.sin(frame / 20) * 5, y: 390 + Math.cos(frame / 15) * 5 };
+      const placed: Rect = drawn(placeBubble({ stage, size, anchor, avoid: [], last }));
+      if (last && (placed.x !== last.x || placed.y !== last.y)) moves++;
+      last = placed;
+    }
+    assert.equal(moves, 0);
+  });
+
+  test("a label sweeping across it moves it once, and it stays where it went when the label's gone", () => {
+    const anchor = { x: 374.7, y: 390.2 };
+    let last: Rect | null = drawn(placeBubble({ stage, size, anchor, avoid: [], last: null }));
+    const start = last;
+    const spots: string[] = [];
+    for (let step = 0; step <= 40; step++) {
+      // A label 120 by 26 moving right to left across the stage, level with the bubble's top.
+      const label: Rect = { x: 760 - step * 22, y: start.y + 20, w: 120, h: 26 };
+      last = drawn(placeBubble({ stage, size, anchor, avoid: label.x + label.w > 0 ? [label] : [], last }));
+      if (spots.at(-1) !== `${last.x},${last.y}`) spots.push(`${last.x},${last.y}`);
+      assert.ok(overlap(last, label) === 0 || label.x + label.w <= 0, `${step}: over the label ${JSON.stringify({ last, label })}`);
+    }
+    // Moved off its way (once, or once more as it reached the new spot), never back and forth.
+    assert.ok(spots.length >= 2 && spots.length <= 3, spots.join(" -> "));
+    assert.equal(new Set(spots).size, spots.length, spots.join(" -> "));
+  });
+
+  test("off another flagged part round its point, and as far as it can off the callouts' leaders", () => {
+    const anchor = { x: 375, y: 390 };
+    // Another part's point where the bubble would go on the right.
+    const other: Rect = { x: 460 - 20, y: 390 - 20, w: 40, h: 40 };
+    const rect = placeBubble({ stage, size, anchor, avoid: [other], last: null });
+    assert.equal(overlap(rect, other), 0, JSON.stringify(rect));
+    // A leader running up through the spot on the right: the left, as near.
+    const leader = piecesAlong([
+      [520, 700],
+      [520, 60],
+    ]);
+    assert.ok(leader.length >= 10 && leader.every((piece) => piece.w === 6 && piece.h === 6));
+    const clear = placeBubble({ stage, size, anchor, avoid: [], soft: leader, last: null });
+    assert.ok(leader.every((piece) => overlap(clear, piece) === 0), JSON.stringify(clear));
+    assert.ok(distanceTo(clear, anchor) >= BUBBLE_CLEAR - 1e-9 && distanceTo(clear, anchor) < BUBBLE_CLEAR + 1, JSON.stringify(clear));
+    // With nowhere clear of a leader, still clear of the part.
+    const wall = [...piecesAlong([[40, 0], [40, 780]]), ...piecesAlong([[700, 0], [700, 780]]), ...piecesAlong([[0, 200], [750, 200]]), ...piecesAlong([[0, 600], [750, 600]])];
+    const anyway = placeBubble({ stage, size, anchor, avoid: [], soft: wall, last: null });
+    assert.ok(distanceTo(anyway, anchor) >= BUBBLE_CLEAR - 1e-9 && inside(anyway, stage), JSON.stringify(anyway));
+  });
+
   test("the part off the stage: anywhere free, kept where it was", () => {
     const first = placeBubble({ stage, size, anchor: null, avoid: [], last: null });
     assert.ok(inside(first, stage), JSON.stringify(first));
@@ -145,6 +224,28 @@ describe("the leader", () => {
     assert.deepEqual(down, { from: { x: 200, y: strip.y + strip.h }, to: { x: 200, y: 180 } });
     assert.equal(leaderOf(strip, { x: 200, y: strip.y + strip.h + 6 }, { below: true }), null);
     assert.equal(leaderOf(strip, { x: 200, y: 40 }, { below: true }), null);
+  });
+
+  test("the strip's never runs through the part's own label: down beside it instead, or none", () => {
+    const strip = stripRect({ width: 390, height: 320 });
+    const anchor = { x: 200, y: 220 };
+    // The part's own callout label between the strip and its point.
+    const own: Rect = { x: 170, y: 140, w: 70, h: 24 };
+    const beside = leaderOf(strip, anchor, { below: true, blocked: [own] });
+    assert.ok(beside && beside.from.y === strip.y + strip.h && !lineCrosses(beside.from, beside.to, own), JSON.stringify(beside));
+    assert.ok(beside.from.x < own.x || beside.from.x > own.x + own.w, JSON.stringify(beside));
+    // A wide label right over the point: no way past it.
+    assert.equal(leaderOf(strip, anchor, { below: true, blocked: [{ x: 20, y: 150, w: 350, h: 60 }] }), null);
+    // Out of its way, the straight drop.
+    assert.deepEqual(leaderOf(strip, anchor, { below: true, blocked: [{ x: 300, y: 140, w: 60, h: 24 }] }), { from: { x: 200, y: strip.y + strip.h }, to: anchor });
+  });
+
+  test("a line through a box, or past it", () => {
+    const box: Rect = { x: 10, y: 10, w: 20, h: 20 };
+    assert.equal(lineCrosses({ x: 0, y: 0 }, { x: 40, y: 40 }, box), true);
+    assert.equal(lineCrosses({ x: 0, y: 40 }, { x: 5, y: 0 }, box), false);
+    assert.equal(lineCrosses({ x: 20, y: 0 }, { x: 20, y: 5 }, box), false);
+    assert.equal(lineCrosses({ x: 20, y: 0 }, { x: 20, y: 15 }, box), true);
   });
 
   test("a point is on the stage unless it's behind the camera or off an edge", () => {

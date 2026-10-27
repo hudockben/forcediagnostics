@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -18,7 +19,7 @@ import { createPortal } from "react-dom";
 
 import { CAUSE_SYSTEMS, SYSTEM_LABELS, type CauseSystem, type DrawnSystem, type Glow, type UnitVehicle, type ZoneState } from "@/lib/diagnose-zones";
 import { FLAG_COLOURS, KEY_WORDS, LINE_COLOURS, METER_LIT, calloutItems, calloutMark, glowWords, isLit, modeByDefault, unitSummary, type ViewMode } from "@/lib/unit-3d/look";
-import { STRIP_HEIGHT, bubbleDocked, bubbleFits, leaderOf, onStage, placeBubble, stripRect, stripTop, type Rect } from "@/lib/unit-3d/bubble";
+import { BUBBLE_CLEAR, STRIP_HEIGHT, bubbleDocked, bubbleFits, leaderOf, onStage, piecesAlong, placeBubble, stripRect, stripTop, type Rect } from "@/lib/unit-3d/bubble";
 import type { ProjectedFrame, UnitViewer, ViewPreset } from "@/lib/unit-3d/viewer";
 import { CIRCLE_AT, fitCallouts, type Callout } from "@/lib/unit-graphic/callouts";
 import { UNIT_LINE_NAMES, type UnitSpec } from "@/lib/unit-vehicle";
@@ -685,16 +686,30 @@ function calloutLayout(frame: ProjectedFrame, states: ZoneState[], { keep = null
   return { callouts, compact, ruledOut };
 }
 
-// What the drawing's bubble mustn't cover: each callout's label (and a
-// little round it), the dot its leader ends in, and the ruled-out marks.
-function calloutObstacles(frame: ProjectedFrame, states: ZoneState[], options: CalloutOptions): Rect[] {
+// Round another flagged part's point, what the drawing's bubble keeps off
+// (some of the part itself).
+const OTHER_PART = Math.round(BUBBLE_CLEAR * 0.35);
+
+// What the drawing's bubble mustn't cover (see src/lib/unit-3d/bubble.ts):
+// each callout's label (and a little round it), the dot its leader ends in
+// (for another system, some of the part round it), and the ruled-out
+// marks; and, as far as it can, the leaders between them. And the picked
+// system's own label, which the strip's leader mustn't run through.
+function calloutObstacles(frame: ProjectedFrame, states: ZoneState[], options: CalloutOptions): BubbleObstacles {
   const { callouts, ruledOut } = calloutLayout(frame, states, options);
   const around = (x: number, y: number, r: number): Rect => ({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
-  return [
-    ...callouts.flatMap((callout) => [{ x: callout.x - 4, y: callout.y - 4, w: callout.w + 8, h: callout.h + 8 }, around(callout.leader[0][0], callout.leader[0][1], 8)]),
-    ...ruledOut.map(({ point }) => around(point.x, point.y, 10)),
-  ];
+  const label = (callout: Callout): Rect => ({ x: callout.x - 4, y: callout.y - 4, w: callout.w + 8, h: callout.h + 8 });
+  const own = callouts.find((callout) => callout.zone === options.keep);
+  return {
+    avoid: [
+      ...callouts.flatMap((callout) => [label(callout), around(callout.leader[0][0], callout.leader[0][1], callout.zone === options.keep ? 8 : OTHER_PART)]),
+      ...ruledOut.map(({ point }) => around(point.x, point.y, 10)),
+    ],
+    soft: callouts.flatMap((callout) => piecesAlong(callout.leader)),
+    own: own ? label(own) : null,
+  };
 }
+type BubbleObstacles = { avoid: Rect[]; soft: Rect[]; own: Rect | null };
 
 // Each lit system's callout, as in a service manual: a numbered circle (its
 // cause's number in the Likely causes list) with the system's name and the
@@ -882,6 +897,9 @@ function Examine({
       }),
     [],
   );
+  // The part's chip tapped again: its bubble back, if it was put away.
+  const reopen = useCallback((of: DrawnSystem) => setDrawings((old) => (old.closed && old.shown?.system === of ? { shown: old.shown, closed: null } : old)), []);
+  const toStage = useMemo(() => ({ report, reopen }), [report, reopen]);
   // Floating beside the part, docked across the top (a narrow stage), or
   // none (a stage too short for it, or no frame yet).
   const room = useSyncExternalStore(frames.subscribe, () => roomOf(frames.get()), () => "none" as const);
@@ -997,7 +1015,7 @@ function Examine({
             {ready && <Callouts store={frames} states={states} active={system ?? active} onPick={onPick} keep={system} full top={top} action="Examine" />}
             {ready && <HoverLabel picker={hover} />}
             {bubble && system && (
-              <BubbleLayer frames={frames} system={system} docked={docked} avoid={(frame) => calloutObstacles(frame, states, { keep: system, full: true, top })}>
+              <BubbleLayer frames={frames} system={system} docked={docked} obstacles={(frame) => calloutObstacles(frame, states, { keep: system, full: true, top })}>
                 <DrawingBubble shown={bubble} docked={docked} onClose={closeBubble} />
               </BubbleLayer>
             )}
@@ -1045,7 +1063,7 @@ function Examine({
           </div>
         </div>
         {system && (
-          <StageDrawingsContext value={report}>
+          <StageDrawingsContext value={toStage}>
             <SystemSheet
               system={system}
               state={state}
@@ -1073,20 +1091,22 @@ function roomOf(frame: ProjectedFrame | null): "float" | "dock" | "none" {
 // again on every frame the camera moves (as the callouts are), straight on
 // the elements, nothing rendered again: beside the part, off the callouts,
 // where it was while that's still clear (src/lib/unit-3d/bubble.ts); docked
-// across the top on a narrow stage. The leader goes when the part's point
-// leaves the stage. Placed before it's painted, so it never shows where it
-// isn't.
+// across the top on a narrow stage. Where it was is kept as worked out,
+// not as drawn on whole pixels (half a pixel nearer the part mustn't send
+// it across). The leader goes when the part's point leaves the stage (or,
+// docked, when the part's own label is in its way). Placed before it's
+// painted, so it never shows where it isn't.
 function BubbleLayer({
   frames,
   system,
   docked,
-  avoid,
+  obstacles,
   children,
 }: {
   frames: FrameStore;
   system: DrawnSystem;
   docked: boolean;
-  avoid: (frame: ProjectedFrame) => Rect[];
+  obstacles: (frame: ProjectedFrame) => BubbleObstacles;
   children: ReactNode;
 }) {
   const box = useRef<HTMLDivElement>(null);
@@ -1095,9 +1115,9 @@ function BubbleLayer({
   const placeNow = useRef<(() => void) | null>(null);
   // The latest callouts to keep off: they can change without a new frame
   // (a cause marked in the sheet), and then it's placed again.
-  const keepOff = useRef(avoid);
+  const keepOff = useRef(obstacles);
   useEffect(() => {
-    keepOff.current = avoid;
+    keepOff.current = obstacles;
     placeNow.current?.();
   });
   useLayoutEffect(() => {
@@ -1116,14 +1136,15 @@ function BubbleLayer({
       }
       const stage = { width: frame.width, height: frame.height };
       const anchor = onStage(frame.points.get(system), stage);
-      const placed = docked ? stripRect(stage) : placeBubble({ stage, size, anchor, avoid: keepOff.current(frame), last: last.current });
+      const { avoid, soft, own } = keepOff.current(frame);
+      const placed = docked ? stripRect(stage) : placeBubble({ stage, size, anchor, avoid, soft, last: last.current });
+      last.current = placed;
       const rect = { x: Math.round(placed.x), y: Math.round(placed.y), w: placed.w, h: placed.h };
-      last.current = rect;
       element.style.transform = `translate(${rect.x}px, ${rect.y}px)`;
       element.style.width = docked ? `${rect.w}px` : "";
       element.style.visibility = "";
       element.dataset.placed = `${rect.x},${rect.y},${Math.round(rect.w)},${Math.round(rect.h)}`;
-      const shown = leaderOf(rect, anchor, { below: docked });
+      const shown = leaderOf(rect, anchor, { below: docked, blocked: docked && own ? [own] : [] });
       if (!shown) {
         lead.style.display = "none";
         lead.dataset.shown = "false";

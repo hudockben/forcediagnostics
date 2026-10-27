@@ -1,7 +1,8 @@
 import type { PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask } from "pdfjs-dist";
 
-import { areaOf, areaParam, figuresOf, heightOf, imageBoxes, isCalloutText, widthOf, type FigureOps, type PageArea, type PageFigures, type PageLabel } from "@/lib/manual-figures";
+import { areaOf, areaParam, cropOf, figuresOf, imageBoxes, isCalloutText, type FigureOps, type PageArea, type PageFigures, type PageLabel } from "@/lib/manual-figures";
 import { PDFJS_WASM_URL, loadPdfJs } from "@/lib/pdfjs";
+import { workQueue, type Job } from "@/lib/work-queue";
 
 import { getManualFileUrl } from "../library/actions";
 import { openStoragePdf, type StorageLink, type StoragePdf } from "../library/[manualId]/storage-pdf";
@@ -13,12 +14,13 @@ import { openStoragePdf, type StorageLink, type StoragePdf } from "../library/[m
 // storage-pdf.ts). One copy of each manual's PDF is opened (pdf.js reads
 // only the parts a page needs), all of them in one shared pdf.js worker
 // (not a worker, its own copy of pdf.js's code and caches, per manual cited),
-// at most two pages draw at once, and each
-// picture is kept (a small image) so it draws once however often it's
-// shown. A part's drawings are found on its pages here too (where each page
-// paints its images, src/lib/manual-figures.ts) and cropped out of them,
-// each drawn once and kept the same way. Everything is let go a little
-// after the Diagnose page goes.
+// at most two pages draw at once (what's on the screen first, nothing for
+// a part or a picture that's gone), and each picture is kept (a small
+// image, the page's decoded images let go once it's made) so it draws once
+// however often it's shown. A part's drawings are found on its pages here
+// too (where each page paints its images, src/lib/manual-figures.ts) and
+// cropped out of them, each drawn once and kept the same way. Everything
+// is let go a little after the Diagnose page goes.
 
 const RANGE_CHUNK_BYTES = 128 * 1024;
 // Tablets refuse canvases much bigger than this many pixels.
@@ -34,25 +36,14 @@ type OpenManual = { pdf: StoragePdf; doc: PDFDocumentProxy; pageCount: number };
 
 const opened = new Map<string, Promise<OpenManual>>();
 let worker: PDFWorker | null = null;
-const pictures = new Map<string, Promise<string>>();
-const figures = new Map<string, Promise<PageFigures>>();
+const pictures = new Map<string, Job<string>>();
+const figures = new Map<string, Job<PageFigures>>();
 let users = 0;
 let releaseTimer: ReturnType<typeof setTimeout> | undefined;
 
-// Two at a time: a tablet stays responsive, and slow shop Wi-Fi isn't
-// asked for a dozen pages at once.
-let running = 0;
-const waiting: (() => void)[] = [];
-async function slot<T>(work: () => Promise<T>): Promise<T> {
-  if (running >= 2) await new Promise<void>((resolve) => waiting.push(resolve));
-  running++;
-  try {
-    return await work();
-  } finally {
-    running--;
-    waiting.shift()?.();
-  }
-}
+// Two at a time, pictures on the screen before looking for drawings, and
+// nothing for an asker that's gone (src/lib/work-queue.ts).
+const { shared } = workQueue(2);
 
 function open(manualId: string): Promise<OpenManual> {
   let manual = opened.get(manualId);
@@ -164,39 +155,45 @@ export async function headingArea(manualId: string, pageNumber: number, heading:
 }
 
 // A picture kept for the next time it's shown (an image URL), made once.
-function keptPicture(key: string, make: (canvas: HTMLCanvasElement) => Promise<void>): Promise<string> {
-  let picture = pictures.get(key);
-  if (picture) {
-    // Most recently used last.
-    pictures.delete(key);
-    pictures.set(key, picture);
-    return picture;
-  }
-  picture = slot(async () => {
-    const canvas = document.createElement("canvas");
-    await make(canvas);
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", 0.82));
-    canvas.width = canvas.height = 0;
-    if (!blob) throw new Error("The page couldn't be turned into a picture.");
-    return URL.createObjectURL(blob);
-  });
-  picture.catch(() => {
-    if (pictures.get(key) === picture) pictures.delete(key);
-  });
-  pictures.set(key, picture);
+// make draws it into the canvas and says which page it drew: that page's
+// images (pdf.js keeps every image it decoded for a page until it's told
+// to let them go; a manual's drawing can be tens of megabytes) are let go
+// once the picture is made, as it's kept as an image anyway.
+function keptPicture(key: string, make: (canvas: HTMLCanvasElement) => Promise<PDFPageProxy>, signal?: AbortSignal): Promise<string> {
+  const picture = shared(
+    pictures,
+    key,
+    async () => {
+      const canvas = document.createElement("canvas");
+      const page = await make(canvas);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", 0.82));
+      canvas.width = canvas.height = 0;
+      // Put off by pdf.js while another drawing of the page is under way
+      // (the full-screen page), and done when that's finished.
+      page.cleanup();
+      if (!blob) throw new Error("The page couldn't be turned into a picture.");
+      return URL.createObjectURL(blob);
+    },
+    { signal, first: true },
+  );
   while (pictures.size > PICTURES_KEPT) {
-    const [oldest, url] = pictures.entries().next().value!;
+    const [oldest, job] = pictures.entries().next().value!;
     pictures.delete(oldest);
-    void url.then((u) => URL.revokeObjectURL(u), () => {});
+    void job.promise.then((u) => URL.revokeObjectURL(u), () => {});
   }
   return picture;
 }
 
 // A small picture of a page, as an image URL (kept for the next time).
-export function pagePicture(manualId: string, pageNumber: number, cssWidth: number): Promise<string> {
-  return keptPicture(`${manualId}:${pageNumber}:${cssWidth}`, async (canvas) => {
-    await drawPage(manualId, pageNumber, canvas, cssWidth);
-  });
+export function pagePicture(manualId: string, pageNumber: number, cssWidth: number, signal?: AbortSignal): Promise<string> {
+  return keptPicture(
+    `${manualId}:${pageNumber}:${cssWidth}`,
+    async (canvas) => {
+      await drawPage(manualId, pageNumber, canvas, cssWidth);
+      return (await pageOf(manualId, pageNumber)).page;
+    },
+    signal,
+  );
 }
 
 // A drawing cropped out of a page (an area of it), as a picture `cssWidth`
@@ -204,59 +201,60 @@ export function pagePicture(manualId: string, pageNumber: number, cssWidth: numb
 // page is drawn, at the scale it needs, so a small drawing comes out as
 // sharp as a large one without a canvas the size of the whole page at that
 // scale. Kept for the next time, like a page's picture.
-export function figurePicture(manualId: string, pageNumber: number, area: PageArea, cssWidth: number): Promise<string> {
-  return keptPicture(`${manualId}:${pageNumber}:${areaParam(area)}:${cssWidth}`, async (canvas) => {
-    const { manual, page } = await pageOf(manualId, pageNumber);
-    const base = page.getViewport({ scale: 1 });
-    const width = widthOf(area) * base.width;
-    const height = heightOf(area) * base.height;
-    const css = cssWidth / width;
-    const ratio = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(MAX_CANVAS_PIXELS / (cssWidth * cssWidth * (height / width))));
-    const scale = Math.min(css * ratio, MAX_CROP_SCALE);
-    // The page moved so the area's top left is the canvas's.
-    const viewport = page.getViewport({ scale, offsetX: -area.left * base.width * scale, offsetY: -area.top * base.height * scale });
-    canvas.width = Math.max(1, Math.round(width * scale));
-    canvas.height = Math.max(1, Math.round(height * scale));
-    await Promise.race([manual.pdf.broken, page.render({ canvas, viewport }).promise]);
-  });
+export function figurePicture(manualId: string, pageNumber: number, area: PageArea, cssWidth: number, signal?: AbortSignal): Promise<string> {
+  return keptPicture(
+    `${manualId}:${pageNumber}:${areaParam(area)}:${cssWidth}`,
+    async (canvas) => {
+      const { manual, page } = await pageOf(manualId, pageNumber);
+      const crop = cropOf(area, page.getViewport({ scale: 1 }), cssWidth, { ratio: window.devicePixelRatio || 1, pixels: MAX_CANVAS_PIXELS, most: MAX_CROP_SCALE });
+      // The page moved so the area's top left is the canvas's.
+      const viewport = page.getViewport({ scale: crop.scale, offsetX: crop.offsetX, offsetY: crop.offsetY });
+      canvas.width = crop.width;
+      canvas.height = crop.height;
+      await Promise.race([manual.pdf.broken, page.render({ canvas, viewport }).promise]);
+      return page;
+    },
+    signal,
+  );
 }
 
 // A page's drawings (src/lib/manual-figures.ts): where it paints its
 // images, from pdf.js's list of the page's operations (worked out in the
 // shared worker, which reads only the parts of the file the page needs;
 // annotations aren't the page's drawings), with the callout numbers its
-// text layer prints around them. Found once for the visit; a page that
-// couldn't be read is looked at again the next time it's asked for.
-export function pageFigures(manualId: string, pageNumber: number): Promise<PageFigures> {
-  const key = `${manualId.toLowerCase()}:${pageNumber}`;
-  let found = figures.get(key);
-  if (found) return found;
-  found = slot(async () => {
-    const { manual, page } = await pageOf(manualId, pageNumber);
-    const pdfjs = await loadPdfJs();
-    const list = await Promise.race([manual.pdf.broken, page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE })]);
-    const viewport = page.getViewport({ scale: 1 });
-    const images = imageBoxes(list, pdfjs.OPS as unknown as FigureOps).flatMap((box) => areaOf(box, viewport) ?? []);
-    let labels: PageLabel[] = [];
-    if (images.length > 0) {
-      const content = await Promise.race([manual.pdf.broken, page.getTextContent()]);
-      labels = content.items.flatMap((item) => {
-        if (!("str" in item) || !isCalloutText(item.str)) return [];
-        const [x, y] = [item.transform[4], item.transform[5]];
-        const height = item.height || Math.hypot(item.transform[2], item.transform[3]);
-        const area = areaOf({ x0: x, y0: y, x1: x + item.width, y1: y + height }, viewport);
-        return area ? [{ text: item.str, area }] : [];
-      });
-    }
-    // The images pdf.js decoded for the list aren't needed again (a scan's is
-    // tens of megabytes): let them go, unless the page is being drawn.
-    page.cleanup();
-    return figuresOf(images, { aspect: viewport.width / viewport.height, labels });
-  });
-  found.catch(() => {
-    if (figures.get(key) === found) figures.delete(key);
-  });
-  figures.set(key, found);
+// text layer prints around them. Found once for the visit (after the
+// pictures waiting to be drawn); a page that couldn't be read is looked at
+// again the next time it's asked for, as is one whose askers all went
+// before it was looked at.
+export function pageFigures(manualId: string, pageNumber: number, signal?: AbortSignal): Promise<PageFigures> {
+  const found = shared(
+    figures,
+    `${manualId.toLowerCase()}:${pageNumber}`,
+    async () => {
+      const { manual, page } = await pageOf(manualId, pageNumber);
+      const pdfjs = await loadPdfJs();
+      const list = await Promise.race([manual.pdf.broken, page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE })]);
+      const viewport = page.getViewport({ scale: 1 });
+      const images = imageBoxes(list, pdfjs.OPS as unknown as FigureOps).flatMap((box) => areaOf(box, viewport) ?? []);
+      let labels: PageLabel[] = [];
+      if (images.length > 0) {
+        const content = await Promise.race([manual.pdf.broken, page.getTextContent()]);
+        labels = content.items.flatMap((item) => {
+          if (!("str" in item) || !isCalloutText(item.str)) return [];
+          const [x, y] = [item.transform[4], item.transform[5]];
+          const height = item.height || Math.hypot(item.transform[2], item.transform[3]);
+          const area = areaOf({ x0: x, y0: y, x1: x + item.width, y1: y + height }, viewport);
+          return area ? [{ text: item.str, area }] : [];
+        });
+      }
+      // The images pdf.js decoded for the list (a scan's is tens of
+      // megabytes) aren't the ones a picture of the page draws with (that's
+      // another list, decoded again, and let go once it's drawn): let them go.
+      page.cleanup();
+      return figuresOf(images, { aspect: viewport.width / viewport.height, labels });
+    },
+    { signal },
+  );
   while (figures.size > FIGURES_KEPT) figures.delete(figures.keys().next().value!);
   return found;
 }
@@ -280,7 +278,7 @@ export function holdManuals(): () => void {
       const shared = worker;
       worker = null;
       void Promise.all(closing).then(() => shared?.destroy());
-      for (const picture of pictures.values()) void picture.then((u) => URL.revokeObjectURL(u), () => {});
+      for (const picture of pictures.values()) void picture.promise.then((u) => URL.revokeObjectURL(u), () => {});
       pictures.clear();
       figures.clear();
     }, RELEASE_AFTER_MS);

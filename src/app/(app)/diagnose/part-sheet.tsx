@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { use, useEffect, useState } from "react";
 
 import {
   cardSettled,
@@ -22,7 +22,7 @@ import { SYSTEM_LABELS, type DrawnSystem } from "@/lib/diagnose-zones";
 import type { FactsState, PageFacts, PageRef } from "@/lib/manual-facts-rules";
 import { areaParam } from "@/lib/manual-figures";
 
-import { useStageDrawings } from "./drawing-bubble";
+import { StageDrawingsContext, useStageDrawings } from "./drawing-bubble";
 import { BookIcon, SearchIcon, WrenchIcon, ZoomInIcon } from "./icons";
 import { usePagePicture, usePageView, usePartDrawings } from "./manual-pictures";
 
@@ -176,12 +176,18 @@ export function PartSheetSection({
   const drawings = panelDrawings(found.drawings, large);
   // And the examine view's bubble on the 3D unit (drawing-bubble.tsx): the
   // part's drawings with no page under them, an exploded view whole too.
+  // None while the first sheet comes (a part with no drawing never shows a
+  // frame); while another part's sheet comes, the last part's, dimmed, as
+  // the sheet is; a still frame only once the part has pages to look on
+  // and none of their drawings is found yet.
   const onStage = panelDrawings(found.drawings, null);
+  const stage = use(StageDrawingsContext);
   useStageDrawings({
     system,
-    part,
-    state: answer === null || stale || (sheet !== null && found.state === "finding") ? "loading" : onStage.length > 0 ? "found" : "none",
+    part: stale ? (sheet?.part ?? part) : part,
+    state: !sheet ? "none" : onStage.length > 0 ? "found" : found.state === "finding" ? "loading" : "none",
     drawings: onStage,
+    stale,
   });
 
   // The large page's card: as the sheet brought it when that's settled,
@@ -219,7 +225,11 @@ export function PartSheetSection({
   const state = card?.key === largeKey ? card.state : given && cardSettled(given) ? given : null;
 
   function pick(name: string) {
-    if (part !== null && name.toLowerCase() === part.toLowerCase()) return;
+    // The part picked already: its drawing on the unit comes back if it was put away.
+    if (part !== null && name.toLowerCase() === part.toLowerCase()) {
+      stage?.reopen(system);
+      return;
+    }
     setPicked(name);
     setChosen(null);
   }
@@ -303,8 +313,11 @@ export function PartSheetSection({
           {mentionsOnly && <MentionsOnly part={answer.part} />}
           {drawings.length > 0 && (
             <Drawings
-              key={`${answer.part}|${drawings.map(drawingKey).join("|")}`}
+              key={answer.part}
               drawings={drawings}
+              // In the examine view the bubble on the unit shows the drawing
+              // too: lower, so the page and its card are in the first screen.
+              height={stage ? EXAMINE_DRAWING_HEIGHT : DRAWING_HEIGHT}
               onOpen={(drawing) => openPage?.({ manualId: drawing.manualId, page: drawing.page, title: drawing.title, ...(drawing.area ? { focus: drawing.area } : {}) })}
             />
           )}
@@ -439,25 +452,26 @@ function LargePage({ page, onOpen }: { page: PartPage; onOpen: () => void }) {
 // sheet unless that would make it taller than this, then centred.
 const shapeOf = (aspect: number) => Math.min(2.4, Math.max(0.6, aspect || 1));
 const DRAWING_HEIGHT = "min(34rem, 62vh)";
+const EXAMINE_DRAWING_HEIGHT = "min(28rem, 44vh)";
 
 // The part's drawings: one large, across the sheet (a tap opens its page
 // full screen, zoomed to it), the others in a strip under it (a tap shows
-// that one large).
-function Drawings({ drawings, onOpen }: { drawings: PartDrawing[]; onOpen: (drawing: PartDrawing) => void }) {
-  const [shown, setShown] = useState(0);
-  const index = shown < drawings.length ? shown : 0;
+// that one large). More found while they're shown join the strip.
+function Drawings({ drawings, height, onOpen }: { drawings: PartDrawing[]; height: string; onOpen: (drawing: PartDrawing) => void }) {
+  const [shown, setShown] = useState<string | null>(null);
+  const index = Math.max(0, drawings.findIndex((drawing) => drawingKey(drawing) === shown));
   const large = drawings[index];
   // As wide as the sheet, or as the large one is at its tallest (centred,
   // with its strip under it).
   return (
-    <div data-part-drawings className="mx-auto space-y-2" style={{ maxWidth: `min(100%, calc(${DRAWING_HEIGHT} * ${shapeOf(large.aspect)}))` }}>
+    <div data-part-drawings className="mx-auto space-y-2" style={{ maxWidth: `min(100%, calc(${height} * ${shapeOf(large.aspect)}))` }}>
       <LargeDrawing key={drawingKey(large)} drawing={large} place={drawings.length > 1 ? `${index + 1} of ${drawings.length}` : null} onOpen={() => onOpen(large)} />
       {drawings.length > 1 && (
         <ul aria-label="Other drawings" className="flex gap-2 overflow-x-auto pb-1">
           {drawings.map((drawing, i) =>
             i === index ? null : (
               <li key={drawingKey(drawing)} className="shrink-0">
-                <DrawingThumb drawing={drawing} onPick={() => setShown(i)} />
+                <DrawingThumb drawing={drawing} onPick={() => setShown(drawingKey(drawing))} />
               </li>
             ),
           )}
@@ -467,6 +481,8 @@ function Drawings({ drawings, onOpen }: { drawings: PartDrawing[]; onOpen: (draw
   );
 }
 
+// The large drawing, with Zoom under it rather than on it (an exploded
+// view's callout numbers reach its corners).
 function LargeDrawing({ drawing, place, onOpen }: { drawing: PartDrawing; place: string | null; onOpen: () => void }) {
   const { element, url, failed, retry } = usePagePicture(drawing.manualId, drawing.page, "fit", drawing.area);
   const label = drawingLabel(drawing);
@@ -492,18 +508,22 @@ function LargeDrawing({ drawing, place, onOpen }: { drawing: PartDrawing; place:
         ) : failed ? (
           <span className="absolute inset-0 grid place-items-center p-4 text-center text-sm text-trail">This drawing couldn&apos;t be drawn. Tap to try again.</span>
         ) : null}
-        {url && (
-          <span aria-hidden className="absolute right-2 bottom-2 inline-flex items-center gap-1 rounded-md bg-charcoal-900/85 px-2 py-1 text-xs font-medium text-ink">
-            <ZoomInIcon className="size-3.5" />
-            Zoom
-          </span>
-        )}
       </button>
-      <figcaption className="flex items-center justify-between gap-3 text-xs text-ink-muted">
-        <span data-drawing-caption className="min-w-0 truncate">
+      <figcaption className="flex items-center gap-3 text-xs text-ink-muted">
+        <span data-drawing-caption className="min-w-0 flex-1 truncate">
           {label} · p.{drawing.page}
         </span>
         {place && <span className="shrink-0 tabular-nums">{place}</span>}
+        <button
+          type="button"
+          data-drawing-zoom
+          aria-label={`Zoom into the ${label.toLowerCase()} from page ${drawing.page}`}
+          onClick={onOpen}
+          className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-1 text-sm font-medium text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        >
+          <ZoomInIcon className="size-4" />
+          Zoom
+        </button>
       </figcaption>
     </figure>
   );

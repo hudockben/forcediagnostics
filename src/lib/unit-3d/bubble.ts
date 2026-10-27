@@ -3,12 +3,13 @@
 // drawing-bubble.tsx), in free space beside the part, and a thin leader
 // from the bubble to the part's callout point. Beside it, never over it:
 // the bubble keeps clear of the point, inside the stage, off the callouts'
-// labels (and the dots where their leaders meet the machine), as near the
-// part as that allows, and where it was while that still holds, so it
-// stays put as the camera turns or flies and only its leader follows the
-// part. On a narrow (or short) stage it's a strip docked across the top
-// instead, its leader down to the part when there's room under it. Pure:
-// stage pixels in, a box and a line out.
+// labels (and the dots where their leaders meet the machine, the other
+// flagged parts round their points, and as far as it can their leaders),
+// as near the part as that allows, and where it was while that still
+// holds (with a little slack), so it stays put as the camera turns or
+// flies and only its leader follows the part. On a narrow (or short) stage
+// it's a strip docked across the top instead, its leader down to the part
+// when there's room under it. Pure: stage pixels in, a box and a line out.
 
 export type Rect = { x: number; y: number; w: number; h: number };
 export type Point = { x: number; y: number };
@@ -66,25 +67,40 @@ export type PlaceInput = {
   // The part's point on the stage; null when it's off it (then anywhere
   // free will do, and there's no leader).
   anchor: Point | null;
-  // What the bubble mustn't cover: the callouts' labels and dots.
+  // What the bubble mustn't cover: the callouts' labels and dots, the
+  // other flagged parts' points.
   avoid: Rect[];
+  // What it had better not cover, but isn't moved past: the callouts'
+  // leaders (as short pieces along them).
+  soft?: Rect[];
   // Where it was: kept while it's still clear.
   last: Rect | null;
   margin?: number;
   clear?: number;
 };
 
+// Where it was is kept while it's within this of the part's clearance (a
+// point that moves a little under the camera, or lands half a pixel nearer
+// a box drawn on whole pixels, doesn't send it across the part), and while
+// it covers the labels by no more than this round their edges.
+export const KEEP_SLACK = 8;
+const KEEP_EDGE = 2;
+
+const inset = (rect: Rect, by: number): Rect => ({ x: rect.x + by, y: rect.y + by, w: Math.max(0, rect.w - by * 2), h: Math.max(0, rect.h - by * 2) });
+
 // The bubble's box, floating beside the part.
-export function placeBubble({ stage, size, anchor, avoid, last, margin = BUBBLE_MARGIN, clear = BUBBLE_CLEAR }: PlaceInput): Rect {
+export function placeBubble({ stage, size, anchor, avoid, soft = [], last, margin = BUBBLE_MARGIN, clear = BUBBLE_CLEAR }: PlaceInput): Rect {
   const w = Math.max(0, Math.min(size.w, stage.width - margin * 2));
   const h = Math.max(0, Math.min(size.h, stage.height - margin * 2));
   const at = (x: number, y: number): Rect => ({ x: clamp(x, margin, stage.width - margin - w), y: clamp(y, margin, stage.height - margin - h), w, h });
-  const covered = (rect: Rect) => avoid.reduce((sum, other) => sum + overlap(rect, other), 0);
-  const tooNear = (rect: Rect) => (anchor ? Math.max(0, clear - distanceTo(rect, anchor)) : 0);
+  const sum = (rect: Rect, rects: Rect[]) => rects.reduce((total, other) => total + overlap(rect, other), 0);
+  const covered = (rect: Rect) => sum(rect, avoid) * 50 + sum(rect, soft) * 20;
+  const tooNear = (rect: Rect, by = clear) => (anchor ? Math.max(0, by - distanceTo(rect, anchor)) : 0);
 
   if (last) {
     const kept = at(last.x, last.y);
-    if (covered(kept) === 0 && tooNear(kept) === 0) return kept;
+    const edges = [...avoid, ...soft].map((other) => inset(other, KEEP_EDGE));
+    if (sum(kept, edges) === 0 && tooNear(kept, clear - KEEP_SLACK) === 0) return kept;
   }
 
   const candidates: Rect[] = [];
@@ -114,7 +130,7 @@ export function placeBubble({ stage, size, anchor, avoid, last, margin = BUBBLE_
   for (const rect of candidates) {
     const near = anchor ? distanceTo(rect, anchor) : 0;
     const right = anchor && rect.x >= anchor.x ? -4 : 0;
-    const score = tooNear(rect) * 1e6 + covered(rect) * 50 + near + right;
+    const score = tooNear(rect) * 1e6 + covered(rect) + near + right;
     if (score < bestScore - 1e-6) {
       best = rect;
       bestScore = score;
@@ -123,13 +139,57 @@ export function placeBubble({ stage, size, anchor, avoid, last, margin = BUBBLE_
   return best;
 }
 
+// A line on the stage as short square pieces along it, `size` across, at
+// most `most` of them (enough to say what it crosses).
+export function piecesAlong(points: readonly (readonly [number, number])[], size = 6, most = 12): Rect[] {
+  const pieces: Rect[] = [];
+  for (let i = 1; i < points.length; i++) {
+    const [x0, y0] = points[i - 1];
+    const [x1, y1] = points[i];
+    const length = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.min(most, Math.max(1, Math.ceil(length / (size * 3))));
+    for (let k = 0; k <= steps; k++) {
+      const t = k / steps;
+      pieces.push({ x: x0 + (x1 - x0) * t - size / 2, y: y0 + (y1 - y0) * t - size / 2, w: size, h: size });
+    }
+  }
+  return pieces;
+}
+
+// Whether a straight line from a to b runs through a box.
+export function lineCrosses(a: Point, b: Point, rect: Rect) {
+  let low = 0;
+  let high = 1;
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  for (const [p, q] of [
+    [-dx, a.x - rect.x],
+    [dx, rect.x + rect.w - a.x],
+    [-dy, a.y - rect.y],
+    [dy, rect.y + rect.h - a.y],
+  ]) {
+    if (p === 0) {
+      if (q < 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) low = Math.max(low, t);
+    else high = Math.min(high, t);
+    if (low > high) return false;
+  }
+  return true;
+}
+
 export type Leader = { from: Point; to: Point };
 
 // The leader from the bubble's edge facing the part to the part's point:
 // none when the point is off the stage, under the bubble, or too near it
 // to draw. `below` keeps it to the box's bottom edge (the strip: a leader
-// only down from it, when the part is far enough under it).
-export function leaderOf(rect: Rect, anchor: Point | null, { below = false } = {}): Leader | null {
+// only down from it, when the part is far enough under it). It doesn't
+// run through any of `blocked` (the strip's leader through the part's own
+// callout label, which points to the part already, would look tied to the
+// label): from the strip's edge beside the label instead, or none.
+export function leaderOf(rect: Rect, anchor: Point | null, { below = false, blocked = [] as Rect[] } = {}): Leader | null {
   if (!anchor) return null;
   const right = rect.x + rect.w;
   const bottom = rect.y + rect.h;
@@ -141,5 +201,25 @@ export function leaderOf(rect: Rect, anchor: Point | null, { below = false } = {
   const dy = Math.max(rect.y - anchor.y, anchor.y - bottom, 0);
   const from = below || dy >= dx ? { x: along.x, y: anchor.y < rect.y ? rect.y : bottom } : { x: anchor.x < rect.x ? rect.x : right, y: along.y };
   if (Math.hypot(anchor.x - from.x, anchor.y - from.y) < SHORTEST_LEADER) return null;
-  return { from, to: anchor };
+  const clearOf = (start: Point) => !blocked.some((other) => lineCrosses(start, anchor, other));
+  if (clearOf(from)) return { from, to: anchor };
+  if (!below) return null;
+  // Down from the strip at a slant that passes the label's side (at its
+  // bottom edge, where the line is nearest the point under it), the
+  // nearer side first.
+  const sides = blocked
+    .filter((other) => lineCrosses(from, anchor, other))
+    .flatMap((other) => {
+      const t = (other.y + other.h - bottom) / (anchor.y - bottom);
+      if (t <= 0 || t >= 1) return [];
+      const past = (x: number) => (x - anchor.x * t) / (1 - t);
+      return [past(other.x - 4), past(other.x + other.w + 4)];
+    })
+    .filter((x) => x >= rect.x + r && x <= right - r)
+    .sort((a, b) => Math.abs(a - anchor.x) - Math.abs(b - anchor.x));
+  for (const x of sides) {
+    const start = { x, y: bottom };
+    if (clearOf(start)) return { from: start, to: anchor };
+  }
+  return null;
 }

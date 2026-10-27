@@ -496,10 +496,10 @@ export function rankPages<T extends PageCandidate>(pages: T[], part: string, lim
 // --- A part's drawings ----------------------------------------------------------
 
 // Why a page is one of the part's drawings: an exploded, assembly or
-// component view naming the part (or a page of a drawing's callout
-// numbers), the part's own procedure page (its best page), or a page a
-// cause cites for it.
-export type DrawingKind = "exploded" | "procedure" | "cited";
+// component view naming the part (a view's heading), a page of a drawing's
+// callout numbers with no such heading, the part's own procedure page (its
+// best page), or a page a cause cites for it.
+export type DrawingKind = "exploded" | "callouts" | "procedure" | "cited";
 export type DrawingPage = PartPage & { kind: DrawingKind };
 
 export const SHOWN_DRAWING_PAGES = 4;
@@ -507,6 +507,24 @@ export const SHOWN_DRAWING_PAGES = 4;
 // A drawing's heading ("EXPLODED VIEW", "Assembly View", "COMPONENT VIEWS",
 // "PARTS VIEW").
 const VIEW_PHRASE = /\b(?:exploded|assembly|component|parts?)\s+views?\b/i;
+// Small words a heading in title case leaves in lower case.
+const SMALL_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "the", "to", "with"]);
+
+// A line that reads as a heading, not a sentence or a step: short, with
+// no step number in front and no full stop (a step or a note: "2.
+// Disconnect the shift linkage.", "REFER TO THE EXPLODED VIEW ON PAGE
+// 8.12."), in capitals ("TRANSMISSION EXPLODED VIEW") or with its words
+// capitalised ("Starter Motor Exploded View"; "Refer to the exploded view"
+// isn't).
+export function isHeadingLine(line: string) {
+  const text = line.trim();
+  if (text.length < 4 || text.length > 60 || text.includes(".") || /^\(?\d{1,2}[.)]/.test(text)) return false;
+  const letters = text.replace(/[^A-Za-z]/g, "");
+  if (letters.length < 4) return false;
+  if (letters === letters.toUpperCase()) return true;
+  const words = text.match(/[A-Za-z]+/g) ?? [];
+  return words.every((word, index) => /^[A-Z]/.test(word) || (index > 0 && SMALL_WORDS.has(word)));
+}
 
 // The callout numbers a page prints around a drawing: the different
 // numbers on its lines of nothing but numbers ("1", "4 5", "12A"), when
@@ -525,6 +543,9 @@ export function calloutNumbers(text: string) {
 
 // Fewer callout numbers than this aren't a drawing's.
 export const MIN_CALLOUTS = 6;
+// A score from this up is a view's heading (an exploded view); under it,
+// callout numbers alone.
+export const VIEW_SCORE = 20;
 
 // How much a page looks like a drawing of the part: 0 when it isn't one
 // (it doesn't name the part, it's a contents page, or nothing says it's a
@@ -532,37 +553,41 @@ export const MIN_CALLOUTS = 6;
 // EXPLODED VIEW", "TRANSMISSION VIEW"), less for a view's heading on a
 // page that names the part (an exploded view whose callout list has it),
 // least for a page of callout numbers with no heading; callouts add to a
-// heading.
+// heading. Only a line that reads as a heading counts as one (a step or
+// a note that points to a view, "Refer to the exploded view on page 8.12",
+// doesn't).
 export function drawingScore(text: string, part: string) {
   if (!mentionsPart(text, part) || isContentsPage(text)) return 0;
   const wanted = wordsOf(partSearchText(part));
   let score = 0;
   for (const line of text.split("\n")) {
-    const letters = line.replace(/[^A-Za-z]/g, "");
-    const capitals = letters.length >= 6 && letters === letters.toUpperCase();
+    if (!isHeadingLine(line)) continue;
     const words = new Set(wordsOf(line));
-    if (capitals && words.has("view") && wanted.every((word) => words.has(word))) score = Math.max(score, 30);
-    else if (VIEW_PHRASE.test(line)) score = Math.max(score, 20);
+    if (words.has("view") && wanted.every((word) => words.has(word))) score = Math.max(score, VIEW_SCORE + 10);
+    else if (VIEW_PHRASE.test(line)) score = Math.max(score, VIEW_SCORE);
   }
   if (calloutNumbers(text) >= MIN_CALLOUTS) score += 10;
   return score;
 }
 
 // The pages to find a part's drawings on, at most `limit`: its exploded
-// views first (found: pages of the manuals that name the part and might be
-// drawings, best first by drawingScore, the unit's own manual over others,
-// then search's rank), then its procedure page (the sheet's best page, when
-// it's about the part), then the other pages a cause cites for it. A page
-// that only names the part on the way (another part's procedure) is never
-// one: its drawings aren't of the part.
+// views first, then pages of a drawing's callouts (found: pages of the
+// manuals that name the part and might be drawings, best first by
+// drawingScore, the unit's own manual over others, then search's rank),
+// then its procedure page (the sheet's best page, when it's about the
+// part, a procedure still when it has callouts too), then the other pages
+// a cause cites for it. A page that only names the part on the way
+// (another part's procedure) is never one: its drawings aren't of the
+// part.
 export function drawingPages(found: PageCandidate[], pages: PartPage[], part: string, limit = SHOWN_DRAWING_PAGES): DrawingPage[] {
   const out: DrawingPage[] = [];
   const add = (page: PartPage, kind: DrawingKind) => {
     if (out.length < limit && !out.some((other) => samePage(other, page))) out.push({ ...page, kind });
   };
+  const procedure = pages[0]?.about ? pages[0] : null;
   const views = found
     .map((page) => ({ page, score: drawingScore(page.text, part) }))
-    .filter(({ score }) => score > 0)
+    .filter(({ page, score }) => score >= VIEW_SCORE || (score > 0 && !(procedure && samePage(procedure, page))))
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -571,11 +596,11 @@ export function drawingPages(found: PageCandidate[], pages: PartPage[], part: st
         a.page.title.localeCompare(b.page.title) ||
         a.page.page - b.page.page,
     );
-  for (const { page } of views) {
+  for (const { page, score } of views) {
     const listed = pages.find((other) => samePage(other, page));
-    add(listed ?? { manualId: page.manualId, page: page.page, title: page.title, cited: page.cited !== null, about: aboutPart(page, part) }, "exploded");
+    add(listed ?? { manualId: page.manualId, page: page.page, title: page.title, cited: page.cited !== null, about: aboutPart(page, part) }, score >= VIEW_SCORE ? "exploded" : "callouts");
   }
-  if (pages[0]?.about) add(pages[0], "procedure");
+  if (procedure) add(procedure, "procedure");
   for (const page of pages.slice(1)) if (page.cited && page.about) add(page, "cited");
   return out;
 }
@@ -603,8 +628,9 @@ export function drawingsOf(found: { page: DrawingPage; figures: PageFigures | nu
 
 // The drawings the sheet shows above the page: the cropped ones, and an
 // exploded view with nothing to crop (all lines, or a scan) as its page,
-// unless it's the page drawn large under them anyway. A procedure or cited
-// page with nothing to crop is only that page, already there to open.
+// unless it's the page drawn large under them anyway. A page of callouts,
+// a procedure or a cited page with nothing to crop is only that page (most
+// of it text), already there to open.
 // With no page drawn large (the bubble on the 3D unit), an exploded view
 // with nothing to crop is always one.
 export function panelDrawings(drawings: PartDrawing[], large: PageRef | null): PartDrawing[] {
@@ -614,5 +640,6 @@ export function panelDrawings(drawings: PartDrawing[], large: PageRef | null): P
 // One drawing, the same however its area came (to a thousandth of the page).
 export const drawingKey = (drawing: PartDrawing) => `${drawing.manualId}:${drawing.page}:${drawing.area ? areaParam(drawing.area) : "page"}`;
 // What a drawing is called by it: an exploded (assembly, component) view,
-// or a drawing on the part's procedure or a cited page.
+// or a drawing (on a page of callouts, the part's procedure or a cited
+// page).
 export const drawingLabel = (drawing: PartDrawing) => (drawing.kind === "exploded" ? "Exploded view" : "Drawing");

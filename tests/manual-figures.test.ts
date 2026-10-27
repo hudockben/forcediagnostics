@@ -1,11 +1,13 @@
 // The drawings on a manual page, found where it paints its images
 // (src/lib/manual-figures.ts): the boxes pdf.js's own operator list gives
 // for a page built here with an image placed by a transform, inside a form,
-// in a clip, inline, as a mask, repeated as tiles and turned, on an upright
-// page and a turned one; then which boxes are drawings (big enough, tiles
-// joined, a scan as the page, callout numbers taken in, largest first),
-// and how a figure is written in the address and zoomed to. Needs no
-// database.
+// in a clip, inline, as a mask, repeated as tiles, turned and flipped, on
+// an upright page and a turned one, in a crop box and in a media box round
+// the origin; then which boxes are drawings (big enough, tiles joined, a
+// scan as the page, callout numbers taken in, largest first), how one is
+// cropped out (its corners at the canvas's, through pdf.js's own
+// viewport), and how a figure is written in the address and zoomed to.
+// Needs no database.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { before, describe, test } from "node:test";
@@ -19,6 +21,7 @@ import {
   areaParam,
   aspectOf,
   boxThrough,
+  cropOf,
   figuresOf,
   fitArea,
   imageBoxes,
@@ -41,7 +44,7 @@ const H = 792;
 
 // One 2×2 RGB image, one 8×1 mask, and per page a content stream (and,
 // for the form, its own stream), uncompressed.
-function buildPdf(pages: { content: string; rotate?: number; form?: { matrix: number[]; bbox: number[]; content: string } }[]) {
+function buildPdf(pages: { content: string; rotate?: number; media?: number[]; crop?: number[]; form?: { matrix: number[]; bbox: number[]; content: string } }[]) {
   const parts: string[] = [];
   const offsets: number[] = [];
   let length = 0;
@@ -67,7 +70,7 @@ function buildPdf(pages: { content: string; rotate?: number; form?: { matrix: nu
     const form = page.form ? ` /Fm1 ${n + 2} 0 R` : "";
     obj(
       n,
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}]${page.rotate ? ` /Rotate ${page.rotate}` : ""} /Resources << /XObject << /Im1 3 0 R /Mk 4 0 R${form} >> >> /Contents ${n + 1} 0 R >>`,
+      `<< /Type /Page /Parent 2 0 R /MediaBox [${(page.media ?? [0, 0, W, H]).join(" ")}]${page.crop ? ` /CropBox [${page.crop.join(" ")}]` : ""}${page.rotate ? ` /Rotate ${page.rotate}` : ""} /Resources << /XObject << /Im1 3 0 R /Mk 4 0 R${form} >> >> /Contents ${n + 1} 0 R >>`,
     );
     obj(n + 1, stream("", page.content));
     if (page.form) {
@@ -105,6 +108,33 @@ async function boxesOf(bytes: Uint8Array) {
     const list = await page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE });
     const viewport = page.getViewport({ scale: 1 });
     out.push({ boxes: imageBoxes(list, pdfjs.OPS as unknown as FigureOps), ops: [...list.fnArray], viewport });
+  }
+  await loading.destroy();
+  return out;
+}
+
+// Each page's image boxes, the page's viewport at scale 1, and the
+// viewport pdf.js gives for cropping an area out of it (cropOf), with the
+// area's corners on the page as that viewport puts them.
+async function cropsOf(bytes: Uint8Array, cssWidth: number) {
+  const loading = pdfjs.getDocument({ data: bytes, verbosity: pdfjs.VerbosityLevel.ERRORS });
+  const doc = await loading.promise;
+  const out: { area: PageArea | null; crop: ReturnType<typeof cropOf>; corners: number[][] }[] = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    const list = await page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE });
+    const base = page.getViewport({ scale: 1 });
+    const [found] = imageBoxes(list, pdfjs.OPS as unknown as FigureOps);
+    const area = areaOf(found, base);
+    const crop = cropOf(area ?? { left: 0, top: 0, right: 1, bottom: 1 }, base, cssWidth, { ratio: 2 });
+    const viewport = page.getViewport({ scale: crop.scale, offsetX: crop.offsetX, offsetY: crop.offsetY });
+    const corners = [
+      [found.x0, found.y0],
+      [found.x1, found.y0],
+      [found.x0, found.y1],
+      [found.x1, found.y1],
+    ].map(([x, y]) => viewport.convertToViewportPoint(x, y));
+    out.push({ area, crop, corners });
   }
   await loading.destroy();
   return out;
@@ -169,6 +199,63 @@ describe("where a page paints its images, from pdf.js's operator list", () => {
     // Turned a quarter clockwise, the page's top left is at the top right.
     assert.equal(rotated.viewport.width, H);
     sameArea(areaOf(rotated.boxes[0], rotated.viewport), area(0.75, 0, 1, 0.5), "turned");
+  });
+
+  test("a page whose box isn't at the origin: a crop box inside the media box, a media box round the origin; an image flipped by its transform", async () => {
+    const [cropped, centred, flipped, turned] = await boxesOf(
+      buildPdf([
+        // The page is (100, 100) to (512, 692): the image is its top left quarter.
+        { content: "q 206 0 0 296 100 396 cm /Im1 Do Q", crop: [100, 100, 512, 692] },
+        { content: "q 306 0 0 396 -306 0 cm /Im1 Do Q", media: [-306, -396, 306, 396] },
+        // Drawn upside down (a negative scale): the same square, from its other corner.
+        { content: "q 200 0 0 -200 100 500 cm /Im1 Do Q" },
+        { content: "q 206 0 0 296 100 396 cm /Im1 Do Q", crop: [100, 100, 512, 692], rotate: 90 },
+      ]),
+    );
+    sameBox(cropped.boxes[0], box(100, 396, 306, 692), "in a crop box");
+    assert.deepEqual([cropped.viewport.width, cropped.viewport.height], [412, 592]);
+    sameArea(areaOf(cropped.boxes[0], cropped.viewport), area(0, 0, 0.5, 0.5), "in a crop box");
+    sameArea(areaOf(centred.boxes[0], centred.viewport), area(0, 0, 0.5, 0.5), "round the origin");
+    sameBox(flipped.boxes[0], box(100, 300, 300, 500), "flipped");
+    sameArea(areaOf(flipped.boxes[0], flipped.viewport), area(100 / W, (H - 500) / H, 300 / W, (H - 300) / H), "flipped");
+    // Turned a quarter clockwise, the crop box's top left quarter is its top right.
+    sameArea(areaOf(turned.boxes[0], turned.viewport), area(0.5, 0, 1, 0.5), "in a turned crop box");
+  });
+
+  test("a drawing cropped out: the viewport for its crop puts its corners at the canvas's, whatever the page's box, turn or the image's flip", async () => {
+    const pages = await cropsOf(
+      buildPdf([
+        { content: "q 300 0 0 200 100 400 cm /Im1 Do Q" },
+        { content: "q 206 0 0 296 100 396 cm /Im1 Do Q", crop: [100, 100, 512, 692] },
+        { content: "q 306 0 0 396 -200 -100 cm /Im1 Do Q", media: [-306, -396, 306, 396] },
+        { content: "q 200 0 0 -200 100 500 cm /Im1 Do Q", rotate: 90 },
+        { content: "q 206 0 0 296 150 200 cm /Im1 Do Q", crop: [100, 100, 512, 692], rotate: 270 },
+      ]),
+      320,
+    );
+    pages.forEach(({ area: found, crop, corners }, i) => {
+      assert.ok(found, `page ${i + 1}: no area`);
+      const xs = corners.map(([x]) => x);
+      const ys = corners.map(([, y]) => y);
+      // To within the canvas's rounding to whole pixels.
+      assert.ok(Math.abs(Math.min(...xs)) < 1 && Math.abs(Math.min(...ys)) < 1, `page ${i + 1}: ${JSON.stringify(corners)}`);
+      assert.ok(Math.abs(Math.max(...xs) - crop.width) < 1 && Math.abs(Math.max(...ys) - crop.height) < 1, `page ${i + 1}: ${JSON.stringify({ corners, crop })}`);
+      // Drawn twice as wide as it's shown (the screen's pixels), its shape kept.
+      assert.ok(Math.abs(crop.width - 640) < 1, `page ${i + 1}: ${crop.width}`);
+    });
+  });
+
+  test("the crop's size: sharp for the screen, never past the most pixels or the most scale", () => {
+    const page = { width: W, height: H };
+    const half = area(0, 0, 0.5, 0.5);
+    assert.deepEqual(cropOf(half, page, 306), { scale: 1, offsetX: -0, offsetY: -0, width: 306, height: 396 });
+    const sharp = cropOf(area(0.25, 0.5, 0.75, 1), page, 306, { ratio: 3 });
+    // At most twice the screen's pixels; moved so the area's top left is the canvas's.
+    assert.equal(sharp.scale, 2);
+    assert.deepEqual([sharp.offsetX, sharp.offsetY, sharp.width, sharp.height], [-0.25 * W * 2, -0.5 * H * 2, 612, 792]);
+    assert.ok(cropOf(half, page, 3000, { ratio: 2, pixels: 1_000_000 }).width * cropOf(half, page, 3000, { ratio: 2, pixels: 1_000_000 }).height <= 1_000_000 * 1.01);
+    // A tiny drawing isn't drawn bigger than the most.
+    assert.equal(cropOf(area(0.5, 0.5, 0.51, 0.51), page, 320, { ratio: 2, most: 8 }).scale, 8);
   });
 
   test("nothing off the page, and nothing for a page with no image", async () => {
@@ -295,8 +382,13 @@ describe("which images are drawings", () => {
     assert.equal(apart.figures.length, 2);
   });
 
-  test("a scan (one image most of the page, or tiles of it) is the page: no figure to crop", () => {
+  test("a scan (one image over the whole page or nearly, or tiles of it) is the page: no figure to crop; a large raster drawing with its title and parts list round it is cropped", () => {
     assert.deepEqual(figuresOf([area(0, 0, 1, 1)], PAGE), { figures: [], wholePage: true, aspect: PAGE.aspect });
+    assert.equal(figuresOf([area(0.03, 0.03, 0.97, 0.97)], PAGE).wholePage, true);
+    // 80% across and 78% down (62% of the page): a drawing, not the page.
+    const drawing = figuresOf([area(0.1, 0.12, 0.9, 0.9)], PAGE);
+    assert.equal(drawing.wholePage, false);
+    assert.equal(drawing.figures.length, 1);
     const strips = Array.from({ length: 40 }, (_, i) => area(0.02, 0.02 + i * 0.024, 0.98, 0.02 + (i + 1) * 0.024));
     assert.equal(figuresOf(strips, PAGE).wholePage, true);
     // A page with no image (text, or a drawing all of lines) has none either, and isn't a scan.
