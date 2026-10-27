@@ -22,7 +22,9 @@ import { usePagePicture, usePageView } from "./manual-pictures";
 // its chip is tapped again). A quiet frame once the part's pages are
 // known and while their drawings are found; nothing before that, and no
 // bubble when it has no drawing. While another part's sheet comes, the
-// last one stays, dimmed. On a narrow stage it's a strip across the top.
+// last one stays, dimmed. On a narrow stage it's a strip across the top,
+// once it has a drawing or one is sure to come (the examine view says the
+// looking under the stage till then).
 // The sheet beside the stage finds the drawings (part-sheet.tsx) and says
 // which they are here (StageDrawingsContext); the line drawing's sheet,
 // with no 3D unit, has no stage to say it to.

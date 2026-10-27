@@ -12,7 +12,7 @@ import { anchorAt, worldBounds, type Layout } from "./layout";
 import { LINE_COLOURS, isLit, phantomPaint, zoneLook, type ViewMode, type ZoneLook } from "./look";
 import { depthOnlyMaterial, disposeMaterials, flagMaterial, makeMaterials, markStencil, phantomOf, xrayMaterial, type Materials } from "./materials";
 import { contactShadow, disposeShadow } from "./shadow";
-import { partBox as focusBox, flightTo, partPoints, screenExtent } from "./focus";
+import { partBox as focusBox, flightTo, partPoints, screenExtent, type PartPoints } from "./focus";
 import type { Rect } from "./bubble";
 
 // The 3D unit on screen, rendered like a manufacturer's studio shot with a
@@ -128,7 +128,7 @@ export class UnitViewer {
   private edges: EdgeLines | null = null;
   private looks = new Map<DrawnSystem, { state: ZoneState | null; look: ZoneLook }>();
   // Each system's part as points (focus.ts), worked out once per unit.
-  private partShapes = new Map<DrawnSystem, Float32Array | null>();
+  private partShapes = new Map<DrawnSystem, PartPoints | null>();
   private flagMaterials = new Map<string, THREE.Material>();
   private xrayMaterials = new Map<string, THREE.Material>();
   private phantoms = new Map<THREE.Material, THREE.Material>();

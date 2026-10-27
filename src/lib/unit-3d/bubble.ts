@@ -5,16 +5,17 @@
 // the bubble keeps off the part itself (the box round its shape on the
 // stage, focus.ts, however big the part: a General's transmission, a fuel
 // tank) and clear of its point, inside the stage, off the callouts' labels
-// (and the dots where their leaders meet the machine, the other flagged
-// parts round their points, and as far as it can their leaders), as near
-// the part as that allows, and where it was while that still holds (with a
-// little slack), so it stays put as the camera turns or flies and only its
-// leader follows the part. Where nowhere on the stage is clear of the part
-// (zoomed in on it, the part filling the stage), it covers as little of it
-// as it can, against the stage's edge farthest from the part's middle. On
-// a narrow (or short) stage it's a strip docked across the top instead,
-// its leader down to the part when there's room under it. Pure: stage
-// pixels in, a box and a line out.
+// and the dots where their leaders meet the machine (the other flagged
+// parts round their points) wherever there's room clear of the part, as
+// far as it can off their leaders, as near the part as that allows, and
+// where it was while that still holds (with a little slack), so it stays
+// put as the camera turns or flies and only its leader follows the part.
+// Where nowhere on the stage is clear of the part (zoomed in on it, the
+// part filling the stage), it covers as little of it as it can, against
+// the stage's edge farthest from the part's middle. On a narrow (or short)
+// stage it's a strip docked across the top instead, its leader down to
+// the part when there's room under it. Pure: stage pixels in, a box and a
+// line out.
 
 export type Rect = { x: number; y: number; w: number; h: number };
 export type Point = { x: number; y: number };
@@ -114,6 +115,27 @@ function onStageOf(rect: Rect, stage: Stage): Rect {
   return { x, y, w: Math.max(0, clamp(rect.x + rect.w, 0, stage.width) - x), h: Math.max(0, clamp(rect.y + rect.h, 0, stage.height) - y) };
 }
 
+// Places for a bubble w by h against the edges of what's on the stage:
+// its left side against the stage's margin or a pixel past a box's right
+// side, or its right against the far margin or a box's left, and the same
+// up and down, each way with each. Wherever a bubble fits clear of all
+// the boxes, one of these does (slid left until it meets something, then
+// up).
+function besideAll(stage: Stage, { w, h }: { w: number; h: number }, margin: number, boxes: Rect[]): Rect[] {
+  const xs = new Set([margin, stage.width - margin - w]);
+  const ys = new Set([margin, stage.height - margin - h]);
+  for (const box of boxes) {
+    xs.add(box.x + box.w + 1).add(box.x - w - 1);
+    ys.add(box.y + box.h + 1).add(box.y - h - 1);
+  }
+  const places: Rect[] = [];
+  for (const x of xs) {
+    if (x < margin - 1e-6 || x + w > stage.width - margin + 1e-6) continue;
+    for (const y of ys) if (y >= margin - 1e-6 && y + h <= stage.height - margin + 1e-6) places.push({ x, y, w, h });
+  }
+  return places;
+}
+
 // The bubble's box, floating beside the part.
 export function placeBubble({ stage, size, anchor, part = null, avoid, soft = [], last, margin = BUBBLE_MARGIN, clear = BUBBLE_CLEAR }: PlaceInput): Rect {
   const w = Math.max(0, Math.min(size.w, stage.width - margin * 2));
@@ -165,13 +187,24 @@ export function placeBubble({ stage, size, anchor, part = null, avoid, soft = []
   }
 
   // Clear of the part first (its box, with room round it, and its point),
-  // then of the labels, then the nearest the part (the shortest leader), a
-  // little to its right where it's a tie.
-  const clearOf = candidates.filter((rect) => onPart(rect, PART_GAP) === 0);
+  // then of the labels and dots, then the nearest the part (the shortest
+  // leader), a little to its right where it's a tie. Where none of the
+  // places tried is clear of all of them, places against the edges of
+  // what's on the stage too (one of them is, wherever a place is).
+  const offPart = (rect: Rect) => onPart(rect, PART_GAP) === 0;
+  const offLabels = (rect: Rect) => sum(rect, avoid) === 0;
+  let clearOf = candidates.filter(offPart);
+  let free = clearOf.filter(offLabels);
+  if (free.length === 0) {
+    const round = anchor ? [{ x: anchor.x - clear, y: anchor.y - clear, w: clear * 2, h: clear * 2 }] : [];
+    const more = besideAll(stage, { w, h }, margin, [...avoid, ...(part ? [grown(PART_GAP)!] : []), ...round]).filter(offPart);
+    clearOf = [...clearOf, ...more];
+    free = more.filter(offLabels);
+  }
   if (clearOf.length > 0) {
     let best = clearOf[0];
     let bestScore = Infinity;
-    for (const rect of clearOf) {
+    for (const rect of free.length > 0 ? free : clearOf) {
       const near = anchor ? distanceTo(rect, anchor) : 0;
       const right = anchor && rect.x >= anchor.x ? -4 : 0;
       const score = covered(rect) + near + right;

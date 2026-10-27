@@ -907,9 +907,15 @@ function Examine({
   const bubble =
     ready && system && room !== "none" && shown?.system === system && shown.state !== "none" && drawings.closed !== stageDrawingsKey(shown) ? shown : null;
   const docked = room === "dock";
-  // The callouts go under the strip once it has a drawing, or is sure to
-  // (not for a frame that may come to nothing: they'd drop and come back).
-  const top = bubble && docked && (bubble.state === "found" || bubble.sure) ? stripTop() + 4 : 0;
+  // On a narrow stage the strip goes across the callouts' top row, and they
+  // go under it: only once it has a drawing, or one is sure to come (an
+  // exploded view). While a drawing may yet come to nothing, the line
+  // under the stage says it's being looked for instead (a strip there
+  // would hide the top row, and take its taps, or drop it and bring it
+  // back).
+  const looking = bubble !== null && docked && bubble.state !== "found" && !bubble.sure;
+  const strip = looking ? null : bubble;
+  const top = strip && docked ? stripTop() + 4 : 0;
 
   function closeBubble() {
     setDrawings((old) => ({ shown: old.shown, closed: old.shown ? stageDrawingsKey(old.shown) : null }));
@@ -1016,9 +1022,9 @@ function Examine({
             />
             {ready && <Callouts store={frames} states={states} active={system ?? active} onPick={onPick} keep={system} full top={top} action="Examine" />}
             {ready && <HoverLabel picker={hover} />}
-            {bubble && system && (
+            {strip && system && (
               <BubbleLayer frames={frames} system={system} docked={docked} obstacles={(frame) => calloutObstacles(frame, states, { keep: system, full: true, top })}>
-                <DrawingBubble shown={bubble} docked={docked} onClose={closeBubble} />
+                <DrawingBubble shown={strip} docked={docked} onClose={closeBubble} />
               </BubbleLayer>
             )}
             {!ready && <p className="absolute inset-x-0 top-6 text-center text-sm text-[#5f656b]">Loading the 3D unit…</p>}
@@ -1049,10 +1055,19 @@ function Examine({
               )}
             </div>
             {/* The tap first, so it's what's left when the line is cut short;
-                a finger's version below lg. */}
+                a finger's version below lg. While the part's drawing is
+                looked for on a narrow stage, that instead (short enough for
+                a phone; the part's chip is pressed in the sheet under it). */}
             <p className="min-w-0 flex-1 truncate text-center text-xs text-[#4b5158]">
-              <span className="max-lg:hidden">Click a part for its manual pages · drag to turn · scroll to zoom · right-drag to move · arrows, + −, 1–5, P for phantom</span>
-              <span className="lg:hidden">Tap a part for its manual pages</span>
+              <span role="status" data-looking={looking ? "true" : undefined}>
+                {looking ? "Finding the drawing…" : ""}
+              </span>
+              {!looking && (
+                <>
+                  <span className="max-lg:hidden">Click a part for its manual pages · drag to turn · scroll to zoom · right-drag to move · arrows, + −, 1–5, P for phantom</span>
+                  <span className="lg:hidden">Tap a part for its manual pages</span>
+                </>
+              )}
             </p>
             <div role="group" aria-label="Zoom" className="ml-auto flex gap-1.5">
               <button type="button" data-zoom="in" aria-label="Zoom in" onClick={() => viewer.current?.zoom(0.8)} className={plateTool}>
