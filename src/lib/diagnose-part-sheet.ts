@@ -5,7 +5,9 @@ import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import { withShop } from "@/db";
 import { diagnosisConversations, diagnosisTurns, manualPages, manuals } from "@/db/schema";
 import {
+  SHOWN_DRAWING_PAGES,
   aboutPart,
+  drawingPages,
   isDrawnSystem,
   mentionsPart,
   partNames,
@@ -20,7 +22,7 @@ import { causeRanks } from "@/lib/diagnose-cause-steps";
 import { isUuid, type DiagnosisReply, type SourceView } from "@/lib/diagnose-rules";
 import { unitVehicle } from "@/lib/diagnose-tools";
 import { causeSystem, shownStatus, type DrawnSystem } from "@/lib/diagnose-zones";
-import { manualsForModel, searchManuals, searchManualsWithMost } from "@/lib/library";
+import { manualsForModel, searchDrawingPages, searchManuals, searchManualsWithMost } from "@/lib/library";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import { readPageFacts, savedPageFacts } from "@/lib/manual-facts";
 import type { PageAsk, PageRef } from "@/lib/manual-facts-rules";
@@ -36,6 +38,9 @@ import type { CurrentUser } from "@/lib/session";
 // conversation's manuals (its scope, else the unit's manuals) finds for the
 // part's name, ranked toward its service procedure in the unit's own manual
 // (src/lib/diagnose-parts.ts). With no manual to search, the sheet says so.
+// It also names the pages with the part's drawings: its exploded views in
+// those manuals, then its best page and the pages its causes cite
+// (drawingPages); the screen crops the drawings out of them.
 // A page's card is asked for on its own (partPageCard), without the search:
 // the screen asks again every couple of seconds while another device reads
 // the page. Callers check diagnostics.work first; everything runs inside
@@ -48,6 +53,8 @@ const NOT_HERE = "That diagnosis isn't in this shop.";
 // troubleshooting chart all name the starter solenoid).
 const SEARCHED_PAGES = 16;
 const SHOWN_PAGES = 4;
+// Pages that may be the part's drawings, for drawingPages to pick from.
+const SEARCHED_DRAWINGS = 12;
 // Of a long page, what the ranking reads.
 const RANKED_TEXT = 20_000;
 
@@ -170,6 +177,10 @@ export async function partSheet(user: CurrentUser, input: PartSheetInput): Promi
   const own = new Set(unitManuals.map((id) => id.toLowerCase()));
   const cited = citedPages(reply, system, part);
   const query = partSearchText(part);
+  // Its drawings' pages are looked for alongside (awaited below; a failure
+  // there is the sheet's, not one left unhandled while this search runs).
+  const views = searchable.length > 0 && query ? searchDrawingPages(shopId, query, searchable, SEARCHED_DRAWINGS, RANKED_TEXT) : Promise.resolve([]);
+  views.catch(() => {});
   let hits: { manualId: string; pageNumber: number; rank: number }[] = [];
   if (searchable.length > 0 && query) {
     hits = await searchManuals(shopId, query, {}, SEARCHED_PAGES, searchable);
@@ -199,13 +210,22 @@ export async function partSheet(user: CurrentUser, input: PartSheetInput): Promi
     SHOWN_PAGES,
   );
   const pages = ranked.map((page) => ({ manualId: page.manualId, page: page.page, title: page.title, cited: page.cited !== null, about: aboutPart(page, part) }));
+  const drawings = drawingPages(
+    (await views).map((hit): PageCandidate => {
+      const key = pageKey({ manualId: hit.manualId, page: hit.pageNumber });
+      return { manualId: hit.manualId, page: hit.pageNumber, title: hit.title, text: hit.text, rank: hit.rank, own: own.has(hit.manualId.toLowerCase()), cited: how.get(key) ?? null };
+    }),
+    pages,
+    part,
+    SHOWN_DRAWING_PAGES,
+  );
 
   let facts: PartSheet["facts"] = null;
   if (pages[0]?.about) {
     const page = { manualId: pages[0].manualId, page: pages[0].page };
     facts = { page, state: (await savedPageFacts(shopId, page)) ?? { status: "unavailable", reason: "error" } };
   }
-  return { system, parts, part, pages, noManual: searchable.length === 0, facts };
+  return { system, parts, part, pages, drawings, noManual: searchable.length === 0, facts };
 }
 
 // A page's card, read now if it never was (src/lib/manual-facts.ts). Only

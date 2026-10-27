@@ -3,16 +3,32 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
-import { cardSettled, cardOf, largePage, otherPages, partLibraryHref, type PartCard, type PartPage, type PartSheet } from "@/lib/diagnose-parts";
+import {
+  cardSettled,
+  cardOf,
+  largePage,
+  otherPages,
+  panelDrawings,
+  partLibraryHref,
+  type DrawingPage,
+  type PartCard,
+  type PartDrawing,
+  type PartPage,
+  type PartSheet,
+} from "@/lib/diagnose-parts";
 import { SYSTEM_LABELS, type DrawnSystem } from "@/lib/diagnose-zones";
 import type { FactsState, PageFacts, PageRef } from "@/lib/manual-facts-rules";
+import { areaParam } from "@/lib/manual-figures";
 
 import { BookIcon, SearchIcon, WrenchIcon, ZoomInIcon } from "./icons";
-import { usePagePicture, usePageView } from "./manual-pictures";
+import { usePagePicture, usePageView, usePartDrawings } from "./manual-pictures";
 
 // From the manual, at the top of a system's sheet: the system's parts to
-// pick from (those its causes name first), the picked part's best manual
-// page drawn large (a tap opens it full screen to zoom into; Open in manual
+// pick from (those its causes name first), the picked part's drawings
+// cropped out of its manual pages and shown large (an exploded view first:
+// the first across the sheet, the others in a strip under it; a tap opens
+// the page full screen zoomed to the drawing), the part's best manual
+// page drawn whole (a tap opens it full screen to zoom into; Open in manual
 // goes to the viewer at it), a few other pages that show it, and beside the
 // page (under it on a phone) what it says: the procedure's title, its
 // special tools as the page prints them, and which page that is. Its
@@ -39,6 +55,10 @@ const MAX_WAITS = 60;
 // The large page's picture, in CSS pixels (drawn sharp for the screen).
 const LARGE_WIDTH = 480;
 const SMALL_WIDTH = 60;
+// A drawing in the strip: this tall, as wide as its shape (within these).
+const STRIP_HEIGHT = 72;
+const STRIP_WIDTHS = [56, 144] as const;
+const NO_PAGES: DrawingPage[] = [];
 
 async function ask<T>(input: SheetAsk | CardAsk): Promise<T | { error: string }> {
   try {
@@ -145,6 +165,10 @@ export function PartSheetSection({
   const mentionsOnly = sheet !== null && sheet.pages.length > 0 && !sheet.pages[0].about;
   const carded = large !== null && (large.about || (chosen !== null && large !== sheet?.pages[0]));
   const given = sheet && large && carded ? cardOf(sheet, large) : null;
+  // The part's drawings, found on its drawing pages (the cropped ones, and
+  // an exploded view with nothing to crop unless it's the large page).
+  const found = usePartDrawings(sheet?.drawings ?? NO_PAGES);
+  const drawings = panelDrawings(found.drawings, large);
 
   // The large page's card: as the sheet brought it when that's settled,
   // else asked for (and read, the first time anyone opens the page).
@@ -197,7 +221,15 @@ export function PartSheetSection({
 
   const label = SYSTEM_LABELS[system];
   return (
-    <section aria-label="From the manual" aria-busy={stale || undefined} data-part-sheet={system} data-part={part ?? undefined} className="@container space-y-3">
+    <section
+      aria-label="From the manual"
+      aria-busy={stale || undefined}
+      data-part-sheet={system}
+      data-part={part ?? undefined}
+      data-drawings={found.state}
+      data-drawings-shown={drawings.length}
+      className="@container space-y-3"
+    >
       <div className="flex items-center justify-between gap-3">
         <h3 className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-ink-muted uppercase">
           <BookIcon className="size-3.5" />
@@ -255,6 +287,13 @@ export function PartSheetSection({
       ) : (
         <div data-part-stale={stale || undefined} className={`space-y-3 transition-opacity ${stale ? "opacity-60" : ""}`}>
           {mentionsOnly && <MentionsOnly part={answer.part} />}
+          {drawings.length > 0 && (
+            <Drawings
+              key={`${answer.part}|${drawings.map(drawingKey).join("|")}`}
+              drawings={drawings}
+              onOpen={(drawing) => openPage?.({ manualId: drawing.manualId, page: drawing.page, title: drawing.title, ...(drawing.area ? { focus: drawing.area } : {}) })}
+            />
+          )}
           {/* The page and what it says side by side where the sheet has
               room (a wide screen, a portrait tablet), the page half of it,
               the other pages under the page; on a phone the page, the
@@ -377,6 +416,112 @@ function LargePage({ page, onOpen }: { page: PartPage; onOpen: () => void }) {
           Open in manual
         </Link>
       </figcaption>
+    </figure>
+  );
+}
+
+const drawingKey = (drawing: PartDrawing) => `${drawing.manualId}:${drawing.page}:${drawing.area ? areaParam(drawing.area) : "page"}`;
+const drawingLabel = (drawing: PartDrawing) => (drawing.kind === "exploded" ? "Exploded view" : "Drawing");
+// Very wide or tall drawings get a box within these shapes (the drawing
+// fits inside it), so none is a sliver; the large one is as wide as the
+// sheet unless that would make it taller than this, then centred.
+const shapeOf = (aspect: number) => Math.min(2.4, Math.max(0.6, aspect || 1));
+const DRAWING_HEIGHT = "min(34rem, 62vh)";
+
+// The part's drawings: one large, across the sheet (a tap opens its page
+// full screen, zoomed to it), the others in a strip under it (a tap shows
+// that one large).
+function Drawings({ drawings, onOpen }: { drawings: PartDrawing[]; onOpen: (drawing: PartDrawing) => void }) {
+  const [shown, setShown] = useState(0);
+  const index = shown < drawings.length ? shown : 0;
+  const large = drawings[index];
+  // As wide as the sheet, or as the large one is at its tallest (centred,
+  // with its strip under it).
+  return (
+    <div data-part-drawings className="mx-auto space-y-2" style={{ maxWidth: `min(100%, calc(${DRAWING_HEIGHT} * ${shapeOf(large.aspect)}))` }}>
+      <LargeDrawing key={drawingKey(large)} drawing={large} place={drawings.length > 1 ? `${index + 1} of ${drawings.length}` : null} onOpen={() => onOpen(large)} />
+      {drawings.length > 1 && (
+        <ul aria-label="Other drawings" className="flex gap-2 overflow-x-auto pb-1">
+          {drawings.map((drawing, i) =>
+            i === index ? null : (
+              <li key={drawingKey(drawing)} className="shrink-0">
+                <DrawingThumb drawing={drawing} onPick={() => setShown(i)} />
+              </li>
+            ),
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function LargeDrawing({ drawing, place, onOpen }: { drawing: PartDrawing; place: string | null; onOpen: () => void }) {
+  const { element, url, failed, retry } = usePagePicture(drawing.manualId, drawing.page, "fit", drawing.area);
+  const label = drawingLabel(drawing);
+  const shape = shapeOf(drawing.aspect);
+  return (
+    <figure className="space-y-1">
+      <button
+        ref={element}
+        type="button"
+        data-drawing={`${drawing.manualId}:${drawing.page}`}
+        data-drawing-area={drawing.area ? areaParam(drawing.area) : "page"}
+        data-drawing-kind={drawing.kind}
+        data-ready={url ? "true" : "false"}
+        aria-label={failed ? `The drawing from page ${drawing.page} couldn't be drawn. Try again.` : `${label} from page ${drawing.page} of ${drawing.title}. Open it full screen to zoom in.`}
+        onClick={() => (failed ? retry() : onOpen())}
+        style={{ aspectRatio: String(shape) }}
+        className="relative block w-full overflow-hidden rounded-lg border border-white/15 bg-white/[0.06] transition hover:border-white/40 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+      >
+        {url ? (
+          // A drawing cropped here from the shop's own manual (no image file to optimise).
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={url} alt="" className="size-full bg-white object-contain" />
+        ) : failed ? (
+          <span className="absolute inset-0 grid place-items-center p-4 text-center text-sm text-trail">This drawing couldn&apos;t be drawn. Tap to try again.</span>
+        ) : null}
+        {url && (
+          <span aria-hidden className="absolute right-2 bottom-2 inline-flex items-center gap-1 rounded-md bg-charcoal-900/85 px-2 py-1 text-xs font-medium text-ink">
+            <ZoomInIcon className="size-3.5" />
+            Zoom
+          </span>
+        )}
+      </button>
+      <figcaption className="flex items-center justify-between gap-3 text-xs text-ink-muted">
+        <span data-drawing-caption className="min-w-0 truncate">
+          {label} · p.{drawing.page}
+        </span>
+        {place && <span className="shrink-0 tabular-nums">{place}</span>}
+      </figcaption>
+    </figure>
+  );
+}
+
+function DrawingThumb({ drawing, onPick }: { drawing: PartDrawing; onPick: () => void }) {
+  const width = Math.round(Math.min(STRIP_WIDTHS[1], Math.max(STRIP_WIDTHS[0], STRIP_HEIGHT * drawing.aspect)));
+  const { element, url, failed, retry } = usePagePicture(drawing.manualId, drawing.page, width, drawing.area);
+  return (
+    <figure className="space-y-1" style={{ width }}>
+      <button
+        ref={element}
+        type="button"
+        data-drawing-thumb={`${drawing.manualId}:${drawing.page}`}
+        data-drawing-area={drawing.area ? areaParam(drawing.area) : "page"}
+        data-ready={url ? "true" : "false"}
+        aria-label={`Show the ${drawingLabel(drawing).toLowerCase()} from page ${drawing.page} large`}
+        title={`${drawing.title}, page ${drawing.page}`}
+        onClick={() => (failed ? retry() : onPick())}
+        style={{ height: STRIP_HEIGHT }}
+        className="relative block w-full overflow-hidden rounded-md border border-white/15 bg-white/[0.06] transition hover:border-white/40 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+      >
+        {url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={url} alt="" className="size-full bg-white object-contain" />
+        ) : failed ? (
+          <span className="absolute inset-0 grid place-items-center p-1 text-center text-[10px] leading-tight text-trail">Tap to retry</span>
+        ) : null}
+      </button>
+      <figcaption className="text-center text-[11px] text-ink-muted tabular-nums">p.{drawing.page}</figcaption>
     </figure>
   );
 }

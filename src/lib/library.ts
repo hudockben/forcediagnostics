@@ -450,6 +450,46 @@ export async function searchManuals(
   return result.rows.map(toHit);
 }
 
+export type DrawingHit = { manualId: string; pageNumber: number; rank: number; text: string; title: string };
+
+// A drawing's heading ("EXPLODED VIEW"), or two lines of nothing but numbers
+// (a drawing's callouts): what a page that may be a drawing has.
+const DRAWING_VIEW = "\\mviews?\\M";
+const NUMBERS_LINE = "(^|\\n)[ \\t]*[0-9]{1,3}[A-Za-z]?([ \\t]+[0-9]{1,3}[A-Za-z]?)*[ \\t]*(?=\\n|$)";
+
+// Pages that may be drawings of what's searched for, for Diagnose's part
+// sheet (src/lib/diagnose-part-sheet.ts, where drawingScore decides): pages
+// of the given manuals with every word of the search and a view's heading
+// or callout numbers in their text, best ranked first, each with the start
+// of its text (textLength) and its manual's title. One query, matched
+// through ready_manual_pages as searchQuery is, the text looked at only
+// for the pages that match.
+export async function searchDrawingPages(shopId: string, query: string, manualIds: string[], limit: number, textLength: number): Promise<DrawingHit[]> {
+  const q = cleanSearchQuery(query);
+  if (!q || manualIds.length === 0) return [];
+  const result = await withShop(shopId, (tx) =>
+    tx.execute<{ manual_id: string; page_number: number; rank: number; text: string; title: string }>(sql`
+      with query as (select websearch_to_tsquery('english', ${q}) as tsq),
+      matches as materialized (
+        select v.manual_id, v.page_number,
+          case when v.manual_id = any(${uuidArray(manualIds)}) then ts_rank_cd(v.search_vector, query.tsq, 1) end as rank
+        from ready_manual_pages v
+        cross join query
+        where v.search_vector @@ query.tsq
+      )
+      select m.manual_id, m.page_number, m.rank::float8 as rank, left(p.text, ${textLength}) as text, ${manualDisplayTitle} as title
+      from matches m
+      join manual_pages p on p.manual_id = m.manual_id and p.page_number = m.page_number
+      join manuals on manuals.id = m.manual_id
+      where m.rank is not null
+        and (p.text ~* ${DRAWING_VIEW} or (select count(*) from regexp_matches(p.text, ${NUMBERS_LINE}, 'g')) >= 2)
+      order by m.rank desc, m.manual_id, m.page_number
+      limit ${limit}
+    `),
+  );
+  return result.rows.map((row) => ({ manualId: row.manual_id, pageNumber: row.page_number, rank: row.rank, text: row.text, title: row.title }));
+}
+
 const MAX_SEARCH_TERMS = 8;
 
 // "speed sensor \"wire harness\" -ground or vss" -> terms ["speed", "sensor",

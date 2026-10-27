@@ -1,5 +1,6 @@
-import type { PDFDocumentProxy, PDFWorker, RenderTask } from "pdfjs-dist";
+import type { PDFDocumentProxy, PDFPageProxy, PDFWorker, RenderTask } from "pdfjs-dist";
 
+import { areaOf, areaParam, figuresOf, heightOf, imageBoxes, isCalloutText, widthOf, type FigureOps, type PageArea, type PageFigures, type PageLabel } from "@/lib/manual-figures";
 import { PDFJS_WASM_URL, loadPdfJs } from "@/lib/pdfjs";
 
 import { getManualFileUrl } from "../library/actions";
@@ -14,12 +15,19 @@ import { openStoragePdf, type StorageLink, type StoragePdf } from "../library/[m
 // (not a worker, its own copy of pdf.js's code and caches, per manual cited),
 // at most two pages draw at once, and each
 // picture is kept (a small image) so it draws once however often it's
-// shown. Everything is let go a little after the Diagnose page goes.
+// shown. A part's drawings are found on its pages here too (where each page
+// paints its images, src/lib/manual-figures.ts) and cropped out of them,
+// each drawn once and kept the same way. Everything is let go a little
+// after the Diagnose page goes.
 
 const RANGE_CHUNK_BYTES = 128 * 1024;
 // Tablets refuse canvases much bigger than this many pixels.
 const MAX_CANVAS_PIXELS = 12_000_000;
 const PICTURES_KEPT = 80;
+const FIGURES_KEPT = 120;
+// A crop of a small drawing isn't drawn bigger than this many screen pixels
+// to the page's point: past it there's nothing more in a manual's images.
+const MAX_CROP_SCALE = 8;
 const RELEASE_AFTER_MS = 30_000;
 
 type OpenManual = { pdf: StoragePdf; doc: PDFDocumentProxy; pageCount: number };
@@ -27,6 +35,7 @@ type OpenManual = { pdf: StoragePdf; doc: PDFDocumentProxy; pageCount: number };
 const opened = new Map<string, Promise<OpenManual>>();
 let worker: PDFWorker | null = null;
 const pictures = new Map<string, Promise<string>>();
+const figures = new Map<string, Promise<PageFigures>>();
 let users = 0;
 let releaseTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -84,6 +93,12 @@ function open(manualId: string): Promise<OpenManual> {
   return manual;
 }
 
+async function pageOf(manualId: string, pageNumber: number): Promise<{ manual: OpenManual; page: PDFPageProxy }> {
+  const manual = await open(manualId);
+  const page = await Promise.race([manual.pdf.broken, manual.doc.getPage(Math.min(Math.max(1, pageNumber), manual.pageCount))]);
+  return { manual, page };
+}
+
 // Draws a page into a canvas `cssWidth` CSS pixels wide (sharp at the
 // screen's pixel ratio, within what a tablet allows).
 export async function drawPage(
@@ -93,8 +108,7 @@ export async function drawPage(
   cssWidth: number,
   signal?: AbortSignal,
 ): Promise<{ width: number; height: number }> {
-  const manual = await open(manualId);
-  const page = await Promise.race([manual.pdf.broken, manual.doc.getPage(Math.min(Math.max(1, pageNumber), manual.pageCount))]);
+  const { manual, page } = await pageOf(manualId, pageNumber);
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const base = page.getViewport({ scale: 1 });
   const scale = cssWidth / base.width;
@@ -115,7 +129,7 @@ export async function drawPage(
 }
 
 // A part of a page, as fractions of its width and height from its top left.
-export type PageArea = { left: number; top: number; right: number; bottom: number };
+export type { PageArea } from "@/lib/manual-figures";
 
 // Where a page prints the lines `heading` matches (its TORQUE boxes'
 // headings) and what's under each, down to about `below` lines and starting
@@ -123,8 +137,7 @@ export type PageArea = { left: number; top: number; right: number; bottom: numbe
 // layer. Null when it has none of them: a scanned page has no text layer
 // (its words came from OCR), so it's opened as it is.
 export async function headingArea(manualId: string, pageNumber: number, heading: RegExp, below: number): Promise<PageArea | null> {
-  const manual = await open(manualId);
-  const page = await Promise.race([manual.pdf.broken, manual.doc.getPage(Math.min(Math.max(1, pageNumber), manual.pageCount))]);
+  const { manual, page } = await pageOf(manualId, pageNumber);
   const viewport = page.getViewport({ scale: 1 });
   const content = await Promise.race([manual.pdf.broken, page.getTextContent()]);
   const boxes = content.items.flatMap((item) => {
@@ -150,9 +163,8 @@ export async function headingArea(manualId: string, pageNumber: number, heading:
   return { left: fraction(area.left, viewport.width), top: fraction(area.top, viewport.height), right: fraction(area.right, viewport.width), bottom: fraction(area.bottom, viewport.height) };
 }
 
-// A small picture of a page, as an image URL (kept for the next time).
-export function pagePicture(manualId: string, pageNumber: number, cssWidth: number): Promise<string> {
-  const key = `${manualId}:${pageNumber}:${cssWidth}`;
+// A picture kept for the next time it's shown (an image URL), made once.
+function keptPicture(key: string, make: (canvas: HTMLCanvasElement) => Promise<void>): Promise<string> {
   let picture = pictures.get(key);
   if (picture) {
     // Most recently used last.
@@ -162,7 +174,7 @@ export function pagePicture(manualId: string, pageNumber: number, cssWidth: numb
   }
   picture = slot(async () => {
     const canvas = document.createElement("canvas");
-    await drawPage(manualId, pageNumber, canvas, cssWidth);
+    await make(canvas);
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", 0.82));
     canvas.width = canvas.height = 0;
     if (!blob) throw new Error("The page couldn't be turned into a picture.");
@@ -178,6 +190,75 @@ export function pagePicture(manualId: string, pageNumber: number, cssWidth: numb
     void url.then((u) => URL.revokeObjectURL(u), () => {});
   }
   return picture;
+}
+
+// A small picture of a page, as an image URL (kept for the next time).
+export function pagePicture(manualId: string, pageNumber: number, cssWidth: number): Promise<string> {
+  return keptPicture(`${manualId}:${pageNumber}:${cssWidth}`, async (canvas) => {
+    await drawPage(manualId, pageNumber, canvas, cssWidth);
+  });
+}
+
+// A drawing cropped out of a page (an area of it), as a picture `cssWidth`
+// CSS pixels wide, sharp at the screen's pixel ratio: only that part of the
+// page is drawn, at the scale it needs, so a small drawing comes out as
+// sharp as a large one without a canvas the size of the whole page at that
+// scale. Kept for the next time, like a page's picture.
+export function figurePicture(manualId: string, pageNumber: number, area: PageArea, cssWidth: number): Promise<string> {
+  return keptPicture(`${manualId}:${pageNumber}:${areaParam(area)}:${cssWidth}`, async (canvas) => {
+    const { manual, page } = await pageOf(manualId, pageNumber);
+    const base = page.getViewport({ scale: 1 });
+    const width = widthOf(area) * base.width;
+    const height = heightOf(area) * base.height;
+    const css = cssWidth / width;
+    const ratio = Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(MAX_CANVAS_PIXELS / (cssWidth * cssWidth * (height / width))));
+    const scale = Math.min(css * ratio, MAX_CROP_SCALE);
+    // The page moved so the area's top left is the canvas's.
+    const viewport = page.getViewport({ scale, offsetX: -area.left * base.width * scale, offsetY: -area.top * base.height * scale });
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    await Promise.race([manual.pdf.broken, page.render({ canvas, viewport }).promise]);
+  });
+}
+
+// A page's drawings (src/lib/manual-figures.ts): where it paints its
+// images, from pdf.js's list of the page's operations (worked out in the
+// shared worker, which reads only the parts of the file the page needs;
+// annotations aren't the page's drawings), with the callout numbers its
+// text layer prints around them. Found once for the visit; a page that
+// couldn't be read is looked at again the next time it's asked for.
+export function pageFigures(manualId: string, pageNumber: number): Promise<PageFigures> {
+  const key = `${manualId.toLowerCase()}:${pageNumber}`;
+  let found = figures.get(key);
+  if (found) return found;
+  found = slot(async () => {
+    const { manual, page } = await pageOf(manualId, pageNumber);
+    const pdfjs = await loadPdfJs();
+    const list = await Promise.race([manual.pdf.broken, page.getOperatorList({ annotationMode: pdfjs.AnnotationMode.DISABLE })]);
+    const viewport = page.getViewport({ scale: 1 });
+    const images = imageBoxes(list, pdfjs.OPS as unknown as FigureOps).flatMap((box) => areaOf(box, viewport) ?? []);
+    let labels: PageLabel[] = [];
+    if (images.length > 0) {
+      const content = await Promise.race([manual.pdf.broken, page.getTextContent()]);
+      labels = content.items.flatMap((item) => {
+        if (!("str" in item) || !isCalloutText(item.str)) return [];
+        const [x, y] = [item.transform[4], item.transform[5]];
+        const height = item.height || Math.hypot(item.transform[2], item.transform[3]);
+        const area = areaOf({ x0: x, y0: y, x1: x + item.width, y1: y + height }, viewport);
+        return area ? [{ text: item.str, area }] : [];
+      });
+    }
+    // The images pdf.js decoded for the list aren't needed again (a scan's is
+    // tens of megabytes): let them go, unless the page is being drawn.
+    page.cleanup();
+    return figuresOf(images, { aspect: viewport.width / viewport.height, labels });
+  });
+  found.catch(() => {
+    if (figures.get(key) === found) figures.delete(key);
+  });
+  figures.set(key, found);
+  while (figures.size > FIGURES_KEPT) figures.delete(figures.keys().next().value!);
+  return found;
 }
 
 // The Diagnose page holds the manuals open while it's on screen; a little
@@ -201,6 +282,7 @@ export function holdManuals(): () => void {
       void Promise.all(closing).then(() => shared?.destroy());
       for (const picture of pictures.values()) void picture.then((u) => URL.revokeObjectURL(u), () => {});
       pictures.clear();
+      figures.clear();
     }, RELEASE_AFTER_MS);
   };
 }

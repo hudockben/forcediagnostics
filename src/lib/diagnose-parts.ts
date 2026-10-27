@@ -3,13 +3,16 @@
 // part's manual page (diagram and procedure) with what the page says
 // about it. This file has the part names to pick from (a reviewed list of
 // what Polaris calls the common parts of each system, plus the parts the
-// conversation's causes name, those first) and how a part's pages are
-// ranked, toward the service procedure for it in this unit's own manual.
+// conversation's causes name, those first), how a part's pages are
+// ranked, toward the service procedure for it in this unit's own manual,
+// and which of them are its drawings (an exploded view first), whose
+// pictures the screen crops out of the pages (src/lib/manual-figures.ts).
 // Pure (no React, no database): shared by the server, the screen and the
 // tests. The search itself is in src/lib/diagnose-part-sheet.ts.
 
 import { causeSystem, isCauseSystem, type CauseState, type DrawnSystem, type UnitVehicle } from "@/lib/diagnose-zones";
 import { stem, wordsOf, type FactsState, type PageRef } from "@/lib/manual-facts-rules";
+import { aspectOf, type PageArea, type PageFigures } from "@/lib/manual-figures";
 
 export const isDrawnSystem = (value: unknown): value is DrawnSystem => isCauseSystem(value) && value !== "other";
 
@@ -328,6 +331,9 @@ export type PartSheet = {
   part: string;
   // Best first: the one drawn large, then the others.
   pages: PartPage[];
+  // The pages with the part's drawings, an exploded view first (see
+  // drawingPages); the screen finds the drawings on them.
+  drawings: DrawingPage[];
   // No manual to search: the unit has none in the library, or no unit has
   // been picked (the pages, if any, are the ones the causes cite).
   noManual: boolean;
@@ -485,4 +491,120 @@ export function rankPages<T extends PageCandidate>(pages: T[], part: string, lim
     .sort((a, b) => b.score - a.score || a.page.title.localeCompare(b.page.title) || a.page.page - b.page.page)
     .slice(0, limit)
     .map(({ page }) => page);
+}
+
+// --- A part's drawings ----------------------------------------------------------
+
+// Why a page is one of the part's drawings: an exploded, assembly or
+// component view naming the part (or a page of a drawing's callout
+// numbers), the part's own procedure page (its best page), or a page a
+// cause cites for it.
+export type DrawingKind = "exploded" | "procedure" | "cited";
+export type DrawingPage = PartPage & { kind: DrawingKind };
+
+export const SHOWN_DRAWING_PAGES = 4;
+
+// A drawing's heading ("EXPLODED VIEW", "Assembly View", "COMPONENT VIEWS",
+// "PARTS VIEW").
+const VIEW_PHRASE = /\b(?:exploded|assembly|component|parts?)\s+views?\b/i;
+
+// The callout numbers a page prints around a drawing: the different
+// numbers on its lines of nothing but numbers ("1", "4 5", "12A"), when
+// they count up from 1 the way callouts do (a table of values doesn't);
+// 0 otherwise. Steps ("1. Raise the box.") and page numbers ("10.62")
+// aren't callouts.
+export function calloutNumbers(text: string) {
+  const numbers = new Set<number>();
+  for (const line of text.split("\n")) {
+    const tokens = line.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0 || !tokens.every((token) => /^\d{1,3}[A-Za-z]?$/.test(token))) continue;
+    for (const token of tokens) numbers.add(parseInt(token, 10));
+  }
+  return [1, 2, 3].every((n) => numbers.has(n)) ? numbers.size : 0;
+}
+
+// Fewer callout numbers than this aren't a drawing's.
+export const MIN_CALLOUTS = 6;
+
+// How much a page looks like a drawing of the part: 0 when it isn't one
+// (it doesn't name the part, it's a contents page, or nothing says it's a
+// drawing). Most for a heading naming the part as a view ("STARTER MOTOR
+// EXPLODED VIEW", "TRANSMISSION VIEW"), less for a view's heading on a
+// page that names the part (an exploded view whose callout list has it),
+// least for a page of callout numbers with no heading; callouts add to a
+// heading.
+export function drawingScore(text: string, part: string) {
+  if (!mentionsPart(text, part) || isContentsPage(text)) return 0;
+  const wanted = wordsOf(partSearchText(part));
+  let score = 0;
+  for (const line of text.split("\n")) {
+    const letters = line.replace(/[^A-Za-z]/g, "");
+    const capitals = letters.length >= 6 && letters === letters.toUpperCase();
+    const words = new Set(wordsOf(line));
+    if (capitals && words.has("view") && wanted.every((word) => words.has(word))) score = Math.max(score, 30);
+    else if (VIEW_PHRASE.test(line)) score = Math.max(score, 20);
+  }
+  if (calloutNumbers(text) >= MIN_CALLOUTS) score += 10;
+  return score;
+}
+
+// The pages to find a part's drawings on, at most `limit`: its exploded
+// views first (found: pages of the manuals that name the part and might be
+// drawings, best first by drawingScore, the unit's own manual over others,
+// then search's rank), then its procedure page (the sheet's best page, when
+// it's about the part), then the other pages a cause cites for it. A page
+// that only names the part on the way (another part's procedure) is never
+// one: its drawings aren't of the part.
+export function drawingPages(found: PageCandidate[], pages: PartPage[], part: string, limit = SHOWN_DRAWING_PAGES): DrawingPage[] {
+  const out: DrawingPage[] = [];
+  const add = (page: PartPage, kind: DrawingKind) => {
+    if (out.length < limit && !out.some((other) => samePage(other, page))) out.push({ ...page, kind });
+  };
+  const views = found
+    .map((page) => ({ page, score: drawingScore(page.text, part) }))
+    .filter(({ score }) => score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        Number(b.page.own) - Number(a.page.own) ||
+        b.page.rank - a.page.rank ||
+        a.page.title.localeCompare(b.page.title) ||
+        a.page.page - b.page.page,
+    );
+  for (const { page } of views) {
+    const listed = pages.find((other) => samePage(other, page));
+    add(listed ?? { manualId: page.manualId, page: page.page, title: page.title, cited: page.cited !== null, about: aboutPart(page, part) }, "exploded");
+  }
+  if (pages[0]?.about) add(pages[0], "procedure");
+  for (const page of pages.slice(1)) if (page.cited && page.about) add(page, "cited");
+  return out;
+}
+
+// A drawing to show: a figure cropped out of one of the part's drawing
+// pages (area), or the page whole (area null) when it has none to crop (a
+// scan, or a drawing all of lines). aspect: its width over its height.
+export type PartDrawing = { manualId: string; page: number; title: string; kind: DrawingKind; area: PageArea | null; aspect: number };
+
+export const MAX_DRAWINGS = 8;
+
+// The part's drawings, from what the screen found on each drawing page (in
+// their order; figures null for a page it couldn't look at, which is left
+// out): each page's figures, largest first, or the page itself.
+export function drawingsOf(found: { page: DrawingPage; figures: PageFigures | null }[], limit = MAX_DRAWINGS): PartDrawing[] {
+  const out: PartDrawing[] = [];
+  for (const { page, figures } of found) {
+    if (!figures) continue;
+    const of = { manualId: page.manualId, page: page.page, title: page.title, kind: page.kind };
+    if (figures.figures.length === 0) out.push({ ...of, area: null, aspect: figures.aspect });
+    else for (const area of figures.figures) out.push({ ...of, area, aspect: aspectOf(area, figures.aspect) });
+  }
+  return out.slice(0, limit);
+}
+
+// The drawings the sheet shows above the page: the cropped ones, and an
+// exploded view with nothing to crop (all lines, or a scan) as its page,
+// unless it's the page drawn large under them anyway. A procedure or cited
+// page with nothing to crop is only that page, already there to open.
+export function panelDrawings(drawings: PartDrawing[], large: PageRef | null): PartDrawing[] {
+  return drawings.filter((drawing) => drawing.area !== null || (drawing.kind === "exploded" && !(large && samePage(drawing, large))));
 }

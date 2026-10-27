@@ -1,7 +1,10 @@
 // Diagnose's part sheet: the part names for each system (the reviewed list
 // and the parts the causes name, those first), how a part's pages rank
 // (cited pages, then the service procedure in the unit's own manual, a
-// contents page last), the search of the conversation's manuals, and reading a
+// contents page last), which pages have its drawings (an exploded view
+// first, then its procedure page and the pages cited for it) and which of
+// the drawings found on them the sheet shows, the search of the
+// conversation's manuals, and reading a
 // page once with a scripted stand-in for the Claude API (checked against
 // the page, saved, read once by two devices at once, the shop's daily
 // allowance, no API key, failures tried again later, the real SDK's
@@ -23,23 +26,30 @@ import { askClaude } from "../src/lib/claude";
 import { partPageCard, partSheet } from "../src/lib/diagnose-part-sheet";
 import {
   MAX_PARTS,
+  MIN_CALLOUTS,
   PART_NAMES,
   aboutPart,
+  calloutNumbers,
   cardOf,
   cardSettled,
   causesIn,
+  drawingPages,
+  drawingScore,
+  drawingsOf,
   isContentsPage,
   isDrawnSystem,
   largePage,
   mentionsPart,
   numberedSteps,
   otherPages,
+  panelDrawings,
   partLibraryHref,
   partNames,
   partOfCause,
   partSearchText,
   rankPages,
   samePage,
+  type DrawingPage,
   type PageCandidate,
   type PartCard,
   type PartPage,
@@ -124,7 +134,13 @@ BATTERY REMOVAL
 Battery voltage fully charged: 12.6 V`;
 // A page that's all diagram: a page number and a callout letter.
 const DIAGRAM_ONLY = "10.66\nA";
-const RZR_PAGES = [CONTENTS, WIRING, SOLENOID, STARTER, TROUBLESHOOTING, BATTERY, DIAGRAM_ONLY];
+// The starter motor's exploded view: its heading and the callout numbers
+// around the drawing (a few side by side on a line), as a text layer gives
+// them.
+const STARTER_EXPLODED = `STARTER MOTOR EXPLODED VIEW\n1\n2\n3\n4 5\n6\n7\n8\n10.65`;
+// A drawing with no heading, only its callouts and the part's name.
+const STARTER_CALLOUTS = `Starter Motor\n1 2\n3\n4\n5\n6\n7\n10.67`;
+const RZR_PAGES = [CONTENTS, WIRING, SOLENOID, STARTER, TROUBLESHOOTING, BATTERY, DIAGRAM_ONLY, STARTER_EXPLODED, STARTER_CALLOUTS];
 // Another line's manual with its own starter-solenoid page.
 const RANGER_SOLENOID = `STARTER SOLENOID SERVICE
 STARTER SOLENOID REPLACEMENT
@@ -488,6 +504,93 @@ describe("ranking a part's pages", () => {
   });
 });
 
+describe("a part's drawings", () => {
+  const otherManual = "00000000-0000-4000-8000-000000000002";
+  const asPage = (page: PageCandidate, extra: Partial<PartPage> = {}): PartPage => ({ manualId: page.manualId, page: page.page, title: page.title, cited: page.cited !== null, about: aboutPart(page, "Starter motor"), ...extra });
+
+  test("callout numbers: lines of nothing but numbers counting up from 1; not steps, page numbers or a table's values", () => {
+    assert.equal(calloutNumbers(STARTER_EXPLODED), 8);
+    assert.equal(calloutNumbers(STARTER_CALLOUTS), 7);
+    assert.equal(calloutNumbers("1A\n2\n3B\n(4)"), 3);
+    assert.equal(calloutNumbers(SOLENOID), 0);
+    assert.equal(calloutNumbers(STARTER), 0);
+    assert.equal(calloutNumbers("Ring end gap\n25\n30\n35\n40\n45\n50"), 0);
+    assert.ok(MIN_CALLOUTS > 3);
+  });
+
+  test("how much a page looks like the part's drawing: a view's heading naming it, a view's heading on a page naming it, callouts alone; none for a page without the part, a contents page or a procedure", () => {
+    const legend = `EXPLODED VIEW\nStarter Assembly\nStarter motor housing\nBrush plate\n11.20`;
+    const view = drawingScore(STARTER_EXPLODED, "Starter motor");
+    assert.ok(view > drawingScore(legend, "Starter motor"), "the heading naming the part first");
+    assert.ok(drawingScore(legend, "Starter motor") > drawingScore(STARTER_CALLOUTS, "Starter motor"));
+    assert.ok(drawingScore(STARTER_CALLOUTS, "Starter motor") > 0);
+    // "<part> VIEW" is a view's heading too, and callouts add to a heading.
+    assert.ok(drawingScore("TRANSMISSION VIEW\nTransmission\n7.40", "Transmission") > drawingScore(legend, "Starter motor"));
+    assert.ok(drawingScore(`${STARTER_EXPLODED}\n`, "Starter motor") === view && view > drawingScore("STARTER MOTOR EXPLODED VIEW\n10.65", "Starter motor"));
+    for (const [text, part] of [
+      [STARTER_EXPLODED, "Starter solenoid"],
+      [CONTENTS + "\nSTARTER MOTOR EXPLODED VIEW . . . . . . . . . 10.65", "Starter motor"],
+      [STARTER, "Starter motor"],
+      [SOLENOID, "Starter solenoid"],
+      [`Starter motor\nTop view of the starter`, "Starter motor"],
+    ]) assert.equal(drawingScore(text, part), 0, text.slice(0, 30));
+  });
+
+  test("the pages for a part's drawings: its exploded views, the heading naming it and the unit's own manual first, then its procedure page, then pages cited for it; never one that only names it, each once, at most four", () => {
+    const exploded = candidate(STARTER_EXPLODED, { rank: 0.05 });
+    const callouts = candidate(STARTER_CALLOUTS, { rank: 0.5 });
+    const elsewhere = candidate(STARTER_EXPLODED, { manualId: otherManual, own: false, rank: 0.9 });
+    const procedure = asPage(candidate(STARTER));
+    const cited = asPage(candidate(TROUBLESHOOTING), { cited: true, about: true });
+    const named = asPage(candidate(SOLENOID), { cited: true, about: false });
+    const drawings = drawingPages([callouts, elsewhere, exploded, candidate(SOLENOID)], [procedure, named, cited], "Starter motor");
+    assert.deepEqual(
+      drawings.map((page) => [page.manualId === otherManual ? "other" : "own", page.page, page.kind]),
+      [
+        ["own", 8, "exploded"],
+        ["other", 8, "exploded"],
+        ["own", 9, "exploded"],
+        ["own", 4, "procedure"],
+      ],
+    );
+    // With room, the pages cited for it follow; the procedure page once even when it's also a view.
+    const fewer = drawingPages([exploded], [procedure, named, cited], "Starter motor");
+    assert.deepEqual(fewer.map((page) => [page.page, page.kind]), [[8, "exploded"], [4, "procedure"], [5, "cited"]]);
+    const same = drawingPages([exploded], [asPage(exploded)], "Starter motor");
+    assert.deepEqual(same.map((page) => [page.page, page.kind]), [[8, "exploded"]]);
+    // A best page that isn't about the part (it only names it) isn't its procedure.
+    assert.deepEqual(drawingPages([], [named], "Starter motor"), []);
+    assert.equal(drawingPages([exploded, callouts], [procedure], "Starter motor", 1).length, 1);
+  });
+
+  test("the drawings found on those pages: each page's figures, largest first, or the page itself; a page that couldn't be looked at left out; the sheet shows the cropped ones and an exploded view with nothing to crop unless it's the page drawn large", () => {
+    const manualId = "00000000-0000-4000-8000-000000000001";
+    const of = (page: number, kind: DrawingPage["kind"]): DrawingPage => ({ manualId, page, title: "2019 RZR XP 1000 Service Manual", cited: false, about: true, kind });
+    const big = { left: 0.1, top: 0.4, right: 0.6, bottom: 0.9 };
+    const small = { left: 0.6, top: 0.1, right: 0.9, bottom: 0.3 };
+    const aspect = 612 / 792;
+    const found = drawingsOf([
+      { page: of(8, "exploded"), figures: { figures: [big, small], wholePage: false, aspect } },
+      { page: of(10, "exploded"), figures: { figures: [], wholePage: false, aspect } },
+      { page: of(11, "exploded"), figures: null },
+      { page: of(4, "procedure"), figures: { figures: [], wholePage: true, aspect } },
+    ]);
+    assert.deepEqual(
+      found.map((drawing) => [drawing.page, drawing.area === null ? "page" : drawing.area === big ? "big" : "small"]),
+      [
+        [8, "big"],
+        [8, "small"],
+        [10, "page"],
+        [4, "page"],
+      ],
+    );
+    assert.ok(Math.abs(found[0].aspect - (0.5 * aspect) / 0.5) < 1e-9 && found[2].aspect === aspect);
+    assert.deepEqual(panelDrawings(found, { manualId, page: 4 }).map((drawing) => drawing.page), [8, 8, 10]);
+    assert.deepEqual(panelDrawings(found, { manualId: manualId.toUpperCase(), page: 10 }).map((drawing) => drawing.page), [8, 8]);
+    assert.equal(drawingsOf(Array.from({ length: 5 }, (_, i) => ({ page: of(i + 1, "exploded"), figures: { figures: [big, small], wholePage: false, aspect } }))).length, 8);
+  });
+});
+
 describe("the sheet on the screen", () => {
   const manualId = "0f6e3a52-58c4-4c39-9d4e-6f7b3c0d9a11";
   const page = (n: number, cited = false): PartPage => ({ manualId, page: n, title: "2021 Ranger XD 1500 Service Manual", cited, about: true });
@@ -559,6 +662,29 @@ describe("the part sheet", () => {
     assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 4, title: rzrTitle, cited: false, about: true });
     const battery = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", part: "Battery" }));
     assert.deepEqual(battery.pages[0], { manualId: rzr, page: 6, title: rzrTitle, cited: true, about: true });
+  });
+
+  test("a part's drawings: its exploded views in the manuals searched first, then its procedure page and the pages cited for it", async () => {
+    const motor = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", part: "Starter motor" }));
+    assert.deepEqual(
+      motor.drawings.map((page) => [page.manualId === rzr ? "rzr" : page.manualId, page.page, page.kind]),
+      [
+        ["rzr", 8, "exploded"],
+        ["rzr", 9, "exploded"],
+        ["rzr", 4, "procedure"],
+      ],
+    );
+    assert.equal(motor.drawings[0].title, rzrTitle);
+    // The procedure page is still the one drawn large.
+    assert.equal(motor.pages[0].page, 4);
+    // The starter solenoid has no exploded view: its procedure page, then the page its check cites.
+    const solenoid = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting" }));
+    assert.deepEqual(solenoid.drawings.map((page) => [page.page, page.kind]), [[3, "procedure"], [5, "cited"]]);
+    // A part no page is about has no drawings from a page that only names it.
+    const frame = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "body_frame", part: "Frame" }));
+    assert.deepEqual(frame.drawings, []);
+    // Another shop's copy of the manual is never searched.
+    assert.ok(!motor.drawings.some((page) => page.manualId === otherShopRzr));
   });
 
   test("a part no page is about: the pages that name it, without a card", async () => {

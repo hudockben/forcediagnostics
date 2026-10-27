@@ -4,10 +4,12 @@ import Link from "next/link";
 import { createContext, use, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent } from "react";
 import { createPortal } from "react-dom";
 
+import { drawingsOf, type DrawingPage, type PartDrawing } from "@/lib/diagnose-parts";
 import type { SourceView } from "@/lib/diagnose-rules";
+import { areaParam, fitArea, parseAreaParam, type PageArea } from "@/lib/manual-figures";
 
 import { BackIcon, BookIcon, ZoomInIcon, ZoomOutIcon } from "./icons";
-import { drawPage, headingArea, holdManuals, pagePicture } from "./manual-pages";
+import { drawPage, figurePicture, headingArea, holdManuals, pageFigures, pagePicture } from "./manual-pages";
 import { holdPage, overlayRoot, useMounted } from "./unit-3d";
 import { useHistoryParam } from "./use-history-param";
 
@@ -16,13 +18,18 @@ import { useHistoryParam } from "./use-history-param";
 // opens the page full screen to zoom into, with a way into the manual
 // viewer at that page. The full-screen page is in the address
 // (?manual-page=<manual>:<page>, with ":torque" when it's opened to read
-// its torque specs, zoomed toward its TORQUE boxes), so Back closes it.
+// its torque specs, zoomed toward its TORQUE boxes, or ":box-…" when it's
+// opened from one of a part's drawings, zoomed to that drawing), so Back
+// closes it.
 
 export type ManualSource = Extract<SourceView, { type: "manual" }>;
 
 // focus: "torque" opens it zoomed toward its TORQUE boxes (the part sheet's
-// card points to them there, never copying a torque).
-type PageRef = { manualId: string; page: number; title: string; focus?: "torque" };
+// card points to them there, never copying a torque); an area, zoomed to
+// that drawing on it (a part's drawing, enlarged).
+type PageRef = { manualId: string; page: number; title: string; focus?: "torque" | PageArea };
+
+const focusParam = (focus: PageRef["focus"]) => (focus === "torque" ? ":torque" : focus ? `:${areaParam(focus)}` : "");
 
 const PageViewContext = createContext<((page: PageRef) => void) | null>(null);
 
@@ -56,19 +63,20 @@ export function ManualPictures({ children, titles }: { children: ReactNode; titl
   // found by search), for the page view's header.
   const [opened, setOpened] = useState<Map<string, string>>(() => new Map());
   useEffect(() => holdManuals(), []);
-  const match = value ? /^([0-9a-f-]{36}):(\d{1,5})(:torque)?$/i.exec(value) : null;
+  const match = value ? /^([0-9a-f-]{36}):(\d{1,5})(?::(torque|box-[\d-]+))?$/i.exec(value) : null;
+  const focus = match?.[3] === "torque" ? ("torque" as const) : match?.[3] ? parseAreaParam(match[3]) : null;
   const page: PageRef | null = match
-    ? { manualId: match[1], page: Number(match[2]), title: titles.get(match[1]) ?? opened.get(match[1]) ?? "Manual", ...(match[3] ? { focus: "torque" as const } : {}) }
+    ? { manualId: match[1], page: Number(match[2]), title: titles.get(match[1]) ?? opened.get(match[1]) ?? "Manual", ...(focus ? { focus } : {}) }
     : null;
   return (
     <PageViewContext
       value={(ref) => {
         if (!titles.has(ref.manualId) && opened.get(ref.manualId) !== ref.title) setOpened((old) => new Map(old).set(ref.manualId, ref.title));
-        open(`${ref.manualId}:${ref.page}${ref.focus ? `:${ref.focus}` : ""}`);
+        open(`${ref.manualId}:${ref.page}${focusParam(ref.focus)}`);
       }}
     >
       {children}
-      {page && mounted && createPortal(<PageView page={page} onClose={close} />, overlayRoot())}
+      {page && mounted && createPortal(<PageView key={value} page={page} onClose={close} />, overlayRoot())}
     </PageViewContext>
   );
 }
@@ -93,14 +101,24 @@ export function PageThumbs({ sources, size = "small", className = "" }: { source
 
 const SIZES = { inline: { width: 36, css: "w-9" }, small: { width: 60, css: "w-[60px]" }, large: { width: 104, css: "w-[104px]" } } as const;
 
+// Widths a picture that fills its box is drawn at: the box's width rounded
+// up to one of these steps, so a few sizes cover every screen.
+const FIT_STEP = 160;
+const FIT_MOST = 960;
+
 // A page's picture at a width, drawn once its element is near the screen;
-// retry draws a failed one again.
-export function usePagePicture(manualId: string, page: number, width: number) {
+// retry draws a failed one again. With an area, that drawing cropped out of
+// the page (src/lib/manual-figures.ts) instead of the whole page. "fit"
+// draws it as wide as its element is (in steps, once it's been measured).
+export function usePagePicture(manualId: string, page: number, width: number | "fit", area: PageArea | null = null) {
   const element = useRef<HTMLButtonElement>(null);
   const [visible, setVisible] = useState(false);
   const [tries, setTries] = useState(0);
+  const [measured, setMeasured] = useState(0);
   const [state, setState] = useState<{ url: string; key: string } | { failed: string } | null>(null);
-  const key = `${manualId}:${page}:${width}:${tries}`;
+  const drawnWidth = width === "fit" ? measured : width;
+  const crop = area ? areaParam(area) : "page";
+  const key = `${manualId}:${page}:${crop}:${drawnWidth}:${tries}`;
 
   useEffect(() => {
     const el = element.current;
@@ -116,9 +134,23 @@ export function usePagePicture(manualId: string, page: number, width: number) {
   }, [visible]);
 
   useEffect(() => {
-    if (!visible) return;
+    const el = element.current;
+    if (!el || width !== "fit") return;
+    const observer = new ResizeObserver(([entry]) => {
+      const box = entry.contentRect.width;
+      if (box > 0) setMeasured((old) => Math.max(old, Math.min(FIT_MOST, Math.ceil(box / FIT_STEP) * FIT_STEP)));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [width]);
+
+  useEffect(() => {
+    if (!visible || drawnWidth <= 0) return;
     let cancelled = false;
-    pagePicture(manualId, page, width).then(
+    // The area as written in its key (to a thousandth of the page), so one
+    // drawing is one picture however its area object came.
+    const cropped = crop === "page" ? null : parseAreaParam(crop);
+    (cropped ? figurePicture(manualId, page, cropped, drawnWidth) : pagePicture(manualId, page, drawnWidth)).then(
       (url) => !cancelled && setState({ url, key }),
       (error) => {
         console.error("Couldn't draw a manual page", error);
@@ -128,11 +160,44 @@ export function usePagePicture(manualId: string, page: number, width: number) {
     return () => {
       cancelled = true;
     };
-  }, [visible, manualId, page, width, key]);
+  }, [visible, manualId, page, drawnWidth, crop, key]);
 
   const url = state && "url" in state && state.key === key ? state.url : null;
   const failed = !!state && "failed" in state && state.failed === key;
   return { element, url, failed, retry: () => setTries((n) => n + 1) };
+}
+
+// A part's drawings (see drawingsOf): found on its drawing pages, in their
+// order, once the pages are known; "finding" until then, "none" with no
+// drawing page at all. A page that can't be looked at (its manual
+// couldn't be opened) is left out. Pass the same array for the same pages
+// (the sheet's own): a new one looks again (from what's kept).
+const NO_DRAWINGS: PartDrawing[] = [];
+export function usePartDrawings(pages: DrawingPage[]): { state: "none" | "finding" | "found"; drawings: PartDrawing[] } {
+  const key = pages.map((page) => `${page.manualId}:${page.page}:${page.kind}`).join("|");
+  const [found, setFound] = useState<{ key: string; drawings: PartDrawing[] } | null>(null);
+  useEffect(() => {
+    if (pages.length === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      pages.map((page) =>
+        pageFigures(page.manualId, page.page).then(
+          (figures) => ({ page, figures }),
+          (error) => {
+            console.error("Couldn't find a manual page's drawings", error);
+            return { page, figures: null };
+          },
+        ),
+      ),
+    ).then((results) => {
+      if (!cancelled) setFound({ key, drawings: drawingsOf(results) });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pages, key]);
+  if (pages.length === 0) return { state: "none", drawings: NO_DRAWINGS };
+  return found?.key === key ? { state: "found", drawings: found.drawings } : { state: "finding", drawings: NO_DRAWINGS };
 }
 
 function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) {
@@ -190,6 +255,8 @@ const MAX_ZOOM = 6;
 const TORQUE_HEADING = /^TORQUE(?:\s|$)/;
 const TORQUE_LINES = 8;
 const FOCUS_ZOOM = 3;
+// Opened from a drawing: zoomed so it fills the stage, at most this much.
+const FIGURE_ZOOM = 4;
 
 function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
   const stage = useRef<HTMLDivElement>(null);
@@ -269,13 +336,22 @@ function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
   // Centred once its size is known. Opened to read its torque specs, then
   // zoomed toward its TORQUE boxes where the PDF's text says they are,
   // unless the tech has zoomed it already (a scanned page has no text to
-  // say where: it stays as it is).
+  // say where: it stays as it is). Opened from a drawing, zoomed to it.
   const placed = useRef(false);
   useEffect(() => {
     if (status !== "shown" || placed.current || size.width === 0) return;
     placed.current = true;
     setView((old) => clamp(old));
-    if (page.focus !== "torque") return;
+    const el = stage.current;
+    const focus = page.focus;
+    if (focus && focus !== "torque") {
+      if (!el) return;
+      const fit = fitArea(focus, size, { width: el.clientWidth, height: el.clientHeight }, { margin: 24, most: FIGURE_ZOOM });
+      setView((old) => (old.zoom === 1 ? clamp(fit) : old));
+      setFocused(true);
+      return;
+    }
+    if (focus !== "torque") return;
     headingArea(page.manualId, page.page, TORQUE_HEADING, TORQUE_LINES).then(
       (area) => {
         const el = stage.current;
@@ -346,7 +422,7 @@ function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
       aria-modal="true"
       aria-label={`${page.title}, page ${page.page}`}
       data-page-view={`${page.manualId}:${page.page}`}
-      data-focus={focused ? page.focus : undefined}
+      data-focus={focused ? (page.focus === "torque" ? "torque" : "area") : undefined}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
