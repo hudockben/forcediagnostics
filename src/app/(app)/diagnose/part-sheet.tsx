@@ -16,13 +16,14 @@ import { usePagePicture, usePageView } from "./manual-pictures";
 // page drawn large (a tap opens it full screen to zoom into; Open in manual
 // goes to the viewer at it), a few other pages that show it, and beside the
 // page (under it on a phone) what it says: the procedure's steps, its
-// torque specs (from the shop's own manual, so in the manual's teal), the
-// special tools and cautions, and which page that is. The server finds the
-// pages and reads each page once, the first time anyone in the shop opens
-// it (src/app/api/diagnose/part-sheet/route.ts): the page shows while it's
-// read, and on its own when it can't be. A part no page is about (another
-// part's procedure only names it on the way) gets the pages that name it,
-// said so, without a card.
+// torque specs each under its label as the page prints it (from the shop's
+// own manual, so in the manual's teal; a quiet line when the page has more
+// than that), the special tools and cautions, and which page that is. The
+// server finds the pages and reads each page once, the first time anyone
+// in the shop opens it (src/app/api/diagnose/part-sheet/route.ts): the
+// page shows while it's read, and on its own when it can't be. A part no
+// page is about (another part's procedure only names it on the way) gets
+// the pages that name it, said so, without a card.
 
 type SheetAsk = { conversationId: string; system: DrawnSystem; part?: string };
 type CardAsk = { conversationId: string; page: PageRef };
@@ -478,6 +479,13 @@ function Facts({ facts, partial }: { facts: PageFacts; partial: boolean }) {
             ))}
           </dl>
         </div>
+      )}
+      {/* The page prints torques the list doesn't have (in a step, or where its
+          text leaves which fastener in doubt): they're on the page beside. */}
+      {facts.moreTorques && (
+        <p data-facts-more-torques className="text-xs leading-5 text-ink-muted">
+          More torque specs on the page
+        </p>
       )}
       {facts.tools.length > 0 && (
         <div data-facts-tools className="space-y-1">
