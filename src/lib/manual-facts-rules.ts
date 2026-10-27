@@ -127,18 +127,21 @@ export function wordsOnPage(text: string, pageWords: Set<string>) {
 // The middle dot of N·m and the marks a text layer or OCR puts in its place.
 const DOTS = /[·•∙⋅‧∗*]/g;
 
-// OCR's slips inside a torque unit, put right before the units are read: a
-// 1, | or ! for the l of lbs ("ft-1bs", "in-|bs"), a 5 for its s
-// ("ft-lb5"), a 1 or l for the i of in ("35 1n-lbs"), rn for the m of N·m
-// ("N-rn"), "ins" for in ("ins-lbs"), and # for pounds ("in#"). The text is
-// lower case by now.
+// OCR's slips inside a torque unit, put right before the units are read: an
+// h for the b of lbs after a number ("97 in-Ihs"), a 1, | or ! for its l
+// ("ft-1bs", "in-|bs"), a 5 for its s ("ft-lb5"), a 1 or l for the i of in
+// ("35 1n-lbs"), rn or rri for the m of N·m or kg·m ("N-rn", "kg-rri"),
+// "ins" for in ("ins-lbs"), # for pounds ("in#"), and pound-force spelled
+// out. The text is lower case by now.
 const UNIT_SLIPS: [RegExp, string][] = [
+  [/pounds?[\s.\-‐–—−]*force/g, "lbf"],
+  [/(?<=\d[\s(]*)([1l|!i]n|ft)([\s.\-‐–—−]{0,3})[li1|!]hs?(?![a-z])/g, "$1$2lbs"],
   [/(?<=\d[\s(]+)[1l|!]n(?=[\s.\-‐–—−]{0,3}[li1|!]bs?(?![a-z]))/g, "in"],
   [/(?<![a-z])ins(?=[\s.\-‐–—−]{0,3}[li1|!]bs?(?![a-z]))/g, "in"],
   [/(?<![a-z])(in|ft)[\s.\-‐–—−]{0,2}#/g, "$1 lb"],
   [/(?<![a-z])(in|ft)([\s.\-‐–—−]{0,3})[1|!]b(?=s|5|(?![a-z0-9]))/g, "$1$2lb"],
   [/(?<![a-z])((?:in|ft)[\s.\-‐–—−]{0,3}[li]b)5(?![a-z0-9])/g, "$1s"],
-  [/(?<![a-z])n([\s.\-‐–—−]{0,3})rn(?![a-z])/g, "n$1m"],
+  [/(?<![a-z])(n|kgf?)([\s.\-‐–—−]{0,3})(?:rn|rri)(?![a-z])/g, "$1$2m"],
 ];
 
 // Ways of writing a unit, to one spelling: in-lbs, in. lb., inch pounds,
@@ -303,114 +306,254 @@ export function numbersOnPage(text: string, pageTokens: string[]) {
 // The units a torque is given in.
 const TORQUE_UNITS = new Set(["inlb", "ftlb", "nm", "danm", "kgfm", "kgfcm", "ncm", "knm", "inoz"]);
 
-// The word TORQUE, as OCR may read it ("T0RQUE", "TOROUE").
-const TORQUE_WORD = /\bt[o0]r[qo0][uv]/i;
+// Characters that show as nothing (zero-width spaces and joiners, a soft
+// hyphen): taken out of an entry before it's checked, and out of a page's
+// text before it's looked at for torque.
+const INVISIBLE = /\p{Cf}/gu;
+
+// Letters of other alphabets that look like Latin ones (a Cyrillic Т or о,
+// a Greek Ν), which OCR or a text layer can give for the Latin letter.
+const LOOK_ALIKES: Record<string, string> = {
+  А: "A", В: "B", Е: "E", К: "K", М: "M", Н: "H", О: "O", Р: "P", С: "C", Т: "T", У: "Y", Х: "X",
+  а: "a", е: "e", о: "o", р: "p", с: "c", у: "y", х: "x", і: "i", ј: "j", ѕ: "s",
+  Α: "A", Β: "B", Ε: "E", Ζ: "Z", Η: "H", Ι: "I", Κ: "K", Μ: "M", Ν: "N", Ο: "O", Ρ: "P", Τ: "T", Υ: "Y", Χ: "X",
+  ι: "i", κ: "k", ν: "v", ο: "o", ρ: "p", τ: "t", υ: "u",
+};
+const latin = (text: string) => text.replace(/[\u0370-\u03ff\u0400-\u04ff]/g, (letter) => LOOK_ALIKES[letter] ?? letter);
+
+// The word TORQUE as OCR may read it: a 0, Q or C for its O, a G or O for
+// its Q, a V, IJ or LJ for its U, an I, l or 1 for its T, its letters
+// spaced out ("T O R Q U E", "TOR QUE"), or broken over a line ("TOR-\nQUE",
+// put back together first).
+const TORQUE_WORD = /(?<![a-z0-9])[t1il|]\s?[o0qc]\s?r\s?[qgo0]\s?(?:u|v|ij|lj|ii|li)/i;
+// What OCR can leave of a torque unit after a number, past the slips the
+// tokeniser puts right: an extra I in lbs or an h for its b ("in-Ilbs",
+// "in-Ihs"), an H for the N of N·m, or in or em for its m ("11 Hm", "11
+// N·in", "11 Nem").
+const TORQUE_UNIT_SCRAP = /\d\s*\(?\s*(?:[il1|]n|ft)\s*[.\-‐–—−]?\s*[li1|!]{1,2}[bh]|\d\s*[nh]\s*[·•∙⋅‧∗*.\-‐–—−]?\s*(?:m|rn|rri|in|em)(?![a-z])/i;
 
 // Whether a page prints torque specs: the word TORQUE (a TORQUE box, a
 // spec table's heading, a step that torques), or a torque unit in any
-// spelling the tokeniser reads, OCR's slips in one too ("97 in-1bs", "11
-// N-rn", "35 in#"). The card then says the page has them, and holds what it
-// shows to no number that could be one.
+// spelling the tokeniser reads, OCR's slips in one too ("97 in-1bs", "97
+// in-Ihs", "11 N-rn", "11 Hm", "35 in#"), letters from other alphabets read
+// as the Latin ones they look like. The card then says the page has them,
+// and holds what it shows to the page's own words and no number at all.
 export function torqueOnPage(pageText: string) {
-  return TORQUE_WORD.test(pageText) || specTokens(pageText).some((token) => TORQUE_UNITS.has(token));
+  const text = unbroken(latin(pageText.normalize("NFKC").replace(INVISIBLE, "")));
+  return TORQUE_WORD.test(text) || TORQUE_UNIT_SCRAP.test(text) || specTokens(text).some((token) => TORQUE_UNITS.has(token));
 }
 
-// What OCR can leave of a torque unit ("35 ft.", "11 Nmm", "97 in-tbs"),
-// and pounds with nothing to say of what: a number before one is taken for
-// a torque.
-const UNIT_SCRAPS = /^(?:ft|lbs?|lbf|ibs?|bs|tbs|rn|n|nmm|dan|kgf|pounds?)$/;
+// The units a number on the card may have, on a page with no torque specs:
+// none of a torque's, nor what's left of one ("35 ft.", "11 Nmm", "5
+// pounds"), nor degrees (a torque's angle, "plus 90 deg").
+const OTHER_UNITS = new Set("v amp ohm kohm mohm psi kpa bar mm rpm ml qt w hz mph kph".split(" "));
 
-// Words for torquing or tightening ("torque", "retorque", "tighten",
-// "hand-tight", "snug"), and for handing something on from elsewhere
-// ("same", "as for", "as per", "like the", "equal", "identical",
-// "matching", "likewise", "repeat", "also use", "the solenoid fastener's
-// value", "see", "refer"): an entry with one can give a fastener another's
-// torque without a number in it ("Cable fastener: as for the solenoid
-// fastener").
-const TORQUE_TALK = /\b(?:re-?)?t[o0]rqu|\btight|\bsnug/i;
+// What an entry may be written with: ASCII letters and digits, spaces, a
+// sentence's punctuation, a figure's callouts, and the marks of units that
+// aren't a torque's (°, Ω, %). Nothing else: "=", "→", a ditto mark or
+// quotes can hand one fastener's value to another, and a letter or digit
+// of another script can pass for a Latin one ("Tоrque" with a Cyrillic о)
+// or be a number ("٩٧", "Ⅻ").
+const WRITTEN_WITH = /^[A-Za-z0-9 .,;:()'’!?+&%°·ΩΩ\-–—/①-⓿❶-➓]*$/u;
+// Two quote marks in a row (a ditto) or a possessive ("the positive
+// fastener's"): one thing given another's.
+const DITTO_OR_POSSESSIVE = /['’]{2}|[a-z0-9)]['’]s(?![a-z])|s['’](?![a-z])/i;
+// A colon is a label's shape, the label and what it takes ("Cable
+// fastener: solenoid fastener"), and so is a dash with spaces round it
+// ("Cable Fastener - Solenoid"); a colon is kept only after the WARNING,
+// CAUTION or NOTICE an entry starts with.
+const LEAD_WORD = /^\s*(?:warning|caution|notice|danger)\s*[:!]/i;
+const SPACED_DASH = /\s[-‐–—]\s/;
+
+// Words for torquing or tightening, whatever comes before them ("torque",
+// "retorque", "overtorque", "untorqued", "tighten", "retighten",
+// "overtighten", "hand-tight", "snug", "cinch", "firmly", "secure").
+const TORQUE_TALK = /t[o0]rq|tight|snug|cinch|\bfirm|secur/i;
+// Words that hand something on from elsewhere ("same", "as for", "as per",
+// "like the", "equal", "matching", "likewise", "repeat", "also use", "the
+// solenoid fastener's value", "see", "refer", "both", "takes", "copy",
+// "previous", "above", "again", "twice", "not different from", "the way …
+// were installed", "do."), and that compare ("less than", "exceed"): an
+// entry with one can give a fastener another's torque without a number in
+// it ("Cable fastener: as for the solenoid fastener"). "Do not" is the one
+// "do" kept.
 const HAND_ON =
-  /\b(?:same|identical\w*|equal\w*|equivalent\w*|likewise|like|similar\w*|ditto|repeat\w*|match\w*|correspond\w*|specs?|specifications?|specified|values?|settings?|as|per|see|refer\w*|follow\w*|also|too)\b|\bappl(?:y|ies|ied) to\b/i;
+  /\b(?:same|selfsame|identical\w*|equal\w*|equivalent\w*|likewise|like|alike|similar\w*|ditto|dto|idem|id|ibid|repeat\w*|match\w*|correspond\w*|specs?|specifications?|specified|values?|settings?|figures?|numbers?|amounts?|readings?|as|per|see|refer\w*|follow\w*|also|too|again|both|others?|use[sd]?|using|take[sn]?|taking|took|shar(?:e|es|ed|ing)|cop(?:y|ies|ied|ying)|mirror\w*|twins?|common\w*|uniform\w*|interchangeabl\w*|previous\w*|prior|earlier|above|below|double|twice|triple|thrice|differ\w*|unchanged|way|kind|than|exceed\w*)\b|\bappl(?:y|ies|ied) to\b|\bdo\b(?!\s*not\b)/i;
 
-// A number in words ("ninety-seven", "one hundred six", "a quarter turn"):
-// it can't be checked against the page's figures.
-const NUMBER_WORD = /^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen|half|quarter)$/;
+// A number in words, however it's run together ("ninety-seven", "one
+// hundred six", "thirtyfive", "a quarter turn"): it can't be checked against
+// the page's figures.
+const NUMBER_WORD = /^(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|dozen|half|quarter)+$/;
+// Letters that pass for digits ("ll" or "Il" for 11, "lO" for 10), and a
+// Roman numeral ("XXXV", "IV") the page doesn't print as a word of its own
+// ("CV", "DC").
+const DIGIT_LETTERS = /^[lIoO]{2,}$/;
+const ROMAN = /^(?=[mdclxvi]{2,}$)m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/i;
+// A word spelled out letter by letter ("n i n e t y"), and two callouts side
+// by side, which read as a number ("⑨⑦").
+const SPELLED_OUT = /(?<![A-Za-z])[A-Za-z](?:[\s.\-]+[A-Za-z](?![A-Za-z])){2,}/;
+const SIDE_BY_SIDE = /[①-⓿❶-➓]\s*[①-⓿❶-➓]/;
+// A fastener's name: an entry that names two ("Install the cable nuts ②
+// the way the solenoid fasteners ③ were installed") can give one the
+// other's torque.
+const FASTENER = /(?:fastener|bolt|nut|screw|stud)s?$/;
+
+// Whether a text says a pair of words twice ("Battery Terminal Fastener
+// (Negative): Battery Terminal Fastener (Positive)"): a name beside one
+// like it.
+function repeatsPair(text: string) {
+  const words = meaningful(text);
+  const pairs = words.slice(1).map((word, i) => `${words[i]} ${word}`);
+  return new Set(pairs).size < pairs.length;
+}
 
 // A figure's callouts (①, ❷, ⒊), which a step names its parts by.
 const CALLOUTS = /[①-⓿❶-➓]/g;
+const CALLOUT = /[①-⓿❶-➓]/;
 // Part and tool numbers ("PU-50638", "PU-43506-A", "P0300", "2878080"):
 // one has to be on the page exactly, and isn't a quantity.
 const CODES = /\b[A-Z]{1,4}-?\d{3,}(?:-[A-Z0-9]+)*\b|\b\d{5,}(?:-[A-Z0-9]+)*\b/gi;
 const dashed = (text: string) => text.normalize("NFKC").replace(/[‐‑–—−]/g, "-");
 const codesOf = (text: string) => [...dashed(text).matchAll(CODES)].map(([code]) => code.toUpperCase());
 
+// Where a step or caution has to be in the page's own words: a step in its
+// own numbered step's lines, a caution in a WARNING, CAUTION or NOTICE's.
+// Such a place is the line it starts on ("6. Remove starter solenoid…",
+// "CAUTION: Disconnect…") and the lines it runs on to: a step's while a
+// line runs on past a sentence's end (up to three more), a caution's up to
+// five more; never past a blank line, another step or caution, a NOTE, or
+// a line with anything of a TORQUE box in it (the word TORQUE, a colon, a
+// number). On a page with torque specs a place whose own line has any of
+// that too isn't one: the page's columns were read across, and a step's
+// number could be put to a label beside it ("4. Starter Solenoid Cable
+// Fastener", where 4 N·m is that fastener's torque).
+const STEP_LINE = /^\s*(\d{1,2})[.)](?!\d)/;
+const CAUTION_LINE = /^\s*(?:warning|caution|notice|danger)\b\s*[:!]?/i;
+type Place = { words: Set<string>; callouts: Set<string>; first: string };
+function placesOf(lines: string[], torque: boolean) {
+  const steps = new Map<number, Place[]>();
+  const cautions: Place[] = [];
+  lines.forEach((line, index) => {
+    const step = STEP_LINE.exec(line);
+    const start = step ?? CAUTION_LINE.exec(line);
+    if (!start) return;
+    const own = [line];
+    for (const next of lines.slice(index + 1, index + (step ? 4 : 6))) {
+      const ended = step !== null && /[.!?]\s*$/.test(own.at(-1)!);
+      if (ended || next.trim() === "" || /[\d:]/.test(next) || TORQUE_WORD.test(next) || CAUTION_LINE.test(next) || /^\s*note\b/i.test(next)) break;
+      own.push(next);
+    }
+    const said = own.join("\n").slice(start[0].length);
+    if (torque && (/[\d:]/.test(said) || TORQUE_WORD.test(said))) return;
+    const words = wordsOf(said);
+    const place = { words: new Set(words), callouts: new Set(said.match(CALLOUTS)), first: words[0] ?? "" };
+    if (step) steps.set(Number(step[1]), [...(steps.get(Number(step[1])) ?? []), place]);
+    else cautions.push(place);
+  });
+  return { steps, cautions };
+}
+
 // The page's text as an entry is checked against it: its words, its specs'
 // tokens, its part numbers, its figure's callouts, its lines that can be a
 // heading (not a step, a sentence or a label: "STARTER SOLENOID
-// REPLACEMENT"), and whether it prints torque specs.
-type Page = { words: Set<string>; tokens: string[]; codes: Set<string>; callouts: Set<string>; headings: Set<string>; torque: boolean };
+// REPLACEMENT"), where each step and caution is, and whether it prints
+// torque specs.
+type Page = {
+  words: Set<string>;
+  tokens: string[];
+  codes: Set<string>;
+  callouts: Set<string>;
+  headings: Set<string>;
+  steps: Map<number, Place[]>;
+  cautions: Place[];
+  torque: boolean;
+};
 const headingKey = (text: string) => text.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
 function pageOf(pageText: string): Page {
-  const headings = pageText
-    .split("\n")
-    .map(headingKey)
-    .filter((line) => /[a-z]/.test(line) && !/^\d{1,2}[.)]\s/.test(line) && !/[.!?:]$/.test(line));
+  const lines = pageText.split("\n");
+  const headings = lines.map(headingKey).filter((line) => /[a-z]/.test(line) && !/^\d{1,2}[.)]\s/.test(line) && !/[.!?:]$/.test(line));
+  const torque = torqueOnPage(pageText);
   return {
     words: new Set(wordsOf(pageText)),
     tokens: specTokens(pageText),
     codes: new Set(codesOf(pageText)),
     callouts: new Set(pageText.match(CALLOUTS)),
     headings: new Set(headings),
-    torque: torqueOnPage(pageText),
+    ...placesOf(lines, torque),
+    torque,
   };
 }
 
-// Whether an entry says nothing of a torque, so it can go on the card: no
-// word for torquing or tightening, nor for handing something on; no number
-// in words; no torque unit in any spelling the tokeniser reads, nor what
-// OCR left of one after a number ("35 ft.", "11 Nmm"); and on a page with
-// torque specs no number at all but one in another unit ("12 V", "0.7 mm"),
-// a callout (①) or a part number, since a number there may be a torque
-// whose unit is on another line, in a table's heading or misread past
-// reading ("Cable fastener: 97"). When in doubt it's left out: a step lost
-// only means reading it on the page, a misleading one can do harm.
+// Whether an entry says nothing of a torque, so it can go on the card. It's
+// written only with ASCII letters and digits and a sentence's marks (no
+// "=", "→", ditto mark, quotes or possessive, no spaced dash, no colon but
+// after a leading WARNING); it has no word for torquing or tightening, nor
+// for handing something on or comparing; no number in words, letters for
+// digits, letters spelled out one by one, callouts side by side or Roman
+// numeral; it names no two fasteners and says no pair of words twice; it
+// has no torque unit in any spelling the
+// tokeniser reads; and no number but a callout (①), a part number, or on a
+// page with no torque specs one in another unit ("12 V", "0.7 mm"). A
+// number on a page with torque specs may be a torque whose unit is on
+// another line, in a table's heading or misread past reading ("Cable
+// fastener: 97"); one with no unit anywhere may be a torque OCR left
+// unread. When in doubt it's left out: a step lost only means reading it on
+// the page, a misleading one can do harm.
 function saysNoTorque(text: string, page: Page) {
-  if (TORQUE_TALK.test(text) || HAND_ON.test(text)) return false;
-  if ((text.toLowerCase().match(/[a-z]+/g) ?? []).some((word) => NUMBER_WORD.test(word))) return false;
-  const pieces = specScan(dashed(text.replace(CALLOUTS, " ")).replace(CODES, " ").replace(/^\s*\d{1,2}[.)]\s+/, ""));
-  return pieces.every(({ token }, i) => {
-    if (TORQUE_UNITS.has(token)) return false;
-    if (!isNumber(token)) return true;
-    const next = pieces[i + 1];
-    if (next && (UNIT_SCRAPS.test(next.token) || (next.token === "in" && !/^\s+$/.test(pieces[i + 2]?.gap ?? "")))) return false;
-    return !page.torque || (next !== undefined && UNITS.has(next.token));
-  });
+  if (!WRITTEN_WITH.test(text) || DITTO_OR_POSSESSIVE.test(text) || SPELLED_OUT.test(text) || SIDE_BY_SIDE.test(text) || SPACED_DASH.test(text)) return false;
+  if (text.replace(LEAD_WORD, "").includes(":")) return false;
+  // The words with the marks inside them taken out too ("sa-me", "t.o.r.q.u.e").
+  const joined = text.replace(/(?<=[A-Za-z])[-‐.'’](?=[A-Za-z])/g, "");
+  if ([text, joined].some((said) => TORQUE_TALK.test(said) || HAND_ON.test(said))) return false;
+  const tokens = text.match(/[A-Za-z]+/g) ?? [];
+  const odd = (token: string) => NUMBER_WORD.test(token.toLowerCase()) || DIGIT_LETTERS.test(token) || (ROMAN.test(token) && !page.words.has(stem(token.toLowerCase())));
+  if ([...tokens, ...(joined.match(/[A-Za-z]+/g) ?? [])].some(odd)) return false;
+  if (tokens.filter((token) => FASTENER.test(token.toLowerCase())).length > 1 || repeatsPair(text)) return false;
+  const pieces = specScan(dashed(text.replace(CALLOUTS, " ")).replace(CODES, " "));
+  return pieces.every(({ token }, i) => !TORQUE_UNITS.has(token) && (!isNumber(token) || (!page.torque && OTHER_UNITS.has(pieces[i + 1]?.token ?? ""))));
 }
 
 // --- Checking a reading against the page ------------------------------------------
 
-// A field's text, its spaces evened out, cut to its length at a word's end
-// (a word cut short isn't the page's).
+// A field's text, with what shows as nothing taken out and its spaces
+// evened out, cut to its length at a word's end (a word cut short isn't the
+// page's).
 function text(value: unknown, max: number) {
   if (typeof value !== "string") return "";
-  const whole = value.replace(/\s+/g, " ").trim();
+  const whole = value.replace(INVISIBLE, "").replace(/\s+/g, " ").trim();
   return whole.length <= max ? whole : whole.slice(0, max + 1).replace(/\s+\S*$/, "").slice(0, max).trim();
 }
 const list = (value: unknown) => (Array.isArray(value) ? value : []);
 
 // How much of its meaningful wording a step, tool or caution needs on the
-// page to be kept: close to the page's own (Claude may shorten one).
+// page to be kept: close to the page's own (Claude may shorten one, or read
+// past OCR's slips). On a page with torque specs it's every word, short
+// ones too (the small ones of every sentence aside), so nothing the page
+// doesn't say can sit beside a fastener's name ("Cable fastener: idem",
+// "… sa me …").
 const WORDING = 0.8;
+const allOnPage = (text: string, words: Set<string>) => wordsOf(text).every((word) => !/[a-z]/.test(word) || words.has(word));
+const inWords = (text: string, words: Set<string>, torque: boolean) => (torque ? allOnPage(text, words) : wordsOnPage(text, words) >= WORDING);
+
+// A step's own number at the start of its text ("6. Remove…"), which the
+// card shows once.
+const OWN_NUMBER = /^(\d{1,2})\s*[.)](?!\d)\s*/;
 
 // A reading (record_page_facts's input, or a saved card, read again) checked
 // against the page's text. The title has to be a heading the page prints,
-// word for word (case and spaces aside). A step, tool or caution has to be
-// in the page's words (at least 80% of its meaningful ones), with every
-// figure in it on the page and every part number and callout (①) exactly
-// as printed. None of them may say anything of a torque (saysNoTorque).
+// word for word (case and spaces aside). A step has to be one the page
+// numbers so, after the one before it, in the words of the page's own step
+// of that number and starting as it does (its own number at the start of
+// its text is taken off, any other stays a number). A caution has to be in
+// the words of a WARNING, CAUTION or NOTICE the page prints, a tool in the
+// page's words. That's at least 80% of an entry's meaningful words, or all
+// of its words on a page with torque specs, with every figure in it on the
+// page and every part number and callout (①) exactly as printed. None of
+// them may say anything of a torque (saysNoTorque).
 // Anything else is dropped, and counted; fields the card doesn't have (a
 // torque list or notes in a card saved before) are left out. Each list is
-// capped, each entry once. `torqueOnPage` is the page's own: whether it
-// prints torque specs.
+// capped, each tool and caution kept once. `torqueOnPage` is the page's
+// own: whether it prints torque specs.
 export function checkFacts(input: unknown, pageText: string): { facts: PageFacts; dropped: number } {
   const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const page = pageOf(pageText);
@@ -419,45 +562,58 @@ export function checkFacts(input: unknown, pageText: string): { facts: PageFacts
     if (!ok) dropped++;
     return ok;
   };
-  const printed = (value: string) =>
+  // What any entry has to be: its figures, part numbers and callouts as
+  // the page prints them, and nothing of a torque. On a page with torque
+  // specs a part number is a tool's only, a tool has no callout ("Solenoid
+  // fastener ⑪"), and neither a tool nor a caution names a fastener (a
+  // label beside a word of another: "Battery Terminal Fastener (Negative)
+  // (Positive)").
+  const printed = (value: string, kind: "title" | "step" | "tool" | "caution") =>
     numbersOnPage(value, page.tokens) &&
-    codesOf(value).every((code) => page.codes.has(code)) &&
+    codesOf(value).every((code) => page.codes.has(code) && (kind === "tool" || !page.torque)) &&
     (value.match(CALLOUTS) ?? []).every((callout) => page.callouts.has(callout)) &&
-    saysNoTorque(value, page);
-  const onPage = (value: string) => wordsOnPage(value, page.words) >= WORDING && printed(value);
-  const once = <T,>(items: T[], key: (item: T) => string) => {
+    saysNoTorque(value, page) &&
+    !(page.torque && kind === "tool" && CALLOUT.test(value)) &&
+    !(page.torque && (kind === "tool" || kind === "caution") && (value.match(/[A-Za-z]+/g) ?? []).some((word) => FASTENER.test(word.toLowerCase())));
+  // In the words of one of these places (a step's starting as it does),
+  // with its callouts there.
+  const inPlace = (value: string, places: Place[], step: boolean) =>
+    places.some(
+      (place) =>
+        (!step || wordsOf(value)[0] === place.first) &&
+        inWords(value, place.words, page.torque) &&
+        (value.match(CALLOUTS) ?? []).every((callout) => place.callouts.has(callout)),
+    );
+  const listed = (value: unknown, max: number, ok: (entry: string) => boolean) => {
     const seen = new Set<string>();
-    return items.filter((item) => {
-      const k = key(item).toLowerCase();
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
+    return list(value)
+      .map((entry) => text(entry, FACTS_LIMITS.text))
+      .filter((entry) => entry !== "" && keep(ok(entry)))
+      .filter((entry) => !seen.has(entry.toLowerCase()) && seen.add(entry.toLowerCase()))
+      .slice(0, max);
   };
 
   const title = text(raw.title, FACTS_LIMITS.title);
-  const steps = once(
-    list(raw.steps)
-      .map((step, index) => {
-        const entry = (step && typeof step === "object" ? step : {}) as Record<string, unknown>;
-        const n = Number(entry.n);
-        return { n: Number.isInteger(n) && n >= 1 && n <= 99 ? n : index + 1, text: text(entry.text, FACTS_LIMITS.text) };
-      })
-      .filter((step) => step.text !== "" && keep(onPage(step.text))),
-    (step) => step.text,
-  ).slice(0, FACTS_LIMITS.steps);
-  const strings = (value: unknown, max: number) =>
-    once(
-      list(value)
-        .map((entry) => text(entry, FACTS_LIMITS.text))
-        .filter((entry) => entry !== "" && keep(onPage(entry))),
-      (entry) => entry,
-    ).slice(0, max);
+  let last = 0;
+  const steps = list(raw.steps)
+    .flatMap((step) => {
+      const entry = (step && typeof step === "object" ? step : {}) as Record<string, unknown>;
+      const n = Number(entry.n);
+      let value = text(entry.text, FACTS_LIMITS.text);
+      const own = OWN_NUMBER.exec(value);
+      if (own && Number(own[1]) === n) value = value.slice(own[0].length);
+      if (value === "") return [];
+      const places = Number.isInteger(n) && n > last ? (page.steps.get(n) ?? []) : [];
+      if (!keep(inPlace(value, places, true) && printed(value, "step"))) return [];
+      last = n;
+      return [{ n, text: value }];
+    })
+    .slice(0, FACTS_LIMITS.steps);
   const facts: PageFacts = {
-    title: title && page.headings.has(headingKey(title)) && printed(title) ? title : "",
+    title: title && page.headings.has(headingKey(title)) && printed(title, "title") ? title : "",
     steps,
-    tools: strings(raw.tools, FACTS_LIMITS.tools),
-    cautions: strings(raw.cautions, FACTS_LIMITS.cautions),
+    tools: listed(raw.tools, FACTS_LIMITS.tools, (entry) => inWords(entry, page.words, page.torque) && printed(entry, "tool")),
+    cautions: listed(raw.cautions, FACTS_LIMITS.cautions, (entry) => inPlace(entry.replace(CAUTION_LINE, ""), page.cautions, false) && printed(entry, "caution")),
     torqueOnPage: page.torque,
   };
   if (title && !facts.title) dropped++;
@@ -468,7 +624,7 @@ export function checkFacts(input: unknown, pageText: string): { facts: PageFacts
 
 export const FACTS_SYSTEM = [
   "You read one page of a Polaris service manual for a dealership technician and record what's on it by calling the record_page_facts tool once.",
-  "Record only what this page says, in its own words: the procedure's heading exactly as printed, its numbered steps as the page words them (a step may be shortened, but keep its number), special tools with their part numbers exactly as printed, and its WARNING, CAUTION and NOTICE text as printed.",
+  "Record only what this page says, in its own words: the procedure's heading exactly as printed, its numbered steps as the page words them (a step may be shortened; its number goes in n, not in its text), special tools with their part numbers exactly as printed, and its WARNING, CAUTION and NOTICE text as printed.",
   "Leave out every torque value and every torque or tightening instruction, from the title and every list: the technician reads torque specs on the page itself. Leave out a step or notice that gives one, and never say that one fastener takes the same as another.",
   "Leave a list empty when the page has none of it. A page that is only a diagram, a wiring chart, an index or a contents page has no steps: record its title, and nothing else.",
   "The page's text comes from the PDF's text layer or from OCR, so it can have stray characters, odd line breaks and words out of order; read through them, but never guess a number you can't read on the page.",
@@ -492,7 +648,7 @@ export const FACTS_TOOL = {
           type: "object",
           properties: {
             n: { type: "integer", description: "The step's number on the page." },
-            text: { type: "string", description: "The step, as the page words it (shortened if long), without any torque value or torque instruction." },
+            text: { type: "string", description: "The step in the page's own words for it (shortened if long), without its number and without any torque value or torque instruction." },
           },
           required: ["n", "text"],
           additionalProperties: false,
