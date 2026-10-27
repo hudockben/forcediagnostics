@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import type { BrokenOffRequest, ClaudeStream } from "@/lib/diagnose-loop";
 import { TOOL_NAMES } from "@/lib/diagnose-prompt";
+import type { PageAsk } from "@/lib/manual-facts-rules";
 
 // The Claude API client for Diagnose. ANTHROPIC_API_KEY is set in Vercel
 // (Production and Preview); without it the Diagnose tab says it isn't set up.
@@ -21,6 +22,12 @@ function getClient() {
   client ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 2 });
   return client;
 }
+
+// One plain request, not streamed, for reading a manual page once (see
+// src/lib/manual-facts.ts): a short answer, so a short timeout and one
+// retry rather than two.
+export const askClaude: PageAsk = (params, { timeoutMs }) =>
+  getClient().messages.create(params, { timeout: timeoutMs, maxRetries: 1 });
 
 // Partial reply text is sent to the browser at most this often.
 const REPLY_EVERY_MS = 150;

@@ -21,7 +21,8 @@ import { requireCapability } from "@/lib/session";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 
 // The Diagnose screen's small actions. Sending a message goes through the
-// streaming route instead (src/app/api/diagnose/turn/route.ts).
+// streaming route instead (src/app/api/diagnose/turn/route.ts), and the
+// part sheet through its own (src/app/api/diagnose/part-sheet/route.ts).
 
 type Failed = { error: string };
 

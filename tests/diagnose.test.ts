@@ -1254,11 +1254,19 @@ describe("the loop: time limit, usage and errors", () => {
     assert.ok(result.usage.contextTokens < DIAGNOSE_LIMITS.contextTokens);
   });
 
-  test("errors sent part way through a stream are sorted by type; 402 is billing, not the API key", () => {
+  test("errors sent part way through a stream are sorted by type; 402, or a 400 about the credit balance, is billing, not the API key", () => {
     assert.equal(classifyError(midStreamError("overloaded_error")), "overloaded");
     assert.equal(classifyError(midStreamError("rate_limit_error")), "rate_limited");
     const billing = Anthropic.APIError.generate(402, { type: "error", error: { type: "billing_error", message: "no credit" } }, undefined, new Headers());
     assert.equal(classifyError(billing), "billing");
+    // The same said with a 400.
+    const credit = Anthropic.APIError.generate(
+      400,
+      { type: "error", error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } },
+      undefined,
+      new Headers(),
+    );
+    assert.equal(classifyError(credit), "billing");
     assert.match(FAILURE_MESSAGES.billing, /plan and credits in the Claude Console/);
     assert.ok(!/ANTHROPIC_API_KEY/.test(FAILURE_MESSAGES.billing));
     assert.equal(classifyError(new Anthropic.APIUserAbortError()), "stopped");
