@@ -114,6 +114,42 @@ export async function drawPage(
   return { width: css.width, height: css.height };
 }
 
+// A part of a page, as fractions of its width and height from its top left.
+export type PageArea = { left: number; top: number; right: number; bottom: number };
+
+// Where a page prints the lines `heading` matches (its TORQUE boxes'
+// headings) and what's under each, down to about `below` lines and starting
+// near where it does (a box's labels and values), from the PDF's text
+// layer. Null when it has none of them: a scanned page has no text layer
+// (its words came from OCR), so it's opened as it is.
+export async function headingArea(manualId: string, pageNumber: number, heading: RegExp, below: number): Promise<PageArea | null> {
+  const manual = await open(manualId);
+  const page = await Promise.race([manual.pdf.broken, manual.doc.getPage(Math.min(Math.max(1, pageNumber), manual.pageCount))]);
+  const viewport = page.getViewport({ scale: 1 });
+  const content = await Promise.race([manual.pdf.broken, page.getTextContent()]);
+  const boxes = content.items.flatMap((item) => {
+    if (!("str" in item) || item.str.trim() === "") return [];
+    const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+    const height = item.height || Math.hypot(item.transform[2], item.transform[3]);
+    return [{ text: item.str.trim(), left: x, right: x + item.width, top: y - height, bottom: y, height }];
+  });
+  const area = { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity };
+  for (const top of boxes.filter((box) => heading.test(box.text))) {
+    const width = top.right - top.left;
+    // Lines are about one and a half times their letters' height apart.
+    const under = boxes.filter((box) => box.top >= top.top - 1 && box.top <= top.bottom + below * 1.5 * top.height && box.left >= top.left - 2 * width && box.left <= top.right + 2 * width);
+    for (const box of [top, ...under]) {
+      area.left = Math.min(area.left, box.left);
+      area.top = Math.min(area.top, box.top);
+      area.right = Math.max(area.right, box.right);
+      area.bottom = Math.max(area.bottom, box.bottom);
+    }
+  }
+  if (area.left === Infinity) return null;
+  const fraction = (value: number, of: number) => Math.min(1, Math.max(0, value / of));
+  return { left: fraction(area.left, viewport.width), top: fraction(area.top, viewport.height), right: fraction(area.right, viewport.width), bottom: fraction(area.bottom, viewport.height) };
+}
+
 // A small picture of a page, as an image URL (kept for the next time).
 export function pagePicture(manualId: string, pageNumber: number, cssWidth: number): Promise<string> {
   const key = `${manualId}:${pageNumber}:${cssWidth}`;

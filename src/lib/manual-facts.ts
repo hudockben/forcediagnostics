@@ -27,19 +27,23 @@ import { cutText } from "@/lib/manual-rules";
 
 // Reading a manual page once, for the card beside it on Diagnose's part
 // sheet. The first time anyone in the shop opens a page, Claude reads its
-// text and records its steps, torque specs, tools and cautions; what it
-// records is checked against the page's own text (src/lib/manual-facts-
-// rules.ts) and saved in manual_page_facts, so the page is never read
-// again, also when it had nothing for a card. Two devices opening the same
-// page at once read it once: the first to claim the page's row reads it,
-// the other is told it's being read. Readings count against the shop's
-// daily allowance; without an API key, past the allowance or when the read
-// fails, the page still shows without its card, and a failed read is tried
-// again after a while, not every time the page is opened: when the failure
-// was the page's, a few times in all, and not again when Claude declined
-// the page or ran out of room (asking again would go the same way); when
-// it was the service's (busy, billing, the key, the connection), however
-// often it takes, so the card comes back once the service does.
+// text and records its title, steps, tools and cautions (never a torque:
+// the card says the page has torque specs, read on the page itself); what
+// it records is checked against the page's own text (src/lib/manual-
+// facts-rules.ts) and saved in manual_page_facts, so the page is never read
+// again, also when it had nothing for a card. A saved card is checked
+// against the page again each time it's shown, so one saved by an earlier
+// version of the rules (with a torque list or notes) shows only what these
+// allow. Two devices opening the same page at once read it once: the first
+// to claim the page's row reads it, the other is told it's being read.
+// Readings count against the shop's daily allowance; without an API key,
+// past the allowance or when the read fails, the page still shows without
+// its card, and a failed read is tried again after a while, not every time
+// the page is opened: when the failure was the page's, a few times in all,
+// and not again when Claude declined the page or ran out of room (asking
+// again would go the same way); when it was the service's (busy, billing,
+// the key, the connection), however often it takes, so the card comes back
+// once the service does.
 // Callers check the user may see the page (Diagnose's part sheet checks
 // it's one of the conversation's manuals); everything here runs inside
 // withShop.
@@ -71,12 +75,15 @@ const allowanceKey = (shopId: string) => `page-facts:shop:${shopId}`;
 
 type Row = typeof manualPageFacts.$inferSelect;
 
-// A saved reading as the screen sees it, or null when the page can be read
-// now (never read, a failed read old enough to try again, or a read whose
-// server went away).
-function savedState(row: Row | undefined, now = Date.now()): FactsState | null {
+// A saved reading as the screen sees it (its card checked against the
+// page's text again), or null when the page can be read now (never read, a
+// failed read old enough to try again, or a read whose server went away).
+function savedState(row: Row | undefined, pageText: string, now = Date.now()): FactsState | null {
   if (!row) return null;
-  if (row.status === "ready" && row.facts) return { status: "ready", facts: row.facts, partial: row.dropped > 0 };
+  if ((row.status === "ready" || row.status === "empty") && row.facts) {
+    const { facts, dropped } = checkFacts(row.facts, pageText);
+    return hasFacts(facts) ? { status: "ready", facts, partial: row.dropped + dropped > 0 } : { status: "empty" };
+  }
   if (row.status === "ready" || row.status === "empty") return { status: "empty" };
   const age = now - row.attemptedAt.getTime();
   if (row.status === "reading") return age < PAGE_FACTS_LIMITS.staleAfterMs ? { status: "reading" } : null;
@@ -111,7 +118,7 @@ async function loadPage(shopId: string, ref: PageRef) {
 export async function savedPageFacts(shopId: string, ref: PageRef): Promise<FactsState | null> {
   const page = await loadPage(shopId, ref);
   if (!page) return null;
-  return savedState(page.row) ?? (worthReading(page.text) ? { status: "unread" } : { status: "empty" });
+  return savedState(page.row, page.text) ?? (worthReading(page.text) ? { status: "unread" } : { status: "empty" });
 }
 
 // Takes the page's row for this read: a new row, or one whose read failed
@@ -225,7 +232,7 @@ export async function readPageFacts(shopId: string, ref: PageRef, options: { ask
   const ask = options.ask === undefined ? (isClaudeConfigured ? askClaude : null) : options.ask;
   const page = await loadPage(shopId, ref);
   if (!page) return null;
-  const saved = savedState(page.row);
+  const saved = savedState(page.row, page.text);
   if (saved) return saved;
   if (!worthReading(page.text)) return { status: "empty" };
   if (!ask) return { status: "unavailable", reason: "setup" };
@@ -238,7 +245,7 @@ export async function readPageFacts(shopId: string, ref: PageRef, options: { ask
   if (!(await claimPage(shopId, ref))) {
     await giveBackAttempt(key);
     const now = await loadPage(shopId, ref);
-    return savedState(now?.row) ?? { status: "reading" };
+    return (now && savedState(now.row, now.text)) ?? { status: "reading" };
   }
 
   const usage: Usage = { inputTokens: 0, outputTokens: 0, costCents: 0 };

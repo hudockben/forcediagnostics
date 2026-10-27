@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { Fragment, useEffect, useState } from "react";
 
-import { specText } from "@/lib/diagnose-cause-steps";
 import { cardSettled, cardOf, largePage, otherPages, partLibraryHref, stepGaps, type PartCard, type PartPage, type PartSheet } from "@/lib/diagnose-parts";
 import { SYSTEM_LABELS, type DrawnSystem } from "@/lib/diagnose-zones";
 import type { FactsState, PageFacts, PageRef } from "@/lib/manual-facts-rules";
@@ -15,15 +14,16 @@ import { usePagePicture, usePageView } from "./manual-pictures";
 // pick from (those its causes name first), the picked part's best manual
 // page drawn large (a tap opens it full screen to zoom into; Open in manual
 // goes to the viewer at it), a few other pages that show it, and beside the
-// page (under it on a phone) what it says: the procedure's steps, its
-// torque specs each under its label as the page prints it (from the shop's
-// own manual, so in the manual's teal; a quiet line when the page has more
-// than that), the special tools and cautions, and which page that is. The
-// server finds the pages and reads each page once, the first time anyone
-// in the shop opens it (src/app/api/diagnose/part-sheet/route.ts): the
-// page shows while it's read, and on its own when it can't be. A part no
-// page is about (another part's procedure only names it on the way) gets
-// the pages that name it, said so, without a card.
+// page (under it on a phone) what it says: the procedure's title, its
+// steps, the special tools and cautions, and which page that is. Torque
+// specs are never copied onto it: when the page prints them, a line in the
+// manual's teal says so and opens the page full screen, zoomed toward its
+// TORQUE boxes, to read them there (src/lib/manual-facts-rules.ts says
+// why). The server finds the pages and reads each page once, the first
+// time anyone in the shop opens it (src/app/api/diagnose/part-sheet/
+// route.ts): the page shows while it's read, and on its own when it can't
+// be. A part no page is about (another part's procedure only names it on
+// the way) gets the pages that name it, said so, without a card.
 
 type SheetAsk = { conversationId: string; system: DrawnSystem; part?: string };
 type CardAsk = { conversationId: string; page: PageRef };
@@ -263,7 +263,7 @@ export function PartSheetSection({
           <div className="grid gap-3 @[34rem]:grid-cols-2 @[34rem]:grid-rows-[auto_1fr] @[34rem]:items-start @[34rem]:gap-x-4">
             <LargePage key={cardKey(large)} page={large} onOpen={() => openPage?.({ manualId: large.manualId, page: large.page, title: large.title })} />
             <OtherPages pages={otherPages(answer, large)} onPick={(page) => setChosen({ manualId: page.manualId, page: page.page })} />
-            {carded && <PageCard state={state} page={large} className="@[34rem]:col-start-2 @[34rem]:row-span-2 @[34rem]:row-start-1" />}
+            {carded && <PageCard state={state} page={large} onTorque={() => openPage?.({ manualId: large.manualId, page: large.page, title: large.title, focus: "torque" })} className="@[34rem]:col-start-2 @[34rem]:row-span-2 @[34rem]:row-start-1" />}
           </div>
           {answer.noManual && <p className="text-xs text-ink-muted">This unit&apos;s manuals aren&apos;t in the library: these are pages its causes cite.</p>}
         </div>
@@ -376,7 +376,8 @@ function LargePage({ page, onOpen }: { page: PartPage; onOpen: () => void }) {
 
 // What the page says, as read once and checked against its text; while
 // it's read, a line saying so (the page is already there to look at).
-function PageCard({ state, page, className = "" }: { state: FactsState | null; page: PartPage; className?: string }) {
+// onTorque opens the page full screen at its torque specs.
+function PageCard({ state, page, onTorque, className = "" }: { state: FactsState | null; page: PartPage; onTorque: () => void; className?: string }) {
   const status = state === null || state.status === "unread" ? "reading" : state.status;
   return (
     <section
@@ -388,16 +389,16 @@ function PageCard({ state, page, className = "" }: { state: FactsState | null; p
     >
       {/* Said to a screen reader as it changes (the lines below come and go). */}
       <p role="status" className="sr-only">
-        {status === "reading" ? `Reading page ${page.page} for its steps and specs.` : status === "ready" ? `Page ${page.page}'s steps and specs are here.` : ""}
+        {status === "reading" ? `Reading page ${page.page} for its steps.` : status === "ready" ? `What page ${page.page} says is here.` : ""}
       </p>
       {state?.status === "ready" ? (
-        <Facts facts={state.facts} partial={state.partial} />
+        <Facts facts={state.facts} partial={state.partial} onTorque={onTorque} />
       ) : status === "reading" ? (
         <p data-facts-loading className="text-sm text-ink-muted">
-          Reading this page for its steps and specs…
+          Reading this page for its steps…
         </p>
       ) : status === "empty" ? (
-        <p className="text-sm text-ink-muted">No steps or specs to list from this page: it&apos;s all in the page itself.</p>
+        <p className="text-sm text-ink-muted">Nothing to list from this page: it&apos;s all in the page itself.</p>
       ) : (
         <p data-facts-unread className="text-sm text-ink-muted">
           Couldn&apos;t read this page&apos;s details.
@@ -417,7 +418,7 @@ const sectionLabel = "text-xs font-semibold text-ink-muted";
 
 // partial: the check against the page left lines out; where a step is
 // missing its number says so, and the card ends saying the page has it all.
-function Facts({ facts, partial }: { facts: PageFacts; partial: boolean }) {
+function Facts({ facts, partial, onTorque }: { facts: PageFacts; partial: boolean; onTorque: () => void }) {
   const gaps = stepGaps(facts.steps, partial);
   return (
     <>
@@ -465,27 +466,22 @@ function Facts({ facts, partial }: { facts: PageFacts; partial: boolean }) {
           })}
         </ol>
       )}
-      {facts.torques.length > 0 && (
-        // The manual's own specs: the teal of a MANUAL spec.
-        <div data-facts-torques className="rounded-md border border-glow/45 bg-glow/10 px-3 py-2">
-          <p className="text-[10px] font-semibold tracking-wide text-glow/70 uppercase">Torque · from the manual</p>
-          {/* The item on the left (wrapping), its value on the right. */}
-          <dl className="mt-1.5 grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1.5">
-            {facts.torques.map((torque, index) => (
-              <div key={index} data-fact-torque className="contents">
-                <dt className="min-w-0 text-sm leading-5 break-words text-ink">{torque.item}</dt>
-                <dd className="text-right font-mono text-sm leading-5 font-semibold text-glow tabular-nums">{specText(torque.value)}</dd>
-              </div>
-            ))}
-          </dl>
+      {facts.torqueOnPage && (
+        // The manual's own specs, in the teal of a MANUAL spec: read on the
+        // page itself (opened full screen, zoomed toward its TORQUE boxes),
+        // never copied here.
+        <div data-facts-torque className="flex flex-wrap items-center justify-between gap-x-3 rounded-md border border-glow/45 bg-glow/10 py-0.5 pr-1 pl-3">
+          <p className="py-2 text-sm leading-5 font-medium text-glow">Torque specs are on this page</p>
+          <button
+            type="button"
+            data-facts-torque-open
+            onClick={onTorque}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-sm font-semibold text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+          >
+            <ZoomInIcon className="size-4" />
+            Read them on the page
+          </button>
         </div>
-      )}
-      {/* The page prints torques the list doesn't have (in a step, or where its
-          text leaves which fastener in doubt): they're on the page beside. */}
-      {facts.moreTorques && (
-        <p data-facts-more-torques className="text-xs leading-5 text-ink-muted">
-          More torque specs on the page
-        </p>
       )}
       {facts.tools.length > 0 && (
         <div data-facts-tools className="space-y-1">
@@ -499,15 +495,6 @@ function Facts({ facts, partial }: { facts: PageFacts; partial: boolean }) {
             ))}
           </ul>
         </div>
-      )}
-      {facts.notes.length > 0 && (
-        <ul data-facts-notes aria-label="Notes" className="space-y-1 text-xs leading-5 text-ink-muted">
-          {facts.notes.map((note, index) => (
-            <li key={index} className="break-words">
-              {note}
-            </li>
-          ))}
-        </ul>
       )}
       {partial && (
         <p data-facts-partial className="text-xs leading-5 text-ink-muted">

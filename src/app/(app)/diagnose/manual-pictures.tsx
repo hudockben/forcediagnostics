@@ -7,7 +7,7 @@ import { createPortal } from "react-dom";
 import type { SourceView } from "@/lib/diagnose-rules";
 
 import { BackIcon, BookIcon, ZoomInIcon, ZoomOutIcon } from "./icons";
-import { drawPage, holdManuals, pagePicture } from "./manual-pages";
+import { drawPage, headingArea, holdManuals, pagePicture } from "./manual-pages";
 import { holdPage, overlayRoot, useMounted } from "./unit-3d";
 import { useHistoryParam } from "./use-history-param";
 
@@ -15,11 +15,14 @@ import { useHistoryParam } from "./use-history-param";
 // each cause and check (drawn only once they're on screen), and a tap
 // opens the page full screen to zoom into, with a way into the manual
 // viewer at that page. The full-screen page is in the address
-// (?manual-page=<manual>:<page>), so Back closes it.
+// (?manual-page=<manual>:<page>, with ":torque" when it's opened to read
+// its torque specs, zoomed toward its TORQUE boxes), so Back closes it.
 
 export type ManualSource = Extract<SourceView, { type: "manual" }>;
 
-type PageRef = { manualId: string; page: number; title: string };
+// focus: "torque" opens it zoomed toward its TORQUE boxes (the part sheet's
+// card points to them there, never copying a torque).
+type PageRef = { manualId: string; page: number; title: string; focus?: "torque" };
 
 const PageViewContext = createContext<((page: PageRef) => void) | null>(null);
 
@@ -53,13 +56,15 @@ export function ManualPictures({ children, titles }: { children: ReactNode; titl
   // found by search), for the page view's header.
   const [opened, setOpened] = useState<Map<string, string>>(() => new Map());
   useEffect(() => holdManuals(), []);
-  const match = value ? /^([0-9a-f-]{36}):(\d{1,5})$/i.exec(value) : null;
-  const page = match ? { manualId: match[1], page: Number(match[2]), title: titles.get(match[1]) ?? opened.get(match[1]) ?? "Manual" } : null;
+  const match = value ? /^([0-9a-f-]{36}):(\d{1,5})(:torque)?$/i.exec(value) : null;
+  const page: PageRef | null = match
+    ? { manualId: match[1], page: Number(match[2]), title: titles.get(match[1]) ?? opened.get(match[1]) ?? "Manual", ...(match[3] ? { focus: "torque" as const } : {}) }
+    : null;
   return (
     <PageViewContext
       value={(ref) => {
         if (!titles.has(ref.manualId) && opened.get(ref.manualId) !== ref.title) setOpened((old) => new Map(old).set(ref.manualId, ref.title));
-        open(`${ref.manualId}:${ref.page}`);
+        open(`${ref.manualId}:${ref.page}${ref.focus ? `:${ref.focus}` : ""}`);
       }}
     >
       {children}
@@ -179,6 +184,12 @@ function PageThumb({ source, size }: { source: ManualSource; size: ThumbSize }) 
 
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 6;
+// Opened to read its torque specs: zoomed toward its TORQUE boxes (each
+// heading and the lines under it), at most this much, so the rest of the
+// page is still in reach.
+const TORQUE_HEADING = /^TORQUE(?:\s|$)/;
+const TORQUE_LINES = 8;
+const FOCUS_ZOOM = 3;
 
 function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
   const stage = useRef<HTMLDivElement>(null);
@@ -192,6 +203,7 @@ function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
   const [status, setStatus] = useState<"loading" | "shown" | "failed">("loading");
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [tries, setTries] = useState(0);
+  const [focused, setFocused] = useState(false);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const gesture = useRef<{ distance: number; zoom: number; mid: { x: number; y: number }; view: typeof view } | null>(null);
 
@@ -254,13 +266,30 @@ function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
     return { zoom: next.zoom, x, y };
   }
 
-  // Centred once its size is known.
+  // Centred once its size is known. Opened to read its torque specs, then
+  // zoomed toward its TORQUE boxes where the PDF's text says they are,
+  // unless the tech has zoomed it already (a scanned page has no text to
+  // say where: it stays as it is).
   const placed = useRef(false);
   useEffect(() => {
-    if (status === "shown" && !placed.current && size.width > 0) {
-      placed.current = true;
-      setView((old) => clamp(old));
-    }
+    if (status !== "shown" || placed.current || size.width === 0) return;
+    placed.current = true;
+    setView((old) => clamp(old));
+    if (page.focus !== "torque") return;
+    headingArea(page.manualId, page.page, TORQUE_HEADING, TORQUE_LINES).then(
+      (area) => {
+        const el = stage.current;
+        if (!area || !el) return;
+        const width = (area.right - area.left) * size.width;
+        const height = (area.bottom - area.top) * size.height;
+        const zoom = Math.min(FOCUS_ZOOM, Math.max(MIN_ZOOM, Math.min((el.clientWidth - 48) / width, (el.clientHeight - 48) / height)));
+        const x = el.clientWidth / 2 - ((area.left + area.right) / 2) * size.width * zoom;
+        const y = el.clientHeight / 2 - ((area.top + area.bottom) / 2) * size.height * zoom;
+        setView((old) => (old.zoom === 1 ? clamp({ zoom, x, y }) : old));
+        setFocused(true);
+      },
+      (error) => console.error("Couldn't find the page's torque specs", error),
+    );
     // clamp reads the latest size.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, size.width]);
@@ -317,6 +346,7 @@ function PageView({ page, onClose }: { page: PageRef; onClose: () => void }) {
       aria-modal="true"
       aria-label={`${page.title}, page ${page.page}`}
       data-page-view={`${page.manualId}:${page.page}`}
+      data-focus={focused ? page.focus : undefined}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
