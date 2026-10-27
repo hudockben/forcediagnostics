@@ -2,8 +2,10 @@
 // is checked against the page's own text (torque values as written, with
 // their units and close together, and the value of the box labelled like
 // their item; steps, tools, cautions and notes mostly in the page's words,
-// any number in them on the page), on realistic
-// Polaris page text from the text layer and from OCR. Also the request
+// any number in them on the page, and any torque in them beside the
+// fastener the page gives it for), on realistic Polaris page text from the
+// text layer and from OCR, with TORQUE boxes stacked and side by side and
+// spec tables read row by row and column by column. Also the request
 // itself (the model, no thinking, the strict tool, nothing forced) and
 // reading the answer. Pure: no database.
 import assert from "node:assert/strict";
@@ -387,6 +389,194 @@ NOTE: Fuel pressure with the engine running is 58 psi (400 kPa).`;
     const long = `${"Remove the starter solenoid. ".repeat(30)}`;
     const { facts } = checkFacts({ ...READING, steps: [{ n: 1, text: long }], torques: [] }, SOLENOID_PAGE);
     assert.ok(facts.steps[0].text.length <= FACTS_LIMITS.text);
+  });
+});
+
+// The owner's page's procedure, before its TORQUE boxes.
+const SOLENOID_STEPS = SOLENOID_PAGE.slice(0, SOLENOID_PAGE.indexOf("\nTORQUE"));
+
+// What a reading keeps of each list, with nothing else in it.
+const kept = (input: Record<string, unknown>, page: string) => {
+  const { facts, dropped } = checkFacts({ title: "", steps: [], torques: [], tools: [], cautions: [], notes: [], ...input }, page);
+  return { ...facts, dropped };
+};
+// Each box's value under the next box's fastener, and the other way round.
+const SWAPPED = READING.torques.map((t, i, all) => ({ item: t.item, value: all[(i + 1) % all.length].value }));
+
+describe("a torque only beside the fastener the page gives it for", () => {
+  test("the owner's page: a torque in a note, step, caution or tool under another fastener drops the whole entry", () => {
+    for (const page of [SOLENOID_PAGE, SOLENOID_OCR]) {
+      const result = kept(
+        {
+          steps: [
+            { n: 7, text: "Torque the starter solenoid cable fasteners to 97 in-lbs (11 N·m)." },
+            { n: 6, text: "Torque the solenoid fasteners to 97 in-lbs (11 N·m)." },
+          ],
+          notes: ["Starter Solenoid Cable Fastener: 97 in-lbs (11 N·m)", "Starter Solenoid Fastener: 97 in-lbs (11 N·m)"],
+          cautions: ["Torque the battery terminal fastener (negative) to 106 in-lbs (12 N·m)", "Torque the battery terminal fastener (negative) to 62 in-lbs (7 N·m)"],
+          tools: ["Starter solenoid fastener socket, 35 in-lbs (4 N·m)", "Battery terminal fastener (positive) socket, 106 in-lbs (12 N·m)"],
+        },
+        page,
+      );
+      assert.deepEqual(result.steps, [{ n: 6, text: "Torque the solenoid fasteners to 97 in-lbs (11 N·m)." }]);
+      assert.deepEqual(result.notes, ["Starter Solenoid Fastener: 97 in-lbs (11 N·m)"]);
+      assert.deepEqual(result.cautions, ["Torque the battery terminal fastener (negative) to 62 in-lbs (7 N·m)"]);
+      assert.deepEqual(result.tools, ["Battery terminal fastener (positive) socket, 106 in-lbs (12 N·m)"]);
+      assert.equal(result.dropped, 4);
+    }
+  });
+
+  test("in an entry, a torque needs the entry's own words for its fastener, and one value for them", () => {
+    const result = kept(
+      {
+        notes: [
+          // No fastener named.
+          "Torque to 97 in-lbs (11 N·m).",
+          // The fastener named after the value, not before it.
+          "97 in-lbs (11 N·m) for the starter solenoid fastener.",
+          // Named before it, then another named after it on its line.
+          "Starter solenoid: 97 in-lbs (11 N·m) for the cable fasteners.",
+          // Words after it that name no other fastener, or on a line of their own.
+          "Torque the solenoid fasteners to 97 in-lbs (11 N·m) in a cross pattern.",
+          "Torque the solenoid fasteners to 97 in-lbs (11 N·m). Reconnect the battery cables.",
+          // Two values in one unit for one fastener: which is it?
+          "Torque the starter solenoid fastener to 97 in-lbs, then 35 in-lbs.",
+          // Each with its own: both the page's.
+          "Starter solenoid fastener 97 in-lbs (11 N·m), cable fastener 35 in-lbs (4 N·m).",
+          // The second one the other box's.
+          "Starter solenoid fastener 97 in-lbs (11 N·m), cable fastener 62 in-lbs (7 N·m).",
+          // A box's two terminals on one line, the second by its one word.
+          "Battery Terminal Fastener (Positive): 106 in-lbs (12 N·m) / (Negative): 62 in-lbs (7 N·m)",
+          "Battery Terminal Fastener (Positive): 62 in-lbs (7 N·m) / (Negative): 106 in-lbs (12 N·m)",
+        ],
+      },
+      SOLENOID_PAGE,
+    );
+    assert.deepEqual(result.notes, [
+      "Torque the solenoid fasteners to 97 in-lbs (11 N·m) in a cross pattern.",
+      "Torque the solenoid fasteners to 97 in-lbs (11 N·m). Reconnect the battery cables.",
+      "Starter solenoid fastener 97 in-lbs (11 N·m), cable fastener 35 in-lbs (4 N·m).",
+      "Battery Terminal Fastener (Positive): 106 in-lbs (12 N·m) / (Negative): 62 in-lbs (7 N·m)",
+    ]);
+    assert.equal(result.dropped, 6);
+  });
+
+  test("other numbers in an entry only have to be on the page", () => {
+    const page = `${SOLENOID_STEPS}\nNOTE: With the key on, there should be 12 V at pin 13 of the solenoid connector.\nThe terminal gap is 0.7 mm.`;
+    const result = kept(
+      {
+        steps: [
+          { n: 1, text: "Check for 12 V at pin 13 of the solenoid connector." },
+          { n: 2, text: "Check for 12 V at pin 14 of the solenoid connector." },
+        ],
+        notes: ["The terminal gap is 0.7 mm.", "The terminal gap is 0.8 mm."],
+      },
+      page,
+    );
+    assert.deepEqual(result.steps.map((step) => step.n), [1]);
+    assert.deepEqual(result.notes, ["The terminal gap is 0.7 mm."]);
+    assert.equal(result.dropped, 2);
+  });
+
+  test("TORQUE boxes side by side (the labels on one line, the values on the next): each value is its own box's", () => {
+    const side = `${SOLENOID_STEPS}
+TORQUE TORQUE TORQUE
+Starter Solenoid Fastener: Starter Solenoid Cable Fastener: Battery Terminal Fastener (Positive):
+97 in-lbs (11 N·m) 35 in-lbs (4 N·m) 106 in-lbs (12 N·m)
+Battery Terminal Fastener (Negative):
+62 in-lbs (7 N·m)`;
+    assert.deepEqual(kept({ torques: READING.torques }, side).torques, READING.torques);
+    const swapped = kept({ torques: SWAPPED }, side);
+    assert.deepEqual(swapped.torques, []);
+    assert.equal(swapped.dropped, 4);
+    const notes = kept({ notes: ["Starter Solenoid Cable Fastener: 97 in-lbs (11 N·m)", "Starter Solenoid Cable Fastener: 35 in-lbs (4 N·m)"] }, side).notes;
+    assert.deepEqual(notes, ["Starter Solenoid Cable Fastener: 35 in-lbs (4 N·m)"]);
+    // OCR's spacing: a space before a colon, none around the units, runs of spaces.
+    const ocr = `TORQUE    TORQUE
+Starter  Solenoid  Fastener :     Starter Solenoid Cable Fastener :
+97in-lbs(11N·m)      35 in -Ibs ( 4 N • m )`;
+    assert.deepEqual(kept({ torques: READING.torques.slice(0, 2) }, ocr).torques, READING.torques.slice(0, 2));
+    assert.deepEqual(kept({ torques: SWAPPED.slice(0, 1) }, ocr).torques, []);
+    assert.deepEqual(kept({ torques: [{ item: "Starter Solenoid Cable Fastener", value: "97 in-lbs (11 N·m)" }] }, ocr).torques, []);
+  });
+
+  test("TORQUE boxes read column by column (all the labels, then all the values): paired in order", () => {
+    const columns = `${SOLENOID_STEPS}
+TORQUE
+TORQUE
+Starter Solenoid Fastener:
+Starter Solenoid Cable Fastener:
+97 in-lbs (11 N·m)
+35 in-lbs (4 N·m)
+TORQUE
+Battery Terminal Fastener (Positive):
+106 in-lbs (12 N·m)
+Battery Terminal Fastener (Negative):
+62 in-lbs (7 N·m)`;
+    assert.deepEqual(kept({ torques: READING.torques }, columns).torques, READING.torques);
+    assert.deepEqual(kept({ torques: SWAPPED }, columns).torques, []);
+  });
+
+  test("labels and values that don't pair up one for one: none of that block's values is taken", () => {
+    const cases = [
+      // Two labels, one value: whose is it?
+      "Starter Solenoid Fastener:\nStarter Solenoid Cable Fastener:\n97 in-lbs (11 N·m)",
+      // One label, two values.
+      "Starter Solenoid Fastener:\n97 in-lbs (11 N·m)\n35 in-lbs (4 N·m)",
+      // Each box's second unit on a line of its own: three values for two labels.
+      "Starter Solenoid Fastener: Starter Solenoid Cable Fastener:\n97 in-lbs 35 in-lbs\n(11 N·m) (4 N·m)",
+      // Values not given alike.
+      "Starter Solenoid Fastener: Starter Solenoid Cable Fastener:\n97 in-lbs (11 N·m) 35 in-lbs",
+    ];
+    for (const page of cases) {
+      const wanted = [
+        { item: "Starter Solenoid Fastener", value: "97 in-lbs (11 N·m)" },
+        { item: "Starter Solenoid Fastener", value: "97 in-lbs" },
+        { item: "Starter Solenoid Cable Fastener", value: "97 in-lbs (11 N·m)" },
+        { item: "Starter Solenoid Cable Fastener", value: "35 in-lbs" },
+      ];
+      assert.deepEqual(kept({ torques: wanted }, page).torques, [], page);
+      assert.deepEqual(kept({ notes: ["Starter Solenoid Fastener: 97 in-lbs (11 N·m)"] }, page).notes, [], page);
+    }
+    // OCR kept only "Fastener:" of the second box's label and lost the first box's value:
+    // the label still holds its place, so the 35 in-lbs isn't the first box's.
+    const lost = "TORQUE\nStarter Solenoid Fastener:\nTORQUE\nFastener:\n35 in-lbs (4 N·m)";
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "35 in-lbs (4 N·m)"), lost), []);
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Cable Fastener", "35 in-lbs (4 N·m)"), lost), []);
+    // A tool's line above a box ("Name: part number") had its value: it doesn't wait for this one.
+    const tool = "Battery Terminal Wrench: PU-50964\nTORQUE\nStarter Solenoid Fastener:\n97 in-lbs (11 N·m)";
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "97 in-lbs (11 N·m)"), tool), ["97 in-lbs (11 N·m)"]);
+    const tools = "Battery Terminal Wrench:\nPU-50964\nStarter Solenoid Fastener:\n97 in-lbs (11 N·m)";
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "97 in-lbs (11 N·m)"), tools), ["97 in-lbs (11 N·m)"]);
+    // The boxes around such a block still count.
+    const mixed = `Starter Solenoid Fastener:\nStarter Solenoid Cable Fastener:\n97 in-lbs (11 N·m)\nTORQUE\nBattery Terminal Fastener (Positive):\n106 in-lbs (12 N·m)`;
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Positive)", "106 in-lbs (12 N·m)"), mixed), ["106 in-lbs (12 N·m)"]);
+    // A two-stage torque in a step: two values after one label, so neither is taken.
+    const twoStage = "5. Torque the cylinder head bolts to 10 N·m, then to 25 N·m.";
+    assert.deepEqual(keptTorques(torque("Cylinder Head Bolts", "25 N·m"), twoStage), []);
+    assert.deepEqual(kept({ steps: [{ n: 5, text: "Torque the cylinder head bolts to 10 N·m, then to 25 N·m." }] }, twoStage).steps, []);
+  });
+
+  test("a spec table read column by column: its rows paired in order when they line up, none when they don't", () => {
+    const rows = ["Upper A-Arm Pivot Bolt", "Lower A-Arm Pivot Bolt", "Shock Mounting Bolt"];
+    const values = ["40 ft-lbs (54 N·m)", "45 ft-lbs (61 N·m)", "30 ft-lbs (41 N·m)"];
+    const table = `FRONT SUSPENSION\nTORQUE SPECIFICATIONS\nFastener\nTorque\n${rows.join("\n")}\n${values.join("\n")}`;
+    const right = rows.map((item, i) => ({ item, value: values[i] }));
+    assert.deepEqual(kept({ torques: right }, table).torques, right);
+    assert.deepEqual(kept({ torques: rows.map((item, i) => ({ item, value: values[(i + 1) % 3] })) }, table).torques, []);
+    assert.deepEqual(kept({ notes: ["Shock Mounting Bolt: 30 ft-lbs (41 N·m)", "Shock Mounting Bolt: 45 ft-lbs (61 N·m)"] }, table).notes, ["Shock Mounting Bolt: 30 ft-lbs (41 N·m)"]);
+    // Read row by row, the same.
+    const byRow = `FRONT SUSPENSION\nTORQUE SPECIFICATIONS\n${rows.map((item, i) => `${item} ${values[i]}`).join("\n")}`;
+    assert.deepEqual(kept({ torques: right }, byRow).torques, right);
+    // A row whose value isn't a torque ("Hand tight") leaves three rows for two values.
+    const handTight = `FRONT SUSPENSION\nTORQUE SPECIFICATIONS\n${rows.join("\n")}\nSway Bar Link\n${values.join("\n")}\nHand tight`;
+    assert.deepEqual(kept({ torques: right }, handTight).torques, []);
+    // A line above the rows that could be a row too: where do they start?
+    const unsure = `Use new lock nuts\n${rows.slice(1).join("\n")}\n${values.slice(1).join("\n")}`;
+    assert.deepEqual(kept({ torques: right.slice(1) }, unsure).torques, []);
+    // Units as column headings: no value has its unit, so none is taken.
+    const headed = `TORQUE SPECIFICATIONS\nFastener\nft-lbs\nN·m\nShock Mounting Bolt\n30\n41`;
+    assert.deepEqual(kept({ torques: [right[2]] }, headed).torques, []);
   });
 });
 

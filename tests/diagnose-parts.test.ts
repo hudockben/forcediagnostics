@@ -1,7 +1,7 @@
 // Diagnose's part sheet: the part names for each system (the reviewed list
 // and the parts the causes name, those first), how a part's pages rank
-// (cited pages, then the service procedure in the unit's own manual, never
-// a contents page), the search of the conversation's manuals, and reading a
+// (cited pages, then the service procedure in the unit's own manual, a
+// contents page last), the search of the conversation's manuals, and reading a
 // page once with a scripted stand-in for the Claude API (checked against
 // the page, saved, read once by two devices at once, the shop's daily
 // allowance, no API key, failures tried again later, the real SDK's
@@ -450,6 +450,15 @@ describe("ranking a part's pages", () => {
     assert.ok(!rankPages(pages, "Starter solenoid", 3).some((page) => page.text === CONTENTS));
   });
 
+  test("a contents page comes last, after a page with only some of the part's words; alone, it's a page that only names the part", () => {
+    // At its best: in the unit's own manual, search's top rank, another cause citing it.
+    const contents = candidate(CONTENTS, { rank: 1, own: true, cited: "system" });
+    const words = candidate(BATTERY, { rank: 0, own: false, manualId: "00000000-0000-4000-8000-000000000002" });
+    assert.deepEqual(rankPages([contents, words], "Starter solenoid").map((page) => page.text), [BATTERY, CONTENTS]);
+    assert.deepEqual(rankPages([contents], "Starter solenoid").map((page) => page.text), [CONTENTS]);
+    assert.ok(!aboutPart(contents, "Starter solenoid"));
+  });
+
   test("a page about the part beats another part's procedure that names it on the way", () => {
     const cargo = `BODY\nCARGO BOX\nCargo box latch\nCargo box hinge pin\nTailgate\nGas assist shock\n11.20`;
     const battery = `BATTERY LOCATION\nBattery\nBattery hold-down strap\nPositive (+) cable\nNegative (-) cable\n10.38`;
@@ -733,7 +742,8 @@ describe("reading a page once", () => {
     assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), { status: "unread" });
     assert.equal((await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }))?.status, "ready");
     row = await savedRow(starter());
-    assert.equal(row.attempts, 2);
+    // The overload wasn't the page's: only the read that went through counts.
+    assert.equal(row.attempts, 1);
     assert.equal(row.error, null);
   });
 
@@ -787,18 +797,66 @@ describe("reading a page once", () => {
     }
   });
 
-  test("a read that keeps failing is tried a few times in all, then no more", async () => {
-    const busy = () => new Anthropic.InternalServerError(529, { type: "error", error: { type: "overloaded_error", message: "busy" } }, undefined, new Headers());
-    const claude = fakeClaude(Array.from({ length: PAGE_FACTS_LIMITS.maxAttempts + 1 }, busy));
-    for (let i = 0; i < PAGE_FACTS_LIMITS.maxAttempts + 1; i++) {
+  // A while later: the failed read's wait is over.
+  const later = () =>
+    systemDb
+      .update(manualPageFacts)
+      .set({ attemptedAt: new Date(Date.now() - PAGE_FACTS_LIMITS.retryAfterMs - 1000) })
+      .where(and(eq(manualPageFacts.manualId, rzr), eq(manualPageFacts.pageNumber, 4)));
+  const apiError = (status: number, type: string) => Anthropic.APIError.generate(status, { type: "error", error: { type, message: type } }, undefined, new Headers());
+
+  test("a read that fails because of the page is tried three times in all, then no more; the service's failures between don't count", async () => {
+    const noCall = () => message([{ type: "text", text: "This page covers the starter motor." }], "end_turn");
+    const claude = fakeClaude([
+      apiError(400, "invalid_request_error"),
+      apiError(529, "overloaded_error"),
+      // No tool call, even after the nudge: two requests, one read.
+      noCall(),
+      noCall(),
+      apiError(429, "rate_limit_error"),
+      apiError(413, "request_too_large"),
+    ]);
+    const counted: number[] = [];
+    for (let i = 0; i < 6; i++) {
       assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }), { status: "unavailable", reason: "error" });
-      await systemDb
-        .update(manualPageFacts)
-        .set({ attemptedAt: new Date(Date.now() - PAGE_FACTS_LIMITS.retryAfterMs - 1000) })
-        .where(and(eq(manualPageFacts.manualId, rzr), eq(manualPageFacts.pageNumber, 4)));
+      counted.push((await savedRow(starter())).attempts);
+      await later();
     }
-    assert.equal(claude.calls.length, PAGE_FACTS_LIMITS.maxAttempts);
-    assert.equal((await savedRow(starter())).attempts, PAGE_FACTS_LIMITS.maxAttempts);
+    assert.deepEqual(counted, [1, 1, 2, 2, 3, 3]);
+    // The sixth open asked nothing: the page's three reads are used up.
+    assert.equal(claude.calls.length, 6);
+    assert.match((await savedRow(starter())).error ?? "", /too_long/);
+    assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), { status: "unavailable", reason: "error" });
+  });
+
+  test("a read that fails because of the service is tried again after the wait however often, so the card comes back with it", async () => {
+    const failures: [Error, "error" | "setup"][] = [
+      [apiError(529, "overloaded_error"), "error"],
+      [apiError(500, "api_error"), "error"],
+      [apiError(429, "rate_limit_error"), "error"],
+      [apiError(402, "billing_error"), "error"],
+      [apiError(401, "authentication_error"), "setup"],
+      [apiError(403, "permission_error"), "setup"],
+      [new Anthropic.APIConnectionTimeoutError(), "error"],
+      [new Anthropic.APIConnectionError({ message: "Connection error." }), "error"],
+    ];
+    assert.ok(failures.length > PAGE_FACTS_LIMITS.maxAttempts);
+    const claude = fakeClaude([...failures.map(([error]) => error), recorded(STARTER_READING)]);
+    for (const [error, reason] of failures) {
+      assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }), { status: "unavailable", reason }, error.message);
+      assert.equal((await savedRow(starter())).attempts, 0, error.message);
+      // Not asked again before the wait is over.
+      const asked = claude.calls.length;
+      assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }), { status: "unavailable", reason: "error" });
+      assert.equal(claude.calls.length, asked);
+      await later();
+      assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), { status: "unread" }, error.message);
+    }
+    assert.equal((await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }))?.status, "ready");
+    assert.equal(claude.calls.length, failures.length + 1);
+    const row = await savedRow(starter());
+    assert.equal(row.attempts, 1);
+    assert.equal(row.error, null);
   });
 
   test("a page with nothing for a card is saved as such and not read again; a page with hardly any text isn't read at all", async () => {

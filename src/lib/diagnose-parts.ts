@@ -455,8 +455,10 @@ export type PageCandidate = {
 // wiring diagram, a troubleshooting chart, another part's procedure), with
 // a little more for one the system's other causes cite (but not enough to
 // beat a page about the part). The unit's own manual over others; search's
-// own rank last. A contents page sinks, and a page without the part (found
-// by some of its words) is last.
+// own rank last. A page without the part (found by some of its words) comes
+// after those, and a contents page after everything a cause naming the part
+// doesn't cite: shown large only when the search finds nothing else, and
+// then, as it's about no part, as a page that only names it.
 export function pageScore(page: PageCandidate, part: string) {
   const text = page.text;
   let score = page.cited === "part" ? 100 : 0;
@@ -476,7 +478,7 @@ export function pageScore(page: PageCandidate, part: string) {
       if (/\d\s*(?:in\.?|ft\.?)[\s.-]*lbs?\b|\d\s*N\s*[·•∙⋅.-]?\s*m\b/i.test(text)) score += 3;
     }
   }
-  if (isContentsPage(text)) score -= 30;
+  if (isContentsPage(text)) score -= 40;
   if (page.own) score += 5;
   score += 3 * Math.min(1, Math.max(0, page.rank));
   return score;

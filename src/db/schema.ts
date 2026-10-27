@@ -507,6 +507,9 @@ export const manualPageFacts = pgTable(
     dropped: integer("dropped").notNull().default(0),
     // Why the last read failed, for the logs and an admin.
     error: text("error"),
+    // Reads tried, less those that failed for the service's reasons (busy,
+    // billing, the key, the connection): a page's own failures are what
+    // use up its reads (src/lib/manual-facts.ts).
     attempts: integer("attempts").notNull().default(1),
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),

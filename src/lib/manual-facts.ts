@@ -7,7 +7,7 @@ import { withShop } from "@/db";
 import { manualPageFacts, manualPages, manuals } from "@/db/schema";
 import { giveBackAttempt, takeAttempt } from "@/lib/attempts";
 import { askClaude, isClaudeConfigured } from "@/lib/claude";
-import { apiErrorDetail, classifyError } from "@/lib/diagnose-loop";
+import { apiErrorDetail, classifyError, type FailureReason } from "@/lib/diagnose-loop";
 import { estimateCostCents } from "@/lib/diagnose-rules";
 import { manualDisplayTitle } from "@/lib/manual-catalog";
 import {
@@ -35,9 +35,11 @@ import { cutText } from "@/lib/manual-rules";
 // the other is told it's being read. Readings count against the shop's
 // daily allowance; without an API key, past the allowance or when the read
 // fails, the page still shows without its card, and a failed read is tried
-// again after a while, not every time the page is opened, and not at all
-// after a few tries or when Claude declined the page or ran out of room
-// (asking again would go the same way).
+// again after a while, not every time the page is opened: when the failure
+// was the page's, a few times in all, and not again when Claude declined
+// the page or ran out of room (asking again would go the same way); when
+// it was the service's (busy, billing, the key, the connection), however
+// often it takes, so the card comes back once the service does.
 // Callers check the user may see the page (Diagnose's part sheet checks
 // it's one of the conversation's manuals); everything here runs inside
 // withShop.
@@ -45,7 +47,9 @@ import { cutText } from "@/lib/manual-rules";
 export const PAGE_FACTS_LIMITS = {
   // Readings per shop per day: about a cent each, and each page only once.
   perShopPerDay: 300,
-  // A failed read is tried again after this long, up to this many reads in all.
+  // A failed read is tried again after this long; one that failed because
+  // of the page, up to this many reads in all (the service's failures
+  // don't count, see NOT_THE_PAGE).
   retryAfterMs: 15 * 60 * 1000,
   maxAttempts: 3,
   // A read under way for this long lost its server (longer than the part
@@ -56,6 +60,12 @@ export const PAGE_FACTS_LIMITS = {
 } as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Failures that aren't the page's: the API busy, rate-limited or unpaid, the
+// key or setup, a timeout or a dropped connection. Reading the page again
+// later can go through, so they never use up its reads. A request the API
+// turned down or found too long, and anything unrecognised, count.
+const NOT_THE_PAGE: ReadonlySet<FailureReason> = new Set(["overloaded", "rate_limited", "billing", "setup", "timeout", "connection", "stopped"]);
 
 const allowanceKey = (shopId: string) => `page-facts:shop:${shopId}`;
 
@@ -133,11 +143,19 @@ async function claimPage(shopId: string, ref: PageRef) {
 
 // Saves how the read went, over the claim it holds (a read that stalled and
 // was taken over by another device leaves the other's result alone). A
-// failed read that would fail again (final) isn't tried again.
+// failed read that would fail again (final) isn't tried again; one that
+// wasn't the page's fault (free) gives back the read its claim counted.
 async function saveReading(
   shopId: string,
   ref: PageRef,
-  outcome: { status: "ready" | "empty" | "failed"; facts?: PageFacts; dropped?: number; error?: string; final?: boolean; usage: Usage },
+  outcome: {
+    status: "ready" | "empty" | "failed";
+    facts?: PageFacts;
+    dropped?: number;
+    error?: string;
+    attempt?: "final" | "free";
+    usage: Usage;
+  },
 ) {
   await withShop(shopId, (tx) =>
     tx
@@ -150,7 +168,8 @@ async function saveReading(
         inputTokens: sql`${manualPageFacts.inputTokens} + ${outcome.usage.inputTokens}`,
         outputTokens: sql`${manualPageFacts.outputTokens} + ${outcome.usage.outputTokens}`,
         costCents: sql`${manualPageFacts.costCents} + ${outcome.usage.costCents}`,
-        ...(outcome.final ? { attempts: sql`greatest(${manualPageFacts.attempts}, ${PAGE_FACTS_LIMITS.maxAttempts})` } : {}),
+        ...(outcome.attempt === "final" ? { attempts: sql`greatest(${manualPageFacts.attempts}, ${PAGE_FACTS_LIMITS.maxAttempts})` } : {}),
+        ...(outcome.attempt === "free" ? { attempts: sql`greatest(${manualPageFacts.attempts} - 1, 0)` } : {}),
       })
       .where(
         and(
@@ -227,9 +246,10 @@ export async function readPageFacts(shopId: string, ref: PageRef, options: { ask
     const reply = await askForFacts(ask, { manualTitle: page.title, page: ref.page, text: page.text }, usage);
     if ("problem" in reply) {
       console.error(`Couldn't read page ${ref.page} of manual ${ref.manualId}: ${reply.problem}`);
-      // Declined, or too much for the answer's room: the same again next time.
+      // Declined, or too much for the answer's room: the same again next
+      // time. No tool call even after the nudge counts as one of the reads.
       const final = reply.problem === "refusal" || reply.problem === "max_tokens";
-      await saveReading(shopId, ref, { status: "failed", error: reply.problem, final, usage });
+      await saveReading(shopId, ref, { status: "failed", error: reply.problem, attempt: final ? "final" : undefined, usage });
       return { status: "unavailable", reason: "error" };
     }
     const { facts, dropped } = checkFacts(reply.input, page.text);
@@ -240,7 +260,8 @@ export async function readPageFacts(shopId: string, ref: PageRef, options: { ask
     const reason = classifyError(error);
     const detail = apiErrorDetail(error);
     console.error(`Couldn't read page ${ref.page} of manual ${ref.manualId}: ${reason}`, detail ?? error);
-    await saveReading(shopId, ref, { status: "failed", error: detail ? `${reason}: ${detail}` : reason, usage });
+    const attempt = NOT_THE_PAGE.has(reason) ? "free" : undefined;
+    await saveReading(shopId, ref, { status: "failed", error: detail ? `${reason}: ${detail}` : reason, attempt, usage });
     return { status: "unavailable", reason: reason === "setup" ? "setup" : "error" };
   }
 }
