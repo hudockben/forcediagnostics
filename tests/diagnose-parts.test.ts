@@ -20,10 +20,11 @@ import { and, eq, sql } from "drizzle-orm";
 import { systemDb, withShop } from "../src/db";
 import { attemptCounters, diagnosisConversations, diagnosisTurns, manualPageFacts, shops, users } from "../src/db/schema";
 import { askClaude } from "../src/lib/claude";
-import { partSheet } from "../src/lib/diagnose-part-sheet";
+import { partPageCard, partSheet } from "../src/lib/diagnose-part-sheet";
 import {
   MAX_PARTS,
   PART_NAMES,
+  aboutPart,
   cardOf,
   cardSettled,
   causesIn,
@@ -39,7 +40,9 @@ import {
   partSearchText,
   rankPages,
   samePage,
+  stepGaps,
   type PageCandidate,
+  type PartCard,
   type PartPage,
   type PartSheet,
 } from "../src/lib/diagnose-parts";
@@ -353,6 +356,17 @@ describe("part names", () => {
       ["Low fuel pressure", "fuel", "Fuel pressure"],
       ["Lean condition", "fuel", null],
       ["Worn front CV boot (torn)", "front_drive", "CV boot"],
+      // A fault word before the part doesn't start its name.
+      ["Failed fuel pump relay", "fuel", "Fuel pump relay"],
+      ["Torn CV boot", "front_drive", "CV boot"],
+      ["Blown EFI fuse", "electrical", "EFI fuse"],
+      ["Split intake boot", "air_intake", "Intake boot"],
+      // A word left over that isn't a part on its own isn't one.
+      ["Air pocket in the cooling system", "cooling", null],
+      ["Low compression", "engine", null],
+      // A part whose name starts with a word that can say what's wrong.
+      ["Clogged air filter", "air_intake", "Air filter"],
+      ["Coolant leak at the water pump", "cooling", "Water pump"],
     ];
     for (const [title, system, part] of cases) assert.equal(partOfCause(title, system), part, title);
   });
@@ -436,6 +450,22 @@ describe("ranking a part's pages", () => {
     assert.ok(!rankPages(pages, "Starter solenoid", 3).some((page) => page.text === CONTENTS));
   });
 
+  test("a page about the part beats another part's procedure that names it on the way", () => {
+    const cargo = `BODY\nCARGO BOX\nCargo box latch\nCargo box hinge pin\nTailgate\nGas assist shock\n11.20`;
+    const battery = `BATTERY LOCATION\nBattery\nBattery hold-down strap\nPositive (+) cable\nNegative (-) cable\n10.38`;
+    // The solenoid procedure's step 1 raises the cargo box and step 2 opens the battery's panel.
+    const raising = SOLENOID.replace("Raise dump bed.", "Raise the rear cargo box.");
+    assert.equal(rankPages([candidate(raising, { page: 3 }), candidate(cargo, { page: 20 })], "Cargo box")[0].text, cargo);
+    assert.equal(rankPages([candidate(SOLENOID), candidate(battery, { page: 38 })], "Battery")[0].text, battery);
+    // Another cause in the system citing the procedure doesn't make it the battery's.
+    assert.equal(rankPages([candidate(SOLENOID, { cited: "system" }), candidate(battery, { page: 38 })], "Battery")[0].text, battery);
+    // A contents page's lines aren't headings.
+    assert.ok(!aboutPart(candidate(CONTENTS), "Starter solenoid"));
+    assert.ok(aboutPart(candidate(cargo), "Cargo box") && aboutPart(candidate(battery), "Battery"));
+    assert.ok(!aboutPart(candidate(raising), "Cargo box") && !aboutPart(candidate(SOLENOID), "Battery"));
+    assert.ok(aboutPart(candidate(SOLENOID), "Starter solenoid") && aboutPart(candidate(TROUBLESHOOTING, { cited: "part" }), "Battery"));
+  });
+
   test("the unit's own manual over another line's same procedure", () => {
     const pages = [candidate(RANGER_SOLENOID, { own: false, manualId: "00000000-0000-4000-8000-000000000002", rank: 0.5 }), candidate(SOLENOID, { rank: 0.2 })];
     assert.equal(rankPages(pages, "Starter solenoid")[0].text, SOLENOID);
@@ -460,7 +490,7 @@ describe("ranking a part's pages", () => {
 
 describe("the sheet on the screen", () => {
   const manualId = "0f6e3a52-58c4-4c39-9d4e-6f7b3c0d9a11";
-  const page = (n: number, cited = false): PartPage => ({ manualId, page: n, title: "2021 Ranger XD 1500 Service Manual", cited });
+  const page = (n: number, cited = false): PartPage => ({ manualId, page: n, title: "2021 Ranger XD 1500 Service Manual", cited, about: true });
   const pages = [page(10, true), page(11), page(4)];
 
   test("the large page: the one picked among the part's pages, else the best; the others under it", () => {
@@ -478,11 +508,22 @@ describe("the sheet on the screen", () => {
     assert.deepEqual(cardOf({ facts }, pages[0]), { status: "unread" });
     assert.equal(cardOf({ facts }, pages[1]), null);
     assert.equal(cardOf({ facts: null }, pages[0]), null);
-    const ready: FactsState = { status: "ready", facts: { title: "", steps: [{ n: 1, text: "Raise dump bed." }], torques: [], tools: [], cautions: [], notes: [] } };
+    const ready: FactsState = { status: "ready", facts: { title: "", steps: [{ n: 1, text: "Raise dump bed." }], torques: [], tools: [], cautions: [], notes: [] }, partial: false };
     assert.ok(cardSettled(ready) && cardSettled({ status: "empty" }));
     // No key, the day's readings used, a failed read: not asked again now.
     for (const reason of ["setup", "limit", "error"] as const) assert.ok(cardSettled({ status: "unavailable", reason }));
     assert.ok(!cardSettled({ status: "unread" }) && !cardSettled({ status: "reading" }));
+  });
+
+  test("a card the check left a step out of shows where: the gaps in its numbers", () => {
+    const steps = [{ n: 1 }, { n: 3 }, { n: 4 }, { n: 7 }];
+    assert.deepEqual([...stepGaps(steps, true)], [
+      [1, [2, 2]],
+      [3, [5, 6]],
+    ]);
+    assert.deepEqual([...stepGaps([{ n: 2 }, { n: 3 }], true)], [[0, [1, 1]]]);
+    // A card the check left nothing out of: the page's own numbering.
+    assert.equal(stepGaps(steps, false).size, 0);
   });
 
   test("a part with no page: the Library's search for it", () => {
@@ -497,6 +538,10 @@ const sheetOf = (result: PartSheet | { error: string }) => {
   assert.ok(!("error" in result), JSON.stringify(result));
   return result as PartSheet;
 };
+const cardIn = (result: PartCard | { error: string }) => {
+  assert.ok(!("error" in result), JSON.stringify(result));
+  return result as PartCard;
+};
 
 describe("the part sheet", () => {
   beforeEach(async () => {
@@ -508,7 +553,7 @@ describe("the part sheet", () => {
     const sheet = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting" }));
     assert.deepEqual(sheet.parts.slice(0, 3), ["Starter solenoid", "Battery", "Starter motor"]);
     assert.equal(sheet.part, "Starter solenoid");
-    assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 3, title: rzrTitle, cited: true });
+    assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 3, title: rzrTitle, cited: true, about: true });
     // The check for the solenoid cites the troubleshooting page.
     assert.ok(sheet.pages.some((p) => p.manualId === rzr && p.page === 5 && p.cited));
     // The other line's starter-solenoid procedure is found too, after the unit's own.
@@ -522,9 +567,16 @@ describe("the part sheet", () => {
   test("another part: found by search, its service procedure first", async () => {
     const sheet = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", part: "Starter motor" }));
     assert.equal(sheet.part, "Starter motor");
-    assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 4, title: rzrTitle, cited: false });
+    assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 4, title: rzrTitle, cited: false, about: true });
     const battery = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", part: "Battery" }));
-    assert.deepEqual(battery.pages[0], { manualId: rzr, page: 6, title: rzrTitle, cited: true });
+    assert.deepEqual(battery.pages[0], { manualId: rzr, page: 6, title: rzrTitle, cited: true, about: true });
+  });
+
+  test("a part no page is about: the pages that name it, without a card", async () => {
+    // The frame is only named in a step of the solenoid's procedure.
+    const sheet = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "body_frame", part: "Frame" }));
+    assert.ok(sheet.pages.length > 0 && sheet.pages.every((p) => !p.about), JSON.stringify(sheet.pages));
+    assert.equal(sheet.facts, null);
   });
 
   test("a system with no causes still has its parts and pages", async () => {
@@ -537,12 +589,14 @@ describe("the part sheet", () => {
 
   test("asking with the page reads it once: checked against the page, saved, the same card from then on", async () => {
     const claude = fakeClaude([recorded(SOLENOID_READING)]);
-    const first = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", page: page(rzr, 3) }, { ask: claude.ask }));
+    const first = cardIn(await partPageCard(techA, { conversationId: unitConversation, page: page(rzr, 3) }, { ask: claude.ask }));
     assert.equal(claude.calls.length, 1);
     assert.equal(claude.calls[0].model, PAGE_FACTS_MODEL);
     assert.match(JSON.stringify(claude.calls[0].messages), /STARTER SOLENOID REPLACEMENT/);
-    assert.equal(first.facts?.state.status, "ready");
-    const facts = first.facts!.state.status === "ready" ? first.facts!.state.facts : null;
+    assert.equal(first.state.status, "ready");
+    const facts = first.state.status === "ready" ? first.state.facts : null;
+    // What the check left out is said.
+    assert.equal(first.state.status === "ready" && first.state.partial, true);
     assert.equal(facts?.title, "STARTER SOLENOID REPLACEMENT");
     assert.equal(facts?.steps.length, 3);
     // The value that isn't on the page is gone.
@@ -556,25 +610,26 @@ describe("the part sheet", () => {
     assert.equal(row.shopId, techA.shop.id);
 
     // Opened again, with or without the page: no more requests.
-    const again = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", page: page(rzr, 3) }, { ask: claude.ask }));
-    const opened = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting" }, { ask: claude.ask }));
+    const again = cardIn(await partPageCard(techA, { conversationId: unitConversation, page: page(rzr, 3) }, { ask: claude.ask }));
+    const opened = sheetOf(await partSheet(techA, { conversationId: unitConversation, system: "charging_starting" }));
     assert.equal(claude.calls.length, 1);
-    assert.deepEqual(again.facts, first.facts);
-    assert.deepEqual(opened.facts, first.facts);
+    assert.deepEqual(again, first);
+    assert.deepEqual(opened.facts, first);
   });
 
   test("only a page of the conversation's manuals, or one it cites, can be read; only in the shop", async () => {
     const claude = fakeClaude([]);
-    const otherShop = await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", page: page(otherShopRzr, 3) }, { ask: claude.ask });
+    const otherShop = await partPageCard(techA, { conversationId: unitConversation, page: page(otherShopRzr, 3) }, { ask: claude.ask });
     assert.ok("error" in otherShop);
-    const pastTheEnd = await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", page: page(rzr, 40) }, { ask: claude.ask });
+    const pastTheEnd = await partPageCard(techA, { conversationId: unitConversation, page: page(rzr, 40) }, { ask: claude.ask });
     assert.ok("error" in pastTheEnd);
-    for (const bad of [{ manualId: "not-a-uuid", page: 1 }, { manualId: rzr, page: 0 }, { manualId: rzr, page: 1.5 }]) {
-      assert.ok("error" in (await partSheet(techA, { conversationId: unitConversation, system: "charging_starting", page: bad }, { ask: claude.ask })));
+    for (const bad of [{ manualId: "not-a-uuid", page: 1 }, { manualId: rzr, page: 0 }, { manualId: rzr, page: 1.5 }, null]) {
+      assert.ok("error" in (await partPageCard(techA, { conversationId: unitConversation, page: bad }, { ask: claude.ask })));
     }
     assert.equal(claude.calls.length, 0);
     // Another shop's tech can't open this shop's diagnosis at all.
     assert.ok("error" in (await partSheet(techB, { conversationId: unitConversation, system: "charging_starting" })));
+    assert.ok("error" in (await partPageCard(techB, { conversationId: unitConversation, page: page(rzr, 3) }, { ask: claude.ask })));
     assert.ok("error" in (await partSheet(techA, { conversationId: unitConversation, system: "other" })));
     assert.ok("error" in (await partSheet(techA, { conversationId: "nope", system: "charging_starting" })));
   });
@@ -582,10 +637,10 @@ describe("the part sheet", () => {
   test("a conversation narrowed to one manual can't read another of the shop's", async () => {
     const narrowed = await conversation(techA, { modelNumber: "Z19VDE99AM", label: "2019 RZR XP 1000 EPS", scope: [rzr] }, null);
     const claude = fakeClaude([]);
-    const result = await partSheet(techA, { conversationId: narrowed, system: "charging_starting", page: page(ranger, 2) }, { ask: claude.ask });
+    const result = await partPageCard(techA, { conversationId: narrowed, page: page(ranger, 2) }, { ask: claude.ask });
     assert.ok("error" in result);
     const sheet = sheetOf(await partSheet(techA, { conversationId: narrowed, system: "charging_starting" }));
-    assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 3, title: rzrTitle, cited: false });
+    assert.deepEqual(sheet.pages[0], { manualId: rzr, page: 3, title: rzrTitle, cited: false, about: true });
     assert.ok(!sheet.pages.some((p) => p.manualId === ranger));
   });
 
@@ -602,8 +657,8 @@ describe("the part sheet", () => {
     assert.equal(motor.facts, null);
     // A page it cites can still be read.
     const claude = fakeClaude([recorded(SOLENOID_READING)]);
-    const read = sheetOf(await partSheet(techA, { conversationId: whole, system: "charging_starting", page: page(rzr, 3) }, { ask: claude.ask }));
-    assert.equal(read.facts?.state.status, "ready");
+    const read = cardIn(await partPageCard(techA, { conversationId: whole, page: page(rzr, 3) }, { ask: claude.ask }));
+    assert.equal(read.state.status, "ready");
     // A unit listed by model number with no scope of its own searches the unit's manuals.
     const byNumber = await conversation(techA, { modelNumber: "Z19VDE99AM", label: "2019 RZR XP 1000 EPS", scope: null }, null);
     const unitSheet = sheetOf(await partSheet(techA, { conversationId: byNumber, system: "charging_starting", part: "Starter motor" }));
@@ -630,6 +685,8 @@ describe("reading a page once", () => {
   test("two devices opening the same page at once: one request, the other told it's being read, then both have the card", async () => {
     const claude = fakeClaude([recorded(STARTER_READING), recorded(STARTER_READING)], { delayMs: 300 });
     const [one, two] = await Promise.all([readPageFacts(techA.shop.id, starter(), { ask: claude.ask }), readPageFacts(techA.shop.id, starter(), { ask: claude.ask })]);
+    // A read under way is never taken over while its route may still be running.
+    assert.ok(PAGE_FACTS_LIMITS.staleAfterMs > 150_000);
     assert.equal(claude.calls.length, 1);
     const statuses = [one?.status, two?.status].sort();
     assert.deepEqual(statuses, ["reading", "ready"]);
@@ -716,10 +773,32 @@ describe("reading a page once", () => {
       [message([{ type: "tool_use", id: "toolu_cut", name: FACTS_TOOL_NAME, input: { title: "STARTER" } }], "max_tokens"), "max_tokens"],
     ] as const) {
       await forget(starter());
-      const once = fakeClaude([reply]);
+      const once = fakeClaude([reply, recorded(STARTER_READING)]);
       assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: once.ask }), { status: "unavailable", reason: "error" });
       assert.equal((await savedRow(starter())).error, problem);
+      // It would go the same way again: not asked again, even a while later.
+      await systemDb
+        .update(manualPageFacts)
+        .set({ attemptedAt: new Date(Date.now() - PAGE_FACTS_LIMITS.retryAfterMs - 1000) })
+        .where(and(eq(manualPageFacts.manualId, rzr), eq(manualPageFacts.pageNumber, 4)));
+      assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: once.ask }), { status: "unavailable", reason: "error" });
+      assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), { status: "unavailable", reason: "error" });
+      assert.equal(once.calls.length, 1);
     }
+  });
+
+  test("a read that keeps failing is tried a few times in all, then no more", async () => {
+    const busy = () => new Anthropic.InternalServerError(529, { type: "error", error: { type: "overloaded_error", message: "busy" } }, undefined, new Headers());
+    const claude = fakeClaude(Array.from({ length: PAGE_FACTS_LIMITS.maxAttempts + 1 }, busy));
+    for (let i = 0; i < PAGE_FACTS_LIMITS.maxAttempts + 1; i++) {
+      assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }), { status: "unavailable", reason: "error" });
+      await systemDb
+        .update(manualPageFacts)
+        .set({ attemptedAt: new Date(Date.now() - PAGE_FACTS_LIMITS.retryAfterMs - 1000) })
+        .where(and(eq(manualPageFacts.manualId, rzr), eq(manualPageFacts.pageNumber, 4)));
+    }
+    assert.equal(claude.calls.length, PAGE_FACTS_LIMITS.maxAttempts);
+    assert.equal((await savedRow(starter())).attempts, PAGE_FACTS_LIMITS.maxAttempts);
   });
 
   test("a page with nothing for a card is saved as such and not read again; a page with hardly any text isn't read at all", async () => {

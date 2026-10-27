@@ -173,8 +173,9 @@ export const PART_NAMES: Record<DrawnSystem, Part[]> = {
 // on the list ("Water in the speedometer connector"): the noun with up to
 // two words before it, which have to leave at least one once the words
 // that only describe a fault are taken off.
-const PART_NOUNS =
-  "(?:[a-z0-9/-]+ ){0,2}(?:connectors?|sensors?|switch(?:es)?|relays?|fuses?|hoses?|lines?|cables?|seals?|bearings?|gaskets?|bushings?|boots?|mounts?|bolts?|clamps?|brackets?|valves?|pumps?|filters?|belts?|chains?|wires?|terminals?|modules?|motors?|levers?|linkages?|harness(?:es)?)";
+const NOUNS =
+  "(?:connectors?|sensors?|switch(?:es)?|relays?|fuses?|hoses?|lines?|cables?|seals?|bearings?|gaskets?|bushings?|boots?|mounts?|bolts?|clamps?|brackets?|valves?|pumps?|filters?|belts?|chains?|wires?|terminals?|modules?|motors?|levers?|linkages?|harness(?:es)?)";
+const PART_NOUNS = `(?:[a-z0-9/-]+ ){0,2}${NOUNS}`;
 
 // Words that say what's wrong, not which part ("Worn drive belt", "Water
 // in the connector"), and small words: taken off the ends of a part's name.
@@ -185,6 +186,7 @@ const NOT_PART = new Set(
     "sticking dirty clogged plugged blocked restricted blown wet water moisture missing bent seized stretched glazed " +
     "frayed chafed chafing pinched kinked collapsed contaminated intermittent poor open shorted short burnt burned melted " +
     "binding misadjusted incorrect wrong excessive insufficient no weakening sticky noisy slipping overheating lean rich " +
+    "torn split warped scored pitted swollen ruptured sulfated fouled seeping stripped sheared " +
     "leak leaks corrosion crack cracks damage wear play noise debris dirt air failure fault problem issue condition " +
     "breaking down out possible likely"
   ).split(" "),
@@ -192,7 +194,7 @@ const NOT_PART = new Set(
 
 // Abbreviations kept in capitals in a name made from a cause's words.
 const ACRONYMS = new Set(
-  "ecu ecm cdi tps iac eps cv awd adc abs o2 map t-map vss cps ckp ect led pvt ebs rops atv utv".split(" "),
+  "ecu ecm cdi efi fi egt tps iac eps cv awd adc abs o2 map t-map vss cps ckp ect led pvt ebs rops atv utv".split(" "),
 );
 
 const pattern = (source: string) => new RegExp(`\\b${source}\\b`, "gi");
@@ -204,6 +206,7 @@ const PART_PATTERNS = Object.fromEntries(
   ]),
 ) as Record<DrawnSystem, { part: Part; regex: RegExp }[]>;
 const NOUN_PATTERN = pattern(PART_NOUNS);
+const NOUN_WORD = new RegExp(`^${NOUNS}$`, "i");
 
 // "speedometer connector" -> "Speedometer connector", "ecu relay" -> "ECU
 // relay".
@@ -237,11 +240,15 @@ function longest<T>(text: string, patterns: { regex: RegExp; value: T }[]) {
 // "Spark plug"), or the part noun it names ("Water in the speedometer
 // connector" -> "Speedometer connector"), or failing both its words
 // without the fault ones ("Low fuel pressure" -> "Fuel pressure"); null
-// when nothing in it names a part ("Lean condition").
+// when nothing in it names a part ("Lean condition", "Air pocket in the
+// cooling system").
 export function partOfCause(title: string, system: DrawnSystem): string | null {
   const text = String(title ?? "").replace(/\([^)]*\)/g, " ");
   const listed = longest(text, PART_PATTERNS[system].map(({ part, regex }) => ({ regex, value: part })));
-  const noun = longest(text, [{ regex: NOUN_PATTERN, value: null }]);
+  // A part noun's words don't run through one that says what's wrong:
+  // "Failed fuel pump relay" is the relay's, not the fuel pump's.
+  const nounText = text.replace(/[A-Za-z]+/g, (word) => (NOT_PART.has(word.toLowerCase()) ? "|" : word));
+  const noun = longest(nounText, [{ regex: NOUN_PATTERN, value: null }]);
   const nounWords = noun ? trimmed(noun.text) : [];
   // A noun with words of its own ("speedometer connector") beats a shorter
   // listed name inside it ("connector" isn't one; "battery" in "battery
@@ -256,6 +263,8 @@ export function partOfCause(title: string, system: DrawnSystem): string | null {
   const leftWords = trimmed(left ?? "");
   const words = right !== undefined && (leftWords.length === 0 || NOT_PART.has(left.trim().split(/\s+/).at(-1)!.toLowerCase())) ? trimmed(right) : leftWords;
   if (words.length === 0 || words.length > 4) return null;
+  // One word that isn't a part on its own ("Pocket", "Compression").
+  if (words.length === 1 && !NOUN_WORD.test(words[0])) return null;
   return asName(words);
 }
 
@@ -307,8 +316,9 @@ export function partSearchText(part: string) {
 
 // --- The sheet ------------------------------------------------------------------
 
-// A page that shows the part; cited: one the conversation's causes cite.
-export type PartPage = { manualId: string; page: number; title: string; cited: boolean };
+// A page that shows the part; cited: one the conversation's causes cite;
+// about: one about the part (see aboutPart), not one that only names it.
+export type PartPage = { manualId: string; page: number; title: string; cited: boolean; about: boolean };
 
 // What the part sheet shows for a system (see src/lib/diagnose-part-sheet.ts).
 export type PartSheet = {
@@ -322,9 +332,13 @@ export type PartSheet = {
   // been picked (the pages, if any, are the ones the causes cite).
   noManual: boolean;
   // The card of the page asked about, else of the large page; null with no
-  // page at all.
+  // page at all, or when the large page isn't about the part (no page is:
+  // the screen says so and shows the pages that name it without a card).
   facts: { page: PageRef; state: FactsState } | null;
 };
+
+// A page's card, asked for on its own (src/lib/diagnose-part-sheet.ts).
+export type PartCard = { page: PageRef; state: FactsState };
 
 // --- On the screen --------------------------------------------------------------
 
@@ -345,6 +359,20 @@ export function otherPages(sheet: Pick<PartSheet, "pages">, large: PageRef): Par
 // time (null for any other page, which is asked for on its own).
 export function cardOf(sheet: Pick<PartSheet, "facts">, page: PageRef): FactsState | null {
   return sheet.facts && samePage(sheet.facts.page, page) ? sheet.facts.state : null;
+}
+
+// Where a card's numbered steps skip numbers (the check against the page
+// left a step out): each gap's first and last number, before the step
+// after it. Only for a card the check left something out of; a page's own
+// numbering can skip.
+export function stepGaps(steps: { n: number }[], partial: boolean): Map<number, [number, number]> {
+  const gaps = new Map<number, [number, number]>();
+  if (!partial) return gaps;
+  steps.forEach((step, index) => {
+    const before = index === 0 ? 0 : steps[index - 1].n;
+    if (step.n > before + 1) gaps.set(index, [before + 1, step.n - 1]);
+  });
+  return gaps;
 }
 
 // Whether asking about a page's card again now would change nothing: read,
@@ -384,16 +412,25 @@ export function mentionsPart(text: string, part: string) {
   return wanted.length > 0 && wanted.every((word) => page.has(word));
 }
 
-// A heading for the part's procedure: a line in capitals with every word
-// of the part and a procedure word ("STARTER SOLENOID REPLACEMENT").
-function hasProcedureHeading(text: string, part: string) {
+// A heading naming the part: a line in capitals with every word of it,
+// and a procedure word when asked for one ("STARTER SOLENOID REPLACEMENT"),
+// else any ("CARGO BOX", "BATTERY LOCATION": a diagram's or a location's).
+function hasHeading(text: string, part: string, procedure: boolean) {
   const wanted = wordsOf(partSearchText(part));
   return text.split("\n").some((line) => {
     const letters = line.replace(/[^A-Za-z]/g, "");
     if (letters.length < 6 || letters !== letters.toUpperCase()) return false;
     const words = new Set(wordsOf(line));
-    return wanted.every((word) => words.has(word)) && PROCEDURE_WORDS.some((word) => words.has(stem(word)));
+    return wanted.every((word) => words.has(word)) && (!procedure || PROCEDURE_WORDS.some((word) => words.has(stem(word))));
   });
+}
+
+// Whether a page is about the part (its procedure, its diagram, where it
+// is), not one that only names it on the way (another part's procedure:
+// "1. Raise the rear cargo box."): one a cause naming the part cites, or
+// one with a heading naming it.
+export function aboutPart(page: Pick<PageCandidate, "text" | "cited">, part: string) {
+  return page.cited === "part" || (mentionsPart(page.text, part) && !isContentsPage(page.text) && hasHeading(page.text, part, false));
 }
 
 export type PageCandidate = {
@@ -411,26 +448,33 @@ export type PageCandidate = {
 };
 
 // How well a page shows the part: a page a cause naming this part cites
-// comes first. Then, among pages with the part on them, its service
-// procedure (its heading, procedure words, numbered steps, a torque spec)
-// over pages that only mention it (a wiring diagram, a troubleshooting
-// chart), with a little more for one the system's other causes cite (but
-// not enough to beat the part's own procedure). The unit's own manual over
-// others; search's own rank last. A contents page sinks, and a page
-// without the part (found by some of its words) is last.
+// comes first. Then, among pages with the part on them, the ones about it
+// (a heading names it), its service procedure most (the heading's
+// procedure word, procedure words, numbered steps, a torque spec, which
+// only count on a page about the part), over pages that only mention it (a
+// wiring diagram, a troubleshooting chart, another part's procedure), with
+// a little more for one the system's other causes cite (but not enough to
+// beat a page about the part). The unit's own manual over others; search's
+// own rank last. A contents page sinks, and a page without the part (found
+// by some of its words) is last.
 export function pageScore(page: PageCandidate, part: string) {
   const text = page.text;
   let score = page.cited === "part" ? 100 : 0;
   if (mentionsPart(text, part)) {
     const words = new Set(wordsOf(text));
     score += 10;
-    if (page.cited === "system") score += 15;
-    if (hasProcedureHeading(text, part)) score += 12;
+    // A contents page's lines are headings of other pages.
+    const procedure = !isContentsPage(text) && hasHeading(text, part, true);
+    const about = procedure || (!isContentsPage(text) && hasHeading(text, part, false));
+    if (page.cited === "system") score += about ? 15 : 8;
     const phrase = wordsOf(partSearchText(part)).join(" ");
     if (phrase.includes(" ") && wordsOf(text).join(" ").includes(phrase)) score += 4;
-    score += Math.min(10, 2 * PROCEDURE_WORDS.filter((word) => words.has(stem(word))).length);
-    if (numberedSteps(text) >= 2) score += 6;
-    if (/\d\s*(?:in\.?|ft\.?)[\s.-]*lbs?\b|\d\s*N\s*[·•∙⋅.-]?\s*m\b/i.test(text)) score += 3;
+    if (about) {
+      score += procedure ? 30 : 20;
+      score += Math.min(10, 2 * PROCEDURE_WORDS.filter((word) => words.has(stem(word))).length);
+      if (numberedSteps(text) >= 2) score += 6;
+      if (/\d\s*(?:in\.?|ft\.?)[\s.-]*lbs?\b|\d\s*N\s*[·•∙⋅.-]?\s*m\b/i.test(text)) score += 3;
+    }
   }
   if (isContentsPage(text)) score -= 30;
   if (page.own) score += 5;

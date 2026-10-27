@@ -35,7 +35,9 @@ import { cutText } from "@/lib/manual-rules";
 // the other is told it's being read. Readings count against the shop's
 // daily allowance; without an API key, past the allowance or when the read
 // fails, the page still shows without its card, and a failed read is tried
-// again after a while, not every time the page is opened.
+// again after a while, not every time the page is opened, and not at all
+// after a few tries or when Claude declined the page or ran out of room
+// (asking again would go the same way).
 // Callers check the user may see the page (Diagnose's part sheet checks
 // it's one of the conversation's manuals); everything here runs inside
 // withShop.
@@ -43,10 +45,12 @@ import { cutText } from "@/lib/manual-rules";
 export const PAGE_FACTS_LIMITS = {
   // Readings per shop per day: about a cent each, and each page only once.
   perShopPerDay: 300,
-  // A failed read is tried again after this long.
+  // A failed read is tried again after this long, up to this many reads in all.
   retryAfterMs: 15 * 60 * 1000,
-  // A read under way for this long lost its server: another can take it on.
-  staleAfterMs: 2 * 60 * 1000,
+  maxAttempts: 3,
+  // A read under way for this long lost its server (longer than the part
+  // sheet's route may run): another can take it on.
+  staleAfterMs: 3 * 60 * 1000,
   // Per request; the SDK tries once more after a dropped connection or a 5xx.
   timeoutMs: 30_000,
 } as const;
@@ -62,11 +66,12 @@ type Row = typeof manualPageFacts.$inferSelect;
 // server went away).
 function savedState(row: Row | undefined, now = Date.now()): FactsState | null {
   if (!row) return null;
-  if (row.status === "ready" && row.facts) return { status: "ready", facts: row.facts };
+  if (row.status === "ready" && row.facts) return { status: "ready", facts: row.facts, partial: row.dropped > 0 };
   if (row.status === "ready" || row.status === "empty") return { status: "empty" };
   const age = now - row.attemptedAt.getTime();
   if (row.status === "reading") return age < PAGE_FACTS_LIMITS.staleAfterMs ? { status: "reading" } : null;
-  return age < PAGE_FACTS_LIMITS.retryAfterMs ? { status: "unavailable", reason: "error" } : null;
+  const retry = age >= PAGE_FACTS_LIMITS.retryAfterMs && row.attempts < PAGE_FACTS_LIMITS.maxAttempts;
+  return retry ? null : { status: "unavailable", reason: "error" };
 }
 
 // Whether a page has enough text to read (not a scanned page OCR hasn't
@@ -117,7 +122,8 @@ async function claimPage(shopId: string, ref: PageRef) {
           attempts: sql`${manualPageFacts.attempts} + 1`,
           error: null,
         },
-        setWhere: sql`(${manualPageFacts.status} = 'failed' and ${manualPageFacts.attemptedAt} < now() - make_interval(secs => ${retry}))
+        setWhere: sql`(${manualPageFacts.status} = 'failed' and ${manualPageFacts.attemptedAt} < now() - make_interval(secs => ${retry})
+            and ${manualPageFacts.attempts} < ${PAGE_FACTS_LIMITS.maxAttempts})
           or (${manualPageFacts.status} = 'reading' and ${manualPageFacts.attemptedAt} < now() - make_interval(secs => ${stale}))`,
       })
       .returning({ attempts: manualPageFacts.attempts }),
@@ -126,11 +132,12 @@ async function claimPage(shopId: string, ref: PageRef) {
 }
 
 // Saves how the read went, over the claim it holds (a read that stalled and
-// was taken over by another device leaves the other's result alone).
+// was taken over by another device leaves the other's result alone). A
+// failed read that would fail again (final) isn't tried again.
 async function saveReading(
   shopId: string,
   ref: PageRef,
-  outcome: { status: "ready" | "empty" | "failed"; facts?: PageFacts; dropped?: number; error?: string; usage: Usage },
+  outcome: { status: "ready" | "empty" | "failed"; facts?: PageFacts; dropped?: number; error?: string; final?: boolean; usage: Usage },
 ) {
   await withShop(shopId, (tx) =>
     tx
@@ -143,6 +150,7 @@ async function saveReading(
         inputTokens: sql`${manualPageFacts.inputTokens} + ${outcome.usage.inputTokens}`,
         outputTokens: sql`${manualPageFacts.outputTokens} + ${outcome.usage.outputTokens}`,
         costCents: sql`${manualPageFacts.costCents} + ${outcome.usage.costCents}`,
+        ...(outcome.final ? { attempts: sql`greatest(${manualPageFacts.attempts}, ${PAGE_FACTS_LIMITS.maxAttempts})` } : {}),
       })
       .where(
         and(
@@ -219,13 +227,15 @@ export async function readPageFacts(shopId: string, ref: PageRef, options: { ask
     const reply = await askForFacts(ask, { manualTitle: page.title, page: ref.page, text: page.text }, usage);
     if ("problem" in reply) {
       console.error(`Couldn't read page ${ref.page} of manual ${ref.manualId}: ${reply.problem}`);
-      await saveReading(shopId, ref, { status: "failed", error: reply.problem, usage });
+      // Declined, or too much for the answer's room: the same again next time.
+      const final = reply.problem === "refusal" || reply.problem === "max_tokens";
+      await saveReading(shopId, ref, { status: "failed", error: reply.problem, final, usage });
       return { status: "unavailable", reason: "error" };
     }
     const { facts, dropped } = checkFacts(reply.input, page.text);
     const status = hasFacts(facts) ? "ready" : "empty";
     await saveReading(shopId, ref, { status, facts, dropped, usage });
-    return status === "ready" ? { status, facts } : { status };
+    return status === "ready" ? { status, facts, partial: dropped > 0 } : { status };
   } catch (error) {
     const reason = classifyError(error);
     const detail = apiErrorDetail(error);

@@ -1,7 +1,8 @@
 // Reading a manual page once for the part sheet's card: what Claude records
 // is checked against the page's own text (torque values as written, with
-// their units and close together; steps, tools, cautions and notes mostly
-// in the page's words, any number in them on the page), on realistic
+// their units and close together, and the value of the box labelled like
+// their item; steps, tools, cautions and notes mostly in the page's words,
+// any number in them on the page), on realistic
 // Polaris page text from the text layer and from OCR. Also the request
 // itself (the model, no thinking, the strict tool, nothing forced) and
 // reading the answer. Pure: no database.
@@ -129,6 +130,10 @@ describe("comparing specs", () => {
     assert.deepEqual(specTokens("1O6 in-lbs"), ["106", "inlb"]);
     assert.deepEqual(specTokens("I06 in-lbs"), ["106", "inlb"]);
     assert.deepEqual(specTokens("oil 2.5l"), ["oil", "2.5", "l"]);
+    assert.deepEqual(specTokens("1l of oil"), ["1", "l", "of", "oil"]);
+    // Before a torque unit an L is OCR's 1.
+    assert.deepEqual(specTokens("97 in-lbs (1l N·m)"), ["97", "inlb", "11", "nm"]);
+    assert.deepEqual(specTokens("1l ft-lbs"), ["11", "ftlb"]);
     // Words with those letters stay words.
     assert.deepEqual(specTokens("coil oil lid"), ["coil", "oil", "lid"]);
   });
@@ -231,6 +236,58 @@ describe("checking a reading against the page", () => {
     assert.deepEqual(keptTorques(torque("Rear Differential Drain Plug", "97 in-lbs (11 N·m)")), []);
     // The item shortened, or in other case, is still the page's.
     assert.deepEqual(keptTorques(torque("solenoid fastener", "97 in-lbs (11 N·m)")), ["97 in-lbs (11 N·m)"]);
+    // A number with no torque unit isn't a torque.
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "97")), []);
+  });
+
+  test("a torque has to be its own item's: a value from the box beside it is dropped", () => {
+    // Each box's value under the wrong fastener.
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Cable Fastener", "97 in-lbs (11 N·m)")), []);
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "35 in-lbs (4 N·m)")), []);
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "7 N·m")), []);
+    // The positive terminal with the negative's value, and the other way round.
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Positive)", "62 in-lbs (7 N·m)")), []);
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Negative)", "106 in-lbs (12 N·m)")), []);
+    // A label made from the page's words that two boxes fit as well as each other.
+    assert.deepEqual(keptTorques(torque("Battery Cable Fastener", "35 in-lbs (4 N·m)")), []);
+    // The same from OCR.
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "35 in-lbs (4 N·m)"), SOLENOID_OCR), []);
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Negative)", "62 in-lbs (7 N·m)"), SOLENOID_OCR), ["62 in-lbs (7 N·m)"]);
+  });
+
+  test("the box's label: on the line above or before it, one word read with the box above, a step's own words", () => {
+    // The owner's page: the negative terminal's box says only "(Negative):".
+    const boxed = `TORQUE
+Battery Terminal Fastener (Positive):
+106 in-lbs (12 N·m)
+(Negative):
+62 in-lbs (7 N·m)`;
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Negative)", "62 in-lbs (7 N·m)"), boxed), ["62 in-lbs (7 N·m)"]);
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Positive)", "106 in-lbs (12 N·m)"), boxed), ["106 in-lbs (12 N·m)"]);
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Positive)", "62 in-lbs (7 N·m)"), boxed), []);
+    // On one line, as some text layers give a box.
+    const inline = "Battery Terminal Fastener (Positive): 106 in-lbs (12 N·m) / (Negative): 62 in-lbs (7 N·m)";
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Negative)", "62 in-lbs (7 N·m)"), inline), ["62 in-lbs (7 N·m)"]);
+    assert.deepEqual(keptTorques(torque("Battery Terminal Fastener (Positive)", "62 in-lbs (7 N·m)"), inline), []);
+    // A spec in a step, labelled by the step's words; the other unit on the next line.
+    const steps = "4. Install the drain plug and torque to 18 ft-lbs\n(24 N·m).\n5. Torque the fill plug to 30 ft-lbs (41 N·m).";
+    assert.deepEqual(keptTorques(torque("Drain Plug", "18 ft-lbs (24 N·m)"), steps), ["18 ft-lbs (24 N·m)"]);
+    assert.deepEqual(keptTorques(torque("Drain Plug", "24 N·m"), steps), ["24 N·m"]);
+    assert.deepEqual(keptTorques(torque("Fill Plug", "30 ft-lbs (41 N·m)"), steps), ["30 ft-lbs (41 N·m)"]);
+    assert.deepEqual(keptTorques(torque("Drain Plug", "30 ft-lbs (41 N·m)"), steps), []);
+    // Two boxes labelled alike: kept only when both have the value.
+    const twice = "FRONT\nMounting Bolt: 30 ft-lbs (41 N·m)\nREAR\nMounting Bolt: 30 ft-lbs (41 N·m)\nSKID PLATE\nMounting Bolt: 8 ft-lbs (11 N·m)";
+    assert.deepEqual(keptTorques(torque("Mounting Bolt", "30 ft-lbs (41 N·m)"), twice), []);
+    const same = "FRONT\nMounting Bolt: 30 ft-lbs (41 N·m)\nREAR\nMounting Bolt: 30 ft-lbs (41 N·m)";
+    assert.deepEqual(keptTorques(torque("Mounting Bolt", "30 ft-lbs (41 N·m)"), same), ["30 ft-lbs (41 N·m)"]);
+    // A label a text layer ran onto the end of the step before it.
+    const runOn = "4. Remove the cable nuts and label each cable. Starter Solenoid Fastener: 97 in-lbs (11 N·m)\nStarter Solenoid Cable Fastener: 35 in-lbs (4 N·m)";
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "97 in-lbs (11 N·m)"), runOn), ["97 in-lbs (11 N·m)"]);
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "35 in-lbs (4 N·m)"), runOn), []);
+    // A unit's abbreviation isn't a sentence's end.
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "97 in-lbs (11 N·m)"), "Starter Solenoid Fastener: 97 IN. LBS. (11 N·m)"), ["97 in-lbs (11 N·m)"]);
+    // OCR's 1l for 11 in a box.
+    assert.deepEqual(keptTorques(torque("Starter Solenoid Fastener", "97 in-lbs (11 N·m)"), "Starter Solenoid Fastener:\n97 in-lbs (1l N·m)"), ["97 in-lbs (11 N·m)"]);
   });
 
   test("steps: shortened or reworded is fine, made up or with a number not on the page isn't", () => {

@@ -1,13 +1,13 @@
 import { DrizzleQueryError } from "drizzle-orm";
 
-import { partSheet } from "@/lib/diagnose-part-sheet";
+import { partPageCard, partSheet } from "@/lib/diagnose-part-sheet";
 import { allows, lookupCurrentUser } from "@/lib/session";
 
 // The part sheet for a system of the unit the tech tapped: its parts, the
 // manual pages that show the one picked (or the first), and the large
-// page's card. With a page, that page's card, read the first time anyone
-// opens it (a few seconds, once). The same people can as can see the
-// diagnosis (diagnostics.work).
+// page's card as saved. With a page, only that page's card, read the first
+// time anyone opens it (a few seconds, once). The same people can as can
+// see the diagnosis (diagnostics.work).
 //
 // A route rather than a server action: the browser runs a page's server
 // actions one at a time, so a tick on a step tapped while a page is being
@@ -36,13 +36,11 @@ export async function POST(request: Request) {
     return Response.json({ error: "That request couldn't be read." }, { status: 400 });
   }
   const page = body.page && typeof body.page === "object" ? (body.page as Record<string, unknown>) : null;
+  const conversationId = String(body.conversationId ?? "");
   try {
-    const sheet = await partSheet(lookup.user, {
-      conversationId: String(body.conversationId ?? ""),
-      system: String(body.system ?? ""),
-      part: typeof body.part === "string" ? body.part : undefined,
-      page: page ? { manualId: String(page.manualId ?? ""), page: Number(page.page) } : null,
-    });
+    const sheet = page
+      ? await partPageCard(lookup.user, { conversationId, page: { manualId: String(page.manualId ?? ""), page: Number(page.page) } })
+      : await partSheet(lookup.user, { conversationId, system: String(body.system ?? ""), part: typeof body.part === "string" ? body.part : undefined });
     const headers = { "cache-control": "private, no-store" };
     return "error" in sheet ? Response.json(sheet, { status: 404, headers }) : Response.json(sheet, { headers });
   } catch (error) {

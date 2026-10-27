@@ -290,7 +290,9 @@ export function UnitGraphic({
               data-active={active === zone.system}
               role="button"
               tabIndex={0}
-              aria-pressed={active === zone.system}
+              // Opening the sheet (a dialog) where there is one; else a toggle of the list's highlight.
+              aria-pressed={onOpen ? undefined : active === zone.system}
+              aria-haspopup={onOpen ? "dialog" : undefined}
               aria-label={`${SYSTEM_LABELS[zone.system]}: ${count} ${count === 1 ? "cause" : "causes"}, ${glowWords(zone.glow)}${zone.rank ? ` (number ${zone.rank} in the list)` : ""}. ${onOpen ? "Open its parts and manual pages." : "Show in the list."}`}
               onKeyDown={keyDown(zone.system)}
               onFocus={() => setFocused(zone.system)}

@@ -795,19 +795,50 @@ export class UnitViewer {
     return { width: this.width, height: this.height, points, box: { x: box.minX, y: box.minY, w: box.maxX - box.minX, h: box.maxY - box.minY } };
   }
 
-  // The system under a point on the canvas (CSS pixels): the nearest part
-  // of any system (the wheels a wheels/tires flag doesn't point at count as
-  // wheels/tires). The body's panels aren't a system: a tap goes through
-  // them to the part behind, as it does through the see-through body of
-  // phantom view.
-  pick(x: number, y: number): DrawnSystem | null {
+  // The system under a point on the canvas (CSS pixels): the part the tech
+  // sees there. In phantom view a flagged part is drawn through what's in
+  // front of it (a seat, the engine, a tyre), so it's that one, not the
+  // nearer part it shows through; else the nearest part of any system (the
+  // wheels a wheels/tires flag doesn't point at count as wheels/tires). The
+  // body's panels aren't a system: a tap goes through them to the part
+  // behind. With slack (a finger, a glove), a flagged part that close to
+  // the point is the one tapped, and a tap just off the machine still finds
+  // the part nearest it.
+  pick(x: number, y: number, slack = 0): DrawnSystem | null {
     if (!this.unit || this.width < 1 || this.height < 1) return null;
-    const ray = new THREE.Raycaster();
-    ray.setFromCamera(new THREE.Vector2((x / this.width) * 2 - 1, -(y / this.height) * 2 + 1), this.camera);
     const meshes = this.unit.meshes.filter(({ group }) => group !== "shell").map(({ mesh }) => mesh);
-    const group = ray.intersectObjects(meshes, false)[0]?.object.userData.group as DrawnSystem | "running" | undefined;
-    if (!group) return null;
-    return group === "running" ? "wheels_tires" : group;
+    const ray = new THREE.Raycaster();
+    const hitsAt = (px: number, py: number) => {
+      ray.setFromCamera(new THREE.Vector2((px / this.width) * 2 - 1, -(py / this.height) * 2 + 1), this.camera);
+      return ray.intersectObjects(meshes, false).map((hit) => hit.object.userData.group as DrawnSystem | "running");
+    };
+    // What's seen flagged along a ray: in phantom view any flagged part on
+    // it (drawn over the rest), in solid view the nearest part if flagged.
+    const flaggedOn = (groups: (DrawnSystem | "running")[]) =>
+      (this.mode === "phantom" ? groups : groups.slice(0, 1)).find((group): group is DrawnSystem => group !== "running" && this.flagged(group)) ?? null;
+    const system = (group: DrawnSystem | "running" | undefined) => (group === "running" ? "wheels_tires" : (group ?? null));
+    const centre = hitsAt(x, y);
+    const seen = flaggedOn(centre);
+    if (seen || slack <= 0) return seen ?? system(centre[0]);
+    const around = [
+      [slack, 0],
+      [-slack, 0],
+      [0, slack],
+      [0, -slack],
+    ].map(([dx, dy]) => hitsAt(x + dx, y + dy));
+    for (const groups of around) {
+      const near = flaggedOn(groups);
+      if (near) return near;
+    }
+    return system(centre[0] ?? around.find((groups) => groups.length > 0)?.[0]);
+  }
+
+  // Whether a system is drawn flagged: lit, not set aside, outlined in its
+  // flag's colour (filled too, or only outlined for a low one), which is
+  // what phantom view draws through what's in front (as applyLooks does).
+  private flagged(system: DrawnSystem) {
+    const entry = this.looks.get(system);
+    return !!entry?.state && isLit(entry.state.glow) && !entry.state.muted && !!entry.look.outline;
   }
 
   // The systems lit (for tests).

@@ -62,13 +62,14 @@ export const hasFacts = (facts: PageFacts) =>
 // A page of a manual.
 export type PageRef = { manualId: string; page: number };
 
-// Where a page's card stands, for the screen: read (with what it says),
-// read with nothing to show, not read yet (ask for it to be read), being
-// read on another device (ask again in a moment), or not readable now (no
-// API key, the shop's daily readings used up, or the read failed: the page
-// still shows, and it's tried again later).
+// Where a page's card stands, for the screen: read (with what it says, and
+// whether the check against the page left anything out), read with nothing
+// to show, not read yet (ask for it to be read), being read on another
+// device (ask again in a moment), or not readable now (no API key, the
+// shop's daily readings used up, or the read failed: the page still shows,
+// and it's tried again later).
 export type FactsState =
-  | { status: "ready"; facts: PageFacts }
+  | { status: "ready"; facts: PageFacts; partial: boolean }
   | { status: "empty" }
   | { status: "unread" }
   | { status: "reading" }
@@ -154,10 +155,12 @@ const UNIT_WORDS: [RegExp, string][] = [
 const UNITS = new Set("inlb ftlb nm kgfm kgfcm ohm kohm mohm v amp psi kpa bar mm cm rpm deg ml oz qt kg w hz mph kph".split(" "));
 
 // OCR's letters for digits inside a number ("l06" and "I06" are 106, "1O"
-// is 10), though not a litre's L at the end ("2.5l"). A "|" is left alone:
-// next to a number it's more often a table's rule than a 1.
-function digitsFixed(run: string) {
-  if (!/\d/.test(run) || /^[\d.,]+l$/.test(run)) return run;
+// is 10), though not a litre's L at the end ("2.5l"), unless a torque unit
+// follows it ("1l N·m" is 11 N·m). A "|" is left alone: next to a number
+// it's more often a table's rule than a 1.
+const TORQUE_UNIT_NEXT = /^\s*(?:n\s*m\b|nm\b|newton|(?:in|ft)[\s.-]*[li]bs?\b|[li]bs?[\s.-]*(?:in|ft)\b|kgf?[\s.-]*c?m\b)/;
+function digitsFixed(run: string, after: string) {
+  if (!/\d/.test(run) || (/^[\d.,]+l$/.test(run) && !TORQUE_UNIT_NEXT.test(after))) return run;
   return run.replace(/[li]/g, "1").replace(/o/g, "0");
 }
 
@@ -173,7 +176,7 @@ export function specTokens(text: string): string[] {
     .replace(/[ΩΩ]/g, " ohm ")
     .replace(DOTS, " ")
     .toLowerCase()
-    .replace(/(?<![a-z])[0-9oli]+(?:[.,][0-9oli]+)*(?![a-z])/g, digitsFixed);
+    .replace(/(?<![a-z])[0-9oli]+(?:[.,][0-9oli]+)*(?![a-z])/g, (run: string, at: number, all: string) => digitsFixed(run, all.slice(at + run.length, at + run.length + 12)));
   const raw: { token: string; gap: string }[] = [];
   let end = 0;
   for (const match of cleaned.matchAll(/\d+(?:[.,]\d+)*|[a-z]+/g)) {
@@ -262,6 +265,86 @@ export function numbersOnPage(text: string, pageTokens: string[]) {
   });
 }
 
+// --- Which fastener a torque is for -----------------------------------------------
+
+// The units a torque is given in.
+const TORQUE_UNITS = new Set(["inlb", "ftlb", "nm", "kgfm", "kgfcm"]);
+const isTorque = (group: string[]) => group.slice(1).some((token) => TORQUE_UNITS.has(token));
+
+// Words in a TORQUE box that don't say which fastener it's for.
+const NOT_LABEL = new Set(["torque", "spec", "specification", "tighten", "tightened"].map(stem));
+const labelWords = (text: string) => meaningful(text).filter((word) => !NOT_LABEL.has(word) && !UNITS.has(word));
+
+// How far up from a spec its label can be: the lines, and the words of the
+// line it's on.
+const LABEL_LINES = 4;
+const LABEL_TOKENS = 12;
+
+// A line's sentences, so a label a text layer ran onto the end of a step
+// ("…label each cable. Starter Solenoid Fastener: 97 in-lbs") is a line of
+// its own; never after a unit's abbreviation ("97 in. lbs. (11 Nm)").
+const sentences = (line: string) => line.split(/(?<=[A-Za-z0-9)]\.)(?<!\b(?:[Ii][Nn]|[Ff][Tt]|[Ll][Bb][Ss]?|[Nn][Oo]|[Ff][Ii][Gg])\.)\s+(?=[A-Z(])/);
+
+// The page's torque specs, each in a box with the words that label it: the
+// words before it on its line (after the spec before it there), else on
+// the nearest line above that has any, as a TORQUE box prints them
+// ("Starter Solenoid Fastener:" over "97 in-lbs (11 N·m)"). A spec with no
+// words of its own since the one before is that box's other unit
+// ("(11 N·m)"); a label of one word ("(Negative):") is read with the box's
+// above it ("Battery Terminal Fastener (Positive):").
+export function torqueBoxes(pageText: string) {
+  const boxes: { label: Set<string>; specs: string[] }[] = [];
+  // The lines since the last spec, each line's tokens up to where it is.
+  let lines: string[][] = [];
+  for (const line of unbroken(pageText).split("\n").flatMap(sentences)) {
+    const tokens = specTokens(line);
+    lines.push([]);
+    let from = 0;
+    for (const { group, at } of placedQuantities(tokens)) {
+      if (!isTorque(group)) continue;
+      lines[lines.length - 1].push(...tokens.slice(from, at));
+      from = at + group.length;
+      let own: string[] = [];
+      for (let k = lines.length - 1; k >= Math.max(0, lines.length - LABEL_LINES) && own.length === 0; k--) {
+        own = labelWords(lines[k].slice(-LABEL_TOKENS).join(" "));
+      }
+      const quiet = lines.every((tokensOf) => labelWords(tokensOf.join(" ")).length === 0);
+      if (quiet && boxes.length > 0) boxes[boxes.length - 1].specs.push(group.join(" "));
+      else {
+        const label = new Set(own);
+        if (own.length === 1 && boxes.length > 0) for (const word of boxes[boxes.length - 1].label) label.add(word);
+        boxes.push({ label, specs: [group.join(" ")] });
+      }
+      lines = [[]];
+    }
+    lines[lines.length - 1].push(...tokens.slice(from));
+  }
+  return boxes;
+}
+
+// Whether a torque's value is the one the page gives its item: the box
+// whose label is most like the item (the share of words they have in
+// common) has the value, and so does any box labelled just as much like it.
+// So a value taken from the box beside ("Starter Solenoid Fastener" with
+// the cable fastener's 35 in-lbs, the positive terminal with the
+// negative's) is dropped, as is a value without a torque unit.
+export function torqueLabelled(item: string, value: string, boxes: ReturnType<typeof torqueBoxes>) {
+  const first = placedQuantities(specTokens(value)).find(({ group }) => isTorque(group));
+  const wanted = new Set(labelWords(item));
+  if (!first || wanted.size === 0) return false;
+  const scores = boxes.map(({ label }) => {
+    const shared = [...wanted].filter((word) => label.has(word)).length;
+    return { shared, score: shared / (wanted.size + label.size - shared) };
+  });
+  const best = Math.max(0, ...scores.map(({ score }) => score));
+  if (best === 0) return false;
+  const spec = first.group.join(" ");
+  return boxes.every((box, index) => {
+    if (scores[index].score !== best) return true;
+    return scores[index].shared / wanted.size >= WORDING.item && box.specs.includes(spec);
+  });
+}
+
 // --- Checking a reading against the page ------------------------------------------
 
 const text = (value: unknown, max: number) =>
@@ -273,7 +356,8 @@ const WORDING = { title: 0.6, step: 0.6, item: 0.5, tool: 0.5, caution: 0.6, not
 
 // A reading (record_page_facts's input) checked against the page's text:
 // every torque value must be on the page as written (its numbers and units,
-// close together) and its item mostly in the page's words; a step, tool,
+// close together), in a torque unit, and the value of the box labelled
+// like its item (which is mostly in the page's words); a step, tool,
 // caution or note must be mostly in the page's words (Claude may shorten
 // one) and any number in it on the page. Anything else is dropped, and
 // counted. Each list is capped, each entry once.
@@ -281,6 +365,7 @@ export function checkFacts(input: unknown, pageText: string): { facts: PageFacts
   const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const pageWords = new Set(wordsOf(pageText));
   const pageTokens = specTokens(pageText);
+  const boxes = torqueBoxes(pageText);
   let dropped = 0;
   const keep = (ok: boolean) => {
     if (!ok) dropped++;
@@ -321,7 +406,8 @@ export function checkFacts(input: unknown, pageText: string): { facts: PageFacts
             torque.item !== "" &&
               /\d/.test(torque.value) &&
               wordsOnPage(torque.item, pageWords) >= WORDING.item &&
-              numbersOnPage(torque.value, pageTokens),
+              numbersOnPage(torque.value, pageTokens) &&
+              torqueLabelled(torque.item, torque.value, boxes),
           ),
       ),
     (torque) => `${torque.item}|${torque.value}`,

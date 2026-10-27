@@ -1,6 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useSearchParams } from "next/navigation";
 import { createPortal } from "react-dom";
 
@@ -225,8 +235,9 @@ export function UnitKey({ states, mode }: { states: ZoneState[]; mode: ViewMode 
           </li>
         ))}
       </ul>
-      {/* On a phone the pressed Phantom button says it, and the causes come first. */}
-      {mode === "phantom" && <p className="text-xs text-ink-muted max-sm:hidden">Phantom view: the body is see-through; flagged parts are drawn solid.</p>}
+      {/* On a phone the pressed Phantom button says it, and the causes come
+          first. No longer than it was, so the card stays its size. */}
+      {mode === "phantom" && <p className="text-xs text-ink-muted max-sm:hidden">Phantom view: flagged parts solid. Tap a part for its manual pages.</p>}
     </div>
   );
 }
@@ -486,12 +497,14 @@ export function Unit3D({
             data-unit-canvas
             className={`absolute inset-0 ${shown ? "" : "pointer-events-none opacity-0"} ${open ? "hidden" : ""}`}
             onPointerDown={(event) => tapStart(event)}
-            onPointerUp={(event) => {
+            // A tap on any part opens the full-screen view on its system (a
+            // callout, over the canvas, picks its system instead). On the
+            // click, not the pointer coming up: a touch that stops the page
+            // scrolling gets no click, so it doesn't open the view.
+            onClick={(event) => {
               const at = tapEnd(event);
               if (!at || !viewer.current) return;
-              // A tap on any part opens the full-screen view on its system
-              // (a callout, over the canvas, picks its system instead).
-              const system = viewer.current.pick(at.x, at.y);
+              const system = viewer.current.pick(at.x, at.y, at.slack);
               if (system) onExamine(system);
             }}
             onPointerMove={(event) => shown && hover.move(event, pick)}
@@ -640,17 +653,19 @@ function HoverLabel({ picker }: { picker: HoverPicker }) {
   );
 }
 
-// A tap (not a drag) on the canvas, in its own pixels.
-let tapFrom: { x: number; y: number; at: number } | null = null;
+// A tap (not a drag) on the canvas, in its own pixels, with the slack a
+// finger needs (a mouse needs none).
+const FINGER_SLACK = 10;
+let tapFrom: { x: number; y: number; at: number; finger: boolean } | null = null;
 function tapStart(event: ReactPointerEvent) {
-  tapFrom = { x: event.clientX, y: event.clientY, at: performance.now() };
+  tapFrom = { x: event.clientX, y: event.clientY, at: performance.now(), finger: event.pointerType !== "mouse" };
 }
-function tapEnd(event: ReactPointerEvent) {
+function tapEnd(event: ReactMouseEvent) {
   const from = tapFrom;
   tapFrom = null;
   if (!from || Math.hypot(event.clientX - from.x, event.clientY - from.y) > 8 || performance.now() - from.at > 600) return null;
   const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top, slack: from.finger ? FINGER_SLACK : 0 };
 }
 
 // --- Callouts ------------------------------------------------------------------------
@@ -959,7 +974,7 @@ function Examine({
               onPointerUp={(event) => {
                 const at = tapEnd(event);
                 if (!at || !viewer.current) return;
-                const hit = viewer.current.pick(at.x, at.y);
+                const hit = viewer.current.pick(at.x, at.y, at.slack);
                 if (hit) onPick(hit);
               }}
               onPointerMove={(event) => ready && hover.move(event, (x, y) => viewer.current?.pick(x, y) ?? null)}
@@ -995,7 +1010,12 @@ function Examine({
                 </div>
               )}
             </div>
-            <p className="min-w-0 flex-1 truncate text-center text-xs text-[#4b5158] max-lg:invisible">Drag to turn · scroll to zoom · right-drag to move · arrows, + −, 1–5, P for phantom</p>
+            {/* The tap first, so it's what's left when the line is cut short;
+                a finger's version below lg. */}
+            <p className="min-w-0 flex-1 truncate text-center text-xs text-[#4b5158]">
+              <span className="max-lg:hidden">Click a part for its manual pages · drag to turn · scroll to zoom · right-drag to move · arrows, + −, 1–5, P for phantom</span>
+              <span className="lg:hidden">Tap a part for its manual pages</span>
+            </p>
             <div role="group" aria-label="Zoom" className="ml-auto flex gap-1.5">
               <button type="button" data-zoom="in" aria-label="Zoom in" onClick={() => viewer.current?.zoom(0.8)} className={plateTool}>
                 <ZoomInIcon />

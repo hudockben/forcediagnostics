@@ -1541,11 +1541,14 @@ export function CausesPanel({
   // pages (From the manual), then its causes, each with its steps and
   // pictures of the manual pages it cites. Asking how to check one closes
   // the view, so the message box is there to see.
+  // What a part's sheet depends on besides the system: the reply shown, and
+  // the unit and its manuals (the tech can change them in place).
+  const partsVersion = [replyTurnId ?? "", conversation.modelNumber ?? "", conversation.scope.label ?? "", conversation.scope.manuals.map((manual) => manual.id).join(",")].join("|");
   function sheet(system: DrawnSystem) {
     const mine = ordered.filter((row) => row.system === system);
     return (
       <div className="space-y-5">
-        <PartSheetSection key={system} conversationId={conversation.id} system={system} version={replyTurnId} />
+        <PartSheetSection key={system} conversationId={conversation.id} system={system} version={partsVersion} causes={mine.length} />
         {mine.length === 0 ? <p className="text-sm text-ink-muted">No causes point here.</p> : causesOf(mine)}
       </div>
     );
@@ -1553,7 +1556,7 @@ export function CausesPanel({
 
   function causesOf(mine: CauseRow[]) {
     return (
-      <section aria-label="Causes here" data-sheet-causes className="space-y-3">
+      <section aria-label="Causes here" data-sheet-causes tabIndex={-1} className="scroll-mt-3 space-y-3 focus:outline-none">
         <h3 className="text-xs font-semibold tracking-wide text-ink-muted uppercase">Causes</h3>
         <ol className="space-y-2">
           {mine.map((row) => {
