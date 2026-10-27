@@ -28,9 +28,10 @@ import { usePagePicture, usePageView } from "./manual-pictures";
 // with no 3D unit, has no stage to say it to.
 
 // The picked part's drawings for the stage: being found (the part's pages
-// known, the drawings on them not yet), found, or none to show; stale
+// known, the drawings on them not yet), found, or none to show; sure when
+// a drawing is sure to come (an exploded view among its pages); stale
 // while another part's sheet comes (these are the last part's).
-export type StageDrawings = { system: DrawnSystem; part: string | null; state: "loading" | "found" | "none"; drawings: PartDrawing[]; stale?: boolean };
+export type StageDrawings = { system: DrawnSystem; part: string | null; state: "loading" | "found" | "none"; drawings: PartDrawing[]; sure?: boolean; stale?: boolean };
 type Report = (system: DrawnSystem, drawings: StageDrawings | null) => void;
 
 // What the sheet tells the stage: its part's drawings as they change, and
@@ -39,7 +40,8 @@ export const StageDrawingsContext = createContext<{ report: Report; reopen: (sys
 
 // Which part a bubble is for (× puts it away until this changes).
 export const stageDrawingsKey = (drawings: StageDrawings) => `${drawings.system}|${(drawings.part ?? "").toLowerCase()}`;
-const contentKey = (drawings: StageDrawings) => `${stageDrawingsKey(drawings)}|${drawings.state}|${drawings.stale ? "stale" : ""}|${drawings.drawings.map(drawingKey).join(",")}`;
+const contentKey = (drawings: StageDrawings) =>
+  `${stageDrawingsKey(drawings)}|${drawings.state}|${drawings.sure ? "sure" : ""}|${drawings.stale ? "stale" : ""}|${drawings.drawings.map(drawingKey).join(",")}`;
 export const sameStageDrawings = (a: StageDrawings, b: StageDrawings) => contentKey(a) === contentKey(b);
 
 // The sheet's side: says what its part's drawings are as they change, and

@@ -1,6 +1,7 @@
 // The queue Diagnose draws manual pictures and finds a part's drawings
 // through (src/lib/work-queue.ts): a few at a time, pictures ahead of
-// looking for drawings, work whose askers have all gone taken out before
+// looking for drawings and a place always kept for one, work whose
+// askers have all gone taken out before
 // it starts (and asked for again from the start), work under way left to
 // finish, each piece done once for everyone who asks. Pure: no browser.
 import assert from "node:assert/strict";
@@ -24,28 +25,46 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const isAbort = (error: unknown) => (error as { name?: string })?.name === "AbortError";
 
 describe("the work queue", () => {
-  test("two at a time; what's asked for first (a picture) ahead of the rest, otherwise in the order asked", async () => {
+  test("two at a time; what's asked for first (a picture) ahead of the rest, which leaves it a place, otherwise in the order asked", async () => {
     const queue = workQueue(2);
     const log: string[] = [];
+    // A part's four drawing pages looked at, then the large page's picture asked for.
     const jobs = ["scan 1", "scan 2", "scan 3", "scan 4"].map((name) => gated(log, name));
     const picture = gated(log, "picture");
     const done = jobs.map((job) => queue.slot(job.work));
+    assert.deepEqual(log, ["scan 1"]);
+    assert.equal(queue.running(), 1);
     const shown = queue.slot(picture.work, { first: true });
-    assert.deepEqual(log, ["scan 1", "scan 2"]);
+    // The picture straight away, not after the scans asked for before it.
+    assert.deepEqual(log, ["scan 1", "picture"]);
     assert.equal(queue.running(), 2);
+    // Two pictures: the second waits for a place, ahead of the scans.
+    const second = gated(log, "picture 2");
+    const shownToo = queue.slot(second.work, { first: true });
     jobs[0].finish();
     await done[0];
     await tick();
-    // The picture before the scans asked for before it.
-    assert.deepEqual(log, ["scan 1", "scan 2", "picture"]);
+    assert.deepEqual(log, ["scan 1", "picture", "picture 2"]);
     picture.finish();
-    jobs[1].finish();
-    await Promise.all([shown, done[1]]);
+    await shown;
     await tick();
-    assert.deepEqual(log, ["scan 1", "scan 2", "picture", "scan 3", "scan 4"]);
+    // A place free and a picture under way: the next scan.
+    assert.deepEqual(log, ["scan 1", "picture", "picture 2", "scan 2"]);
+    second.finish();
+    await shownToo;
+    await tick();
+    // Never two scans at once.
+    assert.deepEqual(log, ["scan 1", "picture", "picture 2", "scan 2"]);
+    jobs[1].finish();
+    await done[1];
+    await tick();
+    assert.deepEqual(log, ["scan 1", "picture", "picture 2", "scan 2", "scan 3"]);
     jobs[2].finish();
+    await done[2];
+    await tick();
     jobs[3].finish();
     assert.deepEqual(await Promise.all(done), ["scan 1", "scan 2", "scan 3", "scan 4"]);
+    assert.deepEqual(log, ["scan 1", "picture", "picture 2", "scan 2", "scan 3", "scan 4"]);
     assert.equal(queue.running(), 0);
   });
 

@@ -366,11 +366,18 @@ export const aspectOf = (area: PageArea, aspect: number) => (widthOf(area) * asp
 // viewport's width and height, turned as it's shown), `cssWidth` the width
 // the drawing is shown at; sharp at `ratio` screen pixels to a CSS pixel
 // (at most 2), within `pixels` in all and `most` times the page's size.
+// And never at a scale the whole page wouldn't fit in `pixels` at: pdf.js
+// draws an image mask (a stencil, as scanned line art often is) anywhere on
+// the page into a canvas of its own the mask's full size at that scale,
+// however little of it is in the crop (on a Letter page, 8 times is a
+// canvas of 66 MB for a mask over the page, past a tablet's limit; about 5
+// times at most keeps the whole page within it).
 export function cropOf(area: PageArea, page: { width: number; height: number }, cssWidth: number, { ratio = 1, pixels = 12_000_000, most = 8 } = {}) {
   const width = Math.max(1e-6, widthOf(area) * page.width);
   const height = Math.max(1e-6, heightOf(area) * page.height);
   const sharp = Math.min(ratio || 1, 2, Math.sqrt(pixels / (cssWidth * cssWidth * (height / width))));
-  const scale = Math.min((cssWidth / width) * sharp, most);
+  const whole = Math.sqrt(pixels / Math.max(1e-6, page.width * page.height));
+  const scale = Math.min((cssWidth / width) * sharp, most, whole);
   return {
     scale,
     offsetX: -area.left * page.width * scale,

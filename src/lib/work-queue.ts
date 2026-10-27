@@ -2,8 +2,10 @@
 // drawings on its pages through (src/app/(app)/diagnose/manual-pages.ts):
 // a few at a time (a tablet stays responsive, and slow shop Wi-Fi isn't
 // asked for a dozen pages at once), work asked for first (a picture on
-// the screen) ahead of the rest (looking for drawings), otherwise first
-// asked, first done; work whose askers have all gone (a part the tech has
+// the screen) ahead of the rest (looking for drawings), which never takes
+// the last place (a picture asked for while a part's pages are looked at
+// starts straight away, not after them), otherwise first asked, first
+// done; work whose askers have all gone (a part the tech has
 // left, a picture scrolled away) is taken out before it starts, and each
 // piece of work is done once for everyone who asks for it while it's kept.
 // Pure: no browser, no pdf.js; shared by the browser and the tests.
@@ -18,13 +20,20 @@ export type Job<T> = { promise: Promise<T>; waiters: number; started: boolean; s
 
 export function workQueue(atOnce = 2) {
   let running = 0;
+  // The rest under way, and the most of it at once: all but one place.
+  let rest = 0;
+  const restAtOnce = Math.max(1, atOnce - 1);
   type Waiting = { start: () => void; skip: () => void; signal?: AbortSignal; first: boolean };
   const queue: Waiting[] = [];
 
   function next() {
     while (running < atOnce && queue.length > 0) {
-      const at = queue.findIndex((job) => job.first);
-      const [job] = queue.splice(at === -1 ? 0 : at, 1);
+      let at = queue.findIndex((job) => job.first);
+      if (at === -1) {
+        if (rest >= restAtOnce) return;
+        at = 0;
+      }
+      const [job] = queue.splice(at, 1);
       if (job.signal?.aborted) job.skip();
       else job.start();
     }
@@ -40,6 +49,7 @@ export function workQueue(atOnce = 2) {
         skip: () => reject(aborted()),
         start: () => {
           running++;
+          if (!first) rest++;
           // Begun now (not a moment later), so it's known to be under way.
           let doing: Promise<T>;
           try {
@@ -49,6 +59,7 @@ export function workQueue(atOnce = 2) {
           }
           doing.then(resolve, reject).finally(() => {
             running--;
+            if (!first) rest--;
             next();
           });
         },

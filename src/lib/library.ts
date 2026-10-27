@@ -464,6 +464,24 @@ const NUMBERS_LINE = "(^|\\n)[ \\t]*[0-9]{1,3}[A-Za-z]?([ \\t]+[0-9]{1,3}[A-Za-z
 const VIEW_HEADING = "(?n)^[^a-z.]*\\m(EXPLODED|ASSEMBLY|COMPONENT|PARTS?)[ \\t]+VIEWS?\\M[^a-z.]*$";
 const TITLED_VIEW = "(?n)^[ \\t]*([A-Z][A-Za-z/-]*[ \\t]+)*(Exploded|Assembly|Component|Parts?)[ \\t]+Views?[ \\t]*$";
 const CAPITALS_VIEW = "(?n)^[^a-z.]*\\mVIEWS?\\M[^a-z.]*$";
+
+// A view's heading naming what's searched for, as drawingScore counts it
+// most ("TRANSMISSION VIEW", "Transmission View"; not a figure's "TOP
+// VIEW"): a line in capitals with VIEW in it, or its words capitalised
+// ending in View, with every word of the search on it (in either case, a
+// plural or not). Its letters only, so nothing in the search is read as
+// the pattern's own.
+export function partViewHeading(query: string): string | null {
+  const words = [...new Set((cleanSearchQuery(query).match(/[A-Za-z0-9]+/g) ?? []).map((word) => word.toLowerCase()))].filter((word) => !["or", "and", "the"].includes(word)).slice(0, 6);
+  if (words.length === 0) return null;
+  const either = (letter: string) => (/[a-z]/.test(letter) ? `[${letter.toUpperCase()}${letter}]` : letter);
+  const named = words.map((word) => {
+    const base = word.length > 3 ? word.replace(/(?:es|s)$/, "") : word;
+    return `(?=.*\\m${[...base].map(either).join("")}[Ee]?[Ss]?\\M)`;
+  });
+  return `(?n)^${named.join("")}([^a-z.]*\\mVIEWS?\\M[^a-z.]*|[ \\t]*([A-Z][A-Za-z/-]*[ \\t]+)+Views?[ \\t]*)$`;
+}
+
 // Pages whose text is read for that: the best ranked, and the best ranked
 // with the word "view" (the index says which, without reading any text).
 const DRAWING_CANDIDATES = 60;
@@ -471,14 +489,16 @@ const DRAWING_CANDIDATES = 60;
 // Pages that may be drawings of what's searched for, for Diagnose's part
 // sheet (src/lib/diagnose-part-sheet.ts, where drawingScore decides): pages
 // of the given manuals with every word of the search and a view's heading
-// or callout numbers in their text, those with a view's heading first
-// (however many procedure pages name the part more often), then best
+// or callout numbers in their text, those with a view's heading first (an
+// exploded view, or one naming what's searched for, ahead of a figure's
+// TOP VIEW; however many procedure pages name the part more often), then best
 // ranked, each with the start of its text (textLength) and its manual's
 // title. One query, matched through ready_manual_pages as searchQuery is;
 // the text is read only for a bounded set of the best candidates.
 export async function searchDrawingPages(shopId: string, query: string, manualIds: string[], limit: number, textLength: number): Promise<DrawingHit[]> {
   const q = cleanSearchQuery(query);
   if (!q || manualIds.length === 0) return [];
+  const named = partViewHeading(q) ?? VIEW_HEADING;
   const result = await withShop(shopId, (tx) =>
     tx.execute<{ manual_id: string; page_number: number; rank: number; text: string; title: string }>(sql`
       with query as (select websearch_to_tsquery('english', ${q}) as tsq, to_tsquery('english', 'view') as view),
@@ -496,7 +516,7 @@ export async function searchDrawingPages(shopId: string, query: string, manualId
       ),
       looked as (
         select top.manual_id, top.page_number, top.rank, p.text,
-          case when p.text ~ ${VIEW_HEADING} or p.text ~ ${TITLED_VIEW} then 2 when p.text ~ ${CAPITALS_VIEW} then 1 else 0 end as heading
+          case when p.text ~ ${VIEW_HEADING} or p.text ~ ${TITLED_VIEW} or p.text ~ ${named} then 2 when p.text ~ ${CAPITALS_VIEW} then 1 else 0 end as heading
         from top
         join manual_pages p on p.manual_id = top.manual_id and p.page_number = top.page_number
       )

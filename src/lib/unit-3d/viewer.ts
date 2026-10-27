@@ -12,6 +12,8 @@ import { anchorAt, worldBounds, type Layout } from "./layout";
 import { LINE_COLOURS, isLit, phantomPaint, zoneLook, type ViewMode, type ZoneLook } from "./look";
 import { depthOnlyMaterial, disposeMaterials, flagMaterial, makeMaterials, markStencil, phantomOf, xrayMaterial, type Materials } from "./materials";
 import { contactShadow, disposeShadow } from "./shadow";
+import { partBox as focusBox, flightTo, partPoints, screenExtent } from "./focus";
+import type { Rect } from "./bubble";
 
 // The 3D unit on screen, rendered like a manufacturer's studio shot with a
 // technical illustration's line-work: soft key, fill and rim lights and a
@@ -59,6 +61,12 @@ export type ProjectedFrame = {
   points: Map<DrawnSystem, { x: number; y: number; behind: boolean }>;
   // The machine's outline on screen.
   box: { x: number; y: number; w: number; h: number };
+  // A system's part on screen, as this frame has it: the box round its
+  // shape near its callout's point (focus.ts), all of the screen when the
+  // part reaches round behind the camera, null when it's behind it or the
+  // unit has no such system. Worked out when asked for (the drawing's
+  // bubble asks for the part picked), once a frame.
+  extent: (system: DrawnSystem) => Rect | null;
 };
 
 export type ViewerOptions = {
@@ -119,6 +127,8 @@ export class UnitViewer {
   private shadow: THREE.Group | null = null;
   private edges: EdgeLines | null = null;
   private looks = new Map<DrawnSystem, { state: ZoneState | null; look: ZoneLook }>();
+  // Each system's part as points (focus.ts), worked out once per unit.
+  private partShapes = new Map<DrawnSystem, Float32Array | null>();
   private flagMaterials = new Map<string, THREE.Material>();
   private xrayMaterials = new Map<string, THREE.Material>();
   private phantoms = new Map<THREE.Material, THREE.Material>();
@@ -291,6 +301,7 @@ export class UnitViewer {
       this.unit = null;
     }
     this.parts = [];
+    this.partShapes.clear();
     this.edges?.dispose();
     this.edges = null;
     if (this.shadow) {
@@ -538,35 +549,10 @@ export class UnitViewer {
     if (!anchor) return null;
     const target = new THREE.Vector3(...anchor);
     const box = this.bounds();
-    const size = box.getSize(new THREE.Vector3()).length();
-    const centre = box.getCenter(new THREE.Vector3());
-    const own = this.unit.byZone.get(system) ?? [];
-    const partBox = new THREE.Box3();
-    for (const mesh of own) {
-      mesh.geometry.computeBoundingBox();
-      partBox.union(mesh.geometry.boundingBox!.clone().applyMatrix4(mesh.matrixWorld));
-    }
-    // Round the callout's point: a system's hoses or harness can run the
-    // machine's length, but the view is of the part there.
-    const near = new THREE.Box3().setFromCenterAndSize(target, new THREE.Vector3(0.9, 0.9, 0.9));
-    if (partBox.isEmpty() || !partBox.intersectsBox(near)) partBox.setFromCenterAndSize(target, new THREE.Vector3(0.3, 0.3, 0.3));
-    else partBox.intersect(near);
-    // Close enough to see the part, far enough to keep the machine round it
-    // (on a narrow, portrait screen further still).
-    const radius = partBox.getSize(new THREE.Vector3()).length() / 2;
-    const fov = THREE.MathUtils.degToRad(this.camera.fov);
-    const portrait = this.width < this.height ? Math.min(2, this.height / this.width) : 1;
-    const distance = Math.max(size * 1.3, (radius / Math.sin(fov / 2)) * 2.4) * portrait;
-    const side = Math.abs(target.z - centre.z) > size * 0.04 ? Math.sign(target.z - centre.z) : -1;
-    const end = Math.abs(target.x - centre.x) > size * 0.08 ? Math.sign(target.x - centre.x) : 1;
-    const candidates = [
-      new THREE.Vector3(0.75 * end, 0.45, 0.75 * side),
-      new THREE.Vector3(0.05, 0.4, side),
-      new THREE.Vector3(-0.75 * end, 0.45, 0.75 * side),
-      new THREE.Vector3(0.35 * end, 1, 0.35 * side),
-      new THREE.Vector3(end, 0.4, 0.15 * side),
-      new THREE.Vector3(0.6 * end, 0.45, -0.75 * side),
-    ].map((v) => v.normalize());
+    const machine = { size: box.getSize(new THREE.Vector3()).length(), centre: box.getCenter(new THREE.Vector3()) };
+    // Framed on the part round the callout's point (focus.ts).
+    const partBox = focusBox(this.unit.byZone.get(system) ?? [], target);
+    const { distance, directions: candidates } = flightTo(partBox, target, machine, this.camera.fov, { width: this.width, height: this.height });
     const current = this.camera.position.clone().sub(this.target).normalize();
     const blockers = this.occluders(system);
     const samples = [partBox.getCenter(new THREE.Vector3()), target];
@@ -765,7 +751,8 @@ export class UnitViewer {
     if (moving || this.frameNeeded) this.raf = requestAnimationFrame(this.tick);
   };
 
-  // Every system's callout point on screen.
+  // Every system's callout point on screen, the machine's outline, and
+  // (when asked for) a system's part.
   project(): ProjectedFrame {
     const points = new Map<DrawnSystem, { x: number; y: number; behind: boolean }>();
     const box = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
@@ -792,7 +779,28 @@ export class UnitViewer {
         }
       }
     }
-    return { width: this.width, height: this.height, points, box: { x: box.minX, y: box.minY, w: box.maxX - box.minX, h: box.maxY - box.minY } };
+    // The camera as it is for this frame, for a part asked for later.
+    const viewProjection = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);
+    const { width, height } = this;
+    const extents = new Map<DrawnSystem, Rect | null>();
+    const extent = (system: DrawnSystem) => {
+      if (!extents.has(system)) {
+        const shape = this.pointsOfPart(system);
+        extents.set(system, shape ? screenExtent(shape, viewProjection, width, height) : null);
+      }
+      return extents.get(system) ?? null;
+    };
+    return { width, height, points, box: { x: box.minX, y: box.minY, w: box.maxX - box.minX, h: box.maxY - box.minY }, extent };
+  }
+
+  private pointsOfPart(system: DrawnSystem) {
+    if (!this.unit) return null;
+    if (!this.partShapes.has(system)) {
+      const anchor = anchorAt(this.unit.layout, system);
+      const shapes = this.unit.byZone.get(system);
+      this.partShapes.set(system, anchor && shapes ? partPoints(shapes, new THREE.Vector3(...anchor)) : null);
+    }
+    return this.partShapes.get(system) ?? null;
   }
 
   // The system under a point on the canvas (CSS pixels): the part the tech

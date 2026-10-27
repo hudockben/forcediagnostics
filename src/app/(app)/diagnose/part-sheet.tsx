@@ -56,6 +56,9 @@ const UNREADABLE: FactsState = { status: "unavailable", reason: "error" };
 // two minutes (a reading takes a few seconds; the server gives up on one
 // after a few minutes).
 const READ_AGAIN_MS = 2000;
+// Looking for a part's drawings longer than this: the bubble's still frame
+// shows (sooner, when a drawing is sure to come).
+const FRAME_AFTER_MS = 400;
 const MAX_WAITS = 60;
 // The large page's picture, in CSS pixels (drawn sharp for the screen).
 const LARGE_WIDTH = 480;
@@ -124,6 +127,17 @@ async function loadCard(input: CardAsk): Promise<FactsState> {
 const chipClass =
   "relative inline-flex h-9 max-w-full items-center rounded-full border px-3 text-[13px] font-medium transition before:absolute before:inset-x-0 before:-inset-y-1 before:content-[''] focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
 
+// Whether `key` has stood (not null, unchanged) for `ms`.
+function useAfter(key: string | null, ms: number) {
+  const [stood, setStood] = useState<string | null>(null);
+  useEffect(() => {
+    if (key === null) return;
+    const timer = setTimeout(() => setStood(key), ms);
+    return () => clearTimeout(timer);
+  }, [key, ms]);
+  return key !== null && stood === key;
+}
+
 // version: what the sheets on screen depend on besides the system and part
 // (the reply, the unit and its manuals); a new one asks again.
 export function PartSheetSection({
@@ -179,14 +193,22 @@ export function PartSheetSection({
   // None while the first sheet comes (a part with no drawing never shows a
   // frame); while another part's sheet comes, the last part's, dimmed, as
   // the sheet is; a still frame only once the part has pages to look on
-  // and none of their drawings is found yet.
+  // and none of their drawings is found yet, and then only when one is
+  // sure to come (an exploded view among them, shown whole if there's
+  // nothing to crop) or the looking takes a moment: a part whose pages
+  // turn out to have nothing to crop doesn't flash a frame (on a phone, a
+  // strip the callouts would drop under and come back from).
   const onStage = panelDrawings(found.drawings, null);
+  const sure = sheet?.drawings.some((page) => page.kind === "exploded") ?? false;
+  const finding = sheet !== null && onStage.length === 0 && found.state === "finding";
+  const slow = useAfter(finding ? `${sheetKey}|${(sheet?.drawings ?? []).map((page) => `${page.manualId}:${page.page}`).join(",")}` : null, FRAME_AFTER_MS);
   const stage = use(StageDrawingsContext);
   useStageDrawings({
     system,
     part: stale ? (sheet?.part ?? part) : part,
-    state: !sheet ? "none" : onStage.length > 0 ? "found" : found.state === "finding" ? "loading" : "none",
+    state: !sheet ? "none" : onStage.length > 0 ? "found" : finding && (sure || slow) ? "loading" : "none",
     drawings: onStage,
+    sure,
     stale,
   });
 

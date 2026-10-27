@@ -2,14 +2,19 @@
 // the manual's own drawing of the part picked (src/app/(app)/diagnose/
 // drawing-bubble.tsx), in free space beside the part, and a thin leader
 // from the bubble to the part's callout point. Beside it, never over it:
-// the bubble keeps clear of the point, inside the stage, off the callouts'
-// labels (and the dots where their leaders meet the machine, the other
-// flagged parts round their points, and as far as it can their leaders),
-// as near the part as that allows, and where it was while that still
-// holds (with a little slack), so it stays put as the camera turns or
-// flies and only its leader follows the part. On a narrow (or short) stage
-// it's a strip docked across the top instead, its leader down to the part
-// when there's room under it. Pure: stage pixels in, a box and a line out.
+// the bubble keeps off the part itself (the box round its shape on the
+// stage, focus.ts, however big the part: a General's transmission, a fuel
+// tank) and clear of its point, inside the stage, off the callouts' labels
+// (and the dots where their leaders meet the machine, the other flagged
+// parts round their points, and as far as it can their leaders), as near
+// the part as that allows, and where it was while that still holds (with a
+// little slack), so it stays put as the camera turns or flies and only its
+// leader follows the part. Where nowhere on the stage is clear of the part
+// (zoomed in on it, the part filling the stage), it covers as little of it
+// as it can, against the stage's edge farthest from the part's middle. On
+// a narrow (or short) stage it's a strip docked across the top instead,
+// its leader down to the part when there's room under it. Pure: stage
+// pixels in, a box and a line out.
 
 export type Rect = { x: number; y: number; w: number; h: number };
 export type Point = { x: number; y: number };
@@ -17,8 +22,12 @@ export type Stage = { width: number; height: number };
 
 // From the stage's edges.
 export const BUBBLE_MARGIN = 10;
-// From the part's point: room for the part itself round it.
+// From the part's point: room for the part itself round it (a small part,
+// or one whose shape isn't known).
 export const BUBBLE_CLEAR = 56;
+// From the part's box, placed anew; kept while it's clear of the box at
+// all (the box moves a little under the camera).
+export const PART_GAP = 12;
 // Narrower or shorter than this, the bubble is a strip across the top.
 export const DOCK_BELOW = { width: 560, height: 360 } as const;
 // The strip's height, and the least room under it for a leader.
@@ -67,6 +76,9 @@ export type PlaceInput = {
   // The part's point on the stage; null when it's off it (then anywhere
   // free will do, and there's no leader).
   anchor: Point | null;
+  // The part itself on the stage: the box round its shape (it may reach
+  // past the stage's edges). Never covered while there's room clear of it.
+  part?: Rect | null;
   // What the bubble mustn't cover: the callouts' labels and dots, the
   // other flagged parts' points.
   avoid: Rect[];
@@ -85,23 +97,41 @@ export type PlaceInput = {
 // it covers the labels by no more than this round their edges.
 export const KEEP_SLACK = 8;
 const KEEP_EDGE = 2;
+// With nowhere clear of the part, places that cover this share of the
+// bubble more of the part than the least are as good (the farthest from
+// the part's middle of them wins, and where it was is kept among them).
+const COVER_TIE = 0.02;
+// A pixel nearer the part's point than its clearance counts as this many
+// square pixels of the part covered.
+const NEAR_WEIGHT = 100;
 
 const inset = (rect: Rect, by: number): Rect => ({ x: rect.x + by, y: rect.y + by, w: Math.max(0, rect.w - by * 2), h: Math.max(0, rect.h - by * 2) });
+const centreOf = (rect: Rect): Point => ({ x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 });
+// What of a box is on the stage (its edge nearest the stage, when none is).
+function onStageOf(rect: Rect, stage: Stage): Rect {
+  const x = clamp(rect.x, 0, stage.width);
+  const y = clamp(rect.y, 0, stage.height);
+  return { x, y, w: Math.max(0, clamp(rect.x + rect.w, 0, stage.width) - x), h: Math.max(0, clamp(rect.y + rect.h, 0, stage.height) - y) };
+}
 
 // The bubble's box, floating beside the part.
-export function placeBubble({ stage, size, anchor, avoid, soft = [], last, margin = BUBBLE_MARGIN, clear = BUBBLE_CLEAR }: PlaceInput): Rect {
+export function placeBubble({ stage, size, anchor, part = null, avoid, soft = [], last, margin = BUBBLE_MARGIN, clear = BUBBLE_CLEAR }: PlaceInput): Rect {
   const w = Math.max(0, Math.min(size.w, stage.width - margin * 2));
   const h = Math.max(0, Math.min(size.h, stage.height - margin * 2));
   const at = (x: number, y: number): Rect => ({ x: clamp(x, margin, stage.width - margin - w), y: clamp(y, margin, stage.height - margin - h), w, h });
   const sum = (rect: Rect, rects: Rect[]) => rects.reduce((total, other) => total + overlap(rect, other), 0);
   const covered = (rect: Rect) => sum(rect, avoid) * 50 + sum(rect, soft) * 20;
   const tooNear = (rect: Rect, by = clear) => (anchor ? Math.max(0, by - distanceTo(rect, anchor)) : 0);
-
-  if (last) {
-    const kept = at(last.x, last.y);
-    const edges = [...avoid, ...soft].map((other) => inset(other, KEEP_EDGE));
-    if (sum(kept, edges) === 0 && tooNear(kept, clear - KEEP_SLACK) === 0) return kept;
-  }
+  // How much of the part it covers (its box grown by `by`), and how near
+  // its point it is: none of either is clear of the part.
+  const grown = (by: number) => (part ? { x: part.x - by, y: part.y - by, w: part.w + by * 2, h: part.h + by * 2 } : null);
+  const onPart = (rect: Rect, by: number, near = clear) => {
+    const box = grown(by);
+    return (box ? overlap(rect, box) : 0) + tooNear(rect, near) * NEAR_WEIGHT;
+  };
+  const edges = [...avoid, ...soft].map((other) => inset(other, KEEP_EDGE));
+  const kept = last ? at(last.x, last.y) : null;
+  if (kept && sum(kept, edges) === 0 && onPart(kept, 0, clear - KEEP_SLACK) === 0) return kept;
 
   const candidates: Rect[] = [];
   const corners = [at(margin, margin), at(stage.width, margin), at(margin, stage.height), at(stage.width, stage.height)];
@@ -113,6 +143,17 @@ export function placeBubble({ stage, size, anchor, avoid, soft = [], last, margi
     const xs = [anchor.x - w / 2, anchor.x + clear - w, anchor.x - clear, margin, stage.width];
     for (const y of [anchor.y - clear - h, anchor.y + clear]) for (const x of xs) candidates.push(at(x, y));
   }
+  if (part) {
+    // The same round the part's box: past its right, its left, above and
+    // below it, level with its point, its edges or the stage's.
+    const level = anchor ?? centreOf(part);
+    const ys = [level.y - h / 2, part.y, part.y + part.h - h, margin, stage.height];
+    for (const x of [part.x + part.w + PART_GAP, part.x - PART_GAP - w]) for (const y of ys) candidates.push(at(x, y));
+    const xs = [level.x - w / 2, part.x, part.x + part.w - w, margin, stage.width];
+    for (const y of [part.y - PART_GAP - h, part.y + part.h + PART_GAP]) for (const x of xs) candidates.push(at(x, y));
+    // Against each edge of the stage, half way along it.
+    candidates.push(at(margin, (stage.height - h) / 2), at(stage.width, (stage.height - h) / 2), at((stage.width - w) / 2, margin), at((stage.width - w) / 2, stage.height));
+  }
   candidates.push(...corners);
   // Each moved just past a label it would cover (between two rows of
   // callouts, say), up or down, then left or right.
@@ -123,14 +164,39 @@ export function placeBubble({ stage, size, anchor, avoid, soft = [], last, margi
     }
   }
 
-  // Clear of the part first, then of the labels, then the nearest the
-  // part (the shortest leader), a little to its right where it's a tie.
+  // Clear of the part first (its box, with room round it, and its point),
+  // then of the labels, then the nearest the part (the shortest leader), a
+  // little to its right where it's a tie.
+  const clearOf = candidates.filter((rect) => onPart(rect, PART_GAP) === 0);
+  if (clearOf.length > 0) {
+    let best = clearOf[0];
+    let bestScore = Infinity;
+    for (const rect of clearOf) {
+      const near = anchor ? distanceTo(rect, anchor) : 0;
+      const right = anchor && rect.x >= anchor.x ? -4 : 0;
+      const score = covered(rect) + near + right;
+      if (score < bestScore - 1e-6) {
+        best = rect;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  // Nowhere clear of it: as little of the part covered as can be (to a
+  // share of the bubble), then off the labels, then the farthest from the
+  // part's middle (on the stage); where it was, among those as good.
+  const cover = (rect: Rect) => onPart(rect, 0);
+  const least = Math.min(...candidates.map(cover));
+  const tie = least + Math.max(1, w * h * COVER_TIE);
+  if (kept && cover(kept) <= tie && sum(kept, edges) === 0) return kept;
+  const middle = part ? centreOf(onStageOf(part, stage)) : (anchor ?? { x: stage.width / 2, y: stage.height / 2 });
   let best = candidates[0];
   let bestScore = Infinity;
   for (const rect of candidates) {
-    const near = anchor ? distanceTo(rect, anchor) : 0;
-    const right = anchor && rect.x >= anchor.x ? -4 : 0;
-    const score = tooNear(rect) * 1e6 + covered(rect) + near + right;
+    if (cover(rect) > tie) continue;
+    const centre = centreOf(rect);
+    const score = covered(rect) - Math.hypot(centre.x - middle.x, centre.y - middle.y);
     if (score < bestScore - 1e-6) {
       best = rect;
       bestScore = score;

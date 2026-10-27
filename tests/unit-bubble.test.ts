@@ -2,15 +2,27 @@
 // never over its point, inside the stage, off the callouts' labels, kept
 // where it was while that holds (as drawn on whole pixels, through a slow
 // turn and a label sweeping by); off other flagged parts and the callouts'
-// leaders; a strip across the top on a narrow stage; and the leader from
-// the bubble's edge to the part, never through the part's own label.
-// Pure: no browser.
+// leaders; off all of a large part (the General 4-seat's transmission,
+// engine and fuel tank, built as the 3D unit builds them, from every
+// direction the camera flies to them and through a turn round them), or
+// covering the least of one that fills the stage; a strip across the top
+// on a narrow stage; and the leader from the bubble's edge to the part,
+// never through the part's own label. Pure: no browser.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import * as THREE from "three";
+
+import type { DrawnSystem } from "../src/lib/diagnose-zones";
+import { buildGeometry } from "../src/lib/unit-3d/build";
+import { flightTo, partBox, partPoints, screenExtent } from "../src/lib/unit-3d/focus";
+import { anchorAt, layoutFor, worldBounds } from "../src/lib/unit-3d/layout";
+import { UNKNOWN_PAINT } from "../src/lib/unit-paint";
+import type { UnitSpec } from "../src/lib/unit-vehicle";
 import {
   BUBBLE_CLEAR,
   BUBBLE_MARGIN,
+  PART_GAP,
   STRIP_HEIGHT,
   bubbleDocked,
   bubbleFits,
@@ -179,6 +191,214 @@ describe("the bubble's place", () => {
     const tiny = { width: 260, height: 220 };
     const rect = placeBubble({ stage: tiny, size: { w: 400, h: 400 }, anchor: { x: 130, y: 110 }, avoid: [], last: null });
     assert.ok(inside(rect, tiny), JSON.stringify(rect));
+  });
+});
+
+describe("off all of a large part", () => {
+  const stage = { width: 750, height: 780 };
+  const size = { w: 270, h: 300 };
+
+  test("the part's box, not only its point: a part reaching well past the clearance on its right gets the bubble past all of it", () => {
+    const anchor = { x: 375, y: 390 };
+    // A transmission's box from the camera's end: its point near its left.
+    const part: Rect = { x: 305, y: 365, w: 165, h: 150 };
+    const old = placeBubble({ stage, size, anchor, avoid: [], last: null });
+    assert.ok(overlap(old, part) > 0, "the point alone would put it over the part");
+    const rect = placeBubble({ stage, size, anchor, part, avoid: [], last: null });
+    assert.equal(overlap(rect, part), 0, JSON.stringify(rect));
+    assert.ok(distanceTo(rect, anchor) >= BUBBLE_CLEAR - 1e-9 && inside(rect, stage), JSON.stringify(rect));
+    // With room round it, and as near the part as that allows.
+    const grown: Rect = { x: part.x - PART_GAP, y: part.y - PART_GAP, w: part.w + PART_GAP * 2, h: part.h + PART_GAP * 2 };
+    assert.equal(overlap(rect, grown), 0, JSON.stringify(rect));
+    assert.ok(distanceTo(rect, anchor) <= 200, JSON.stringify(rect));
+    // A label where it would go: past both.
+    const label: Rect = { x: 180, y: 40, w: 300, h: 26 };
+    const both = placeBubble({ stage, size, anchor, part, avoid: [label], last: null });
+    assert.equal(overlap(both, part) + overlap(both, label), 0, JSON.stringify(both));
+  });
+
+  test("kept while it's clear of the part's box at all; moved once the box comes onto it, and never onto the part", () => {
+    const anchor = { x: 375, y: 390 };
+    const part: Rect = { x: 300, y: 360, w: 170, h: 150 };
+    const first = placeBubble({ stage, size, anchor, part, avoid: [], last: null });
+    // The box a little bigger under the camera (within the room left round it): kept.
+    const closer: Rect = { x: part.x - 8, y: part.y - 8, w: part.w + 16, h: part.h + 16 };
+    assert.deepEqual(placeBubble({ stage, size, anchor, part: closer, avoid: [], last: first }), first);
+    // Grown onto it: moved, clear of it.
+    const onto: Rect = { x: first.x + 20, y: first.y + first.h - 30, w: 200, h: 150 };
+    assert.ok(overlap(first, onto) > 0);
+    const moved = placeBubble({ stage, size, anchor, part: onto, avoid: [], last: first });
+    assert.notDeepEqual(moved, first);
+    assert.equal(overlap(moved, onto), 0, JSON.stringify({ moved, onto }));
+  });
+
+  test("a part filling the stage (zoomed in on it): against the stage's edge farthest from its middle, covering the least of it", () => {
+    // The part's box past the stage's top and left; on the stage, its middle up and to the left.
+    const part: Rect = { x: -200, y: -100, w: 900, h: 800 };
+    const anchor = { x: 340, y: 330 };
+    const rect = placeBubble({ stage, size, anchor, part, avoid: [], last: null });
+    assert.ok(inside(rect, stage), JSON.stringify(rect));
+    assert.deepEqual({ x: rect.x, y: rect.y }, { x: stage.width - BUBBLE_MARGIN - size.w, y: stage.height - BUBBLE_MARGIN - size.h }, JSON.stringify(rect));
+    // Kept there while nowhere's better, as the camera moves a little.
+    const nudged: Rect = { ...part, x: part.x + 6, y: part.y + 4 };
+    assert.deepEqual(placeBubble({ stage, size, anchor: { x: 346, y: 334 }, part: nudged, avoid: [], last: rect }), rect);
+    // Its middle down and to the right: the top left.
+    const other = placeBubble({ stage, size, anchor: { x: 420, y: 450 }, part: { x: 50, y: 80, w: 900, h: 900 }, avoid: [], last: null });
+    assert.deepEqual({ x: other.x, y: other.y }, { x: BUBBLE_MARGIN, y: BUBBLE_MARGIN }, JSON.stringify(other));
+    // Off the labels still, where that costs no more of the part.
+    const label: Rect = { x: 600, y: 700, w: 140, h: 30 };
+    const off = placeBubble({ stage, size, anchor, part: { x: -200, y: -100, w: 1200, h: 1000 }, avoid: [label], last: null });
+    assert.equal(overlap(off, label), 0, JSON.stringify(off));
+  });
+
+  test("a part off the stage but for its box's edge: kept off what's on the stage", () => {
+    const part: Rect = { x: 600, y: 200, w: 400, h: 300 };
+    const rect = placeBubble({ stage, size, anchor: null, part, avoid: [], last: null });
+    assert.equal(overlap(rect, part), 0, JSON.stringify(rect));
+    assert.ok(inside(rect, stage), JSON.stringify(rect));
+  });
+
+  // The General 4-seat as the 3D unit builds it, in Node.
+  const general = { paint: UNKNOWN_PAINT, sixWheels: false, vehicle: "utv", line: "general", seats: 4, size: "full" } as unknown as UnitSpec;
+  const layout = layoutFor(general);
+  const shapes = buildGeometry(layout);
+  const scale = new THREE.Matrix4().makeScale(layout.scale, layout.scale, layout.scale);
+  const bounds = worldBounds(layout);
+  const machineBox = new THREE.Box3(new THREE.Vector3(...bounds.min), new THREE.Vector3(...bounds.max));
+  const machine = { size: machineBox.getSize(new THREE.Vector3()).length(), centre: machineBox.getCenter(new THREE.Vector3()) };
+  const partOf = (system: DrawnSystem) => {
+    const own = shapes.filter((shape) => shape.group === system).map((shape) => ({ geometry: shape.geometry, matrixWorld: scale }));
+    const target = new THREE.Vector3(...anchorAt(layout, system)!);
+    // Every corner of its shapes round its point, as the camera sees it.
+    const near = new THREE.Box3().setFromCenterAndSize(target, new THREE.Vector3(0.9, 0.9, 0.9));
+    const corners: THREE.Vector3[] = [];
+    for (const shape of own) {
+      const position = shape.geometry.getAttribute("position");
+      for (let i = 0; i < position.count; i++) {
+        const point = new THREE.Vector3().fromBufferAttribute(position, i).applyMatrix4(scale);
+        if (near.containsPoint(point)) corners.push(point);
+      }
+    }
+    return { own, target, corners, box: partBox(own, target), points: partPoints(own, target) };
+  };
+  // The examine view's stage beside the sheet at 1440 by 900, under it at 820 by 1180, and at 1920 by 1080; the bubble a third of it wide.
+  const stages = [
+    { width: 749, height: 786 },
+    { width: 820, height: 520 },
+    { width: 1216, height: 962 },
+  ];
+  const bubbleFor = (s: { width: number }) => {
+    const w = Math.min(440, Math.max(220, s.width * 0.36));
+    return { w, h: w * 1.05 + 40 };
+  };
+  const look = (camera: THREE.PerspectiveCamera, s: { width: number; height: number }, part: ReturnType<typeof partOf>) => {
+    camera.updateMatrixWorld();
+    const viewProjection = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    const toScreen = (v: THREE.Vector3) => {
+      const p = v.clone().project(camera);
+      return { x: ((p.x + 1) / 2) * s.width, y: ((1 - p.y) / 2) * s.height };
+    };
+    const extent = screenExtent(part.points, viewProjection, s.width, s.height)!;
+    // Grown by its outline's line, as the stage does.
+    const box: Rect = { x: extent.x - 3, y: extent.y - 3, w: extent.w + 6, h: extent.h + 6 };
+    return { anchor: toScreen(part.target), box, corners: part.corners.map(toScreen) };
+  };
+  const under = (rect: Rect, points: { x: number; y: number }[]) => points.filter((p) => p.x >= rect.x && p.x <= rect.x + rect.w && p.y >= rect.y && p.y <= rect.y + rect.h).length;
+
+  for (const system of ["transmission", "engine", "fuel"] as const) {
+    test(`the General 4-seat's ${system}, flown to from each direction the camera tries: none of it under the bubble`, () => {
+      const part = partOf(system);
+      let before = 0;
+      for (const s of stages) {
+        const camera = new THREE.PerspectiveCamera(22, s.width / s.height, 0.05, 200);
+        const { distance, directions } = flightTo(part.box, part.target, machine, camera.fov, s);
+        for (const [i, direction] of directions.entries()) {
+          camera.position.copy(part.target).addScaledVector(direction, distance);
+          camera.lookAt(part.target);
+          const seen = look(camera, s, part);
+          const size = bubbleFor(s);
+          // The box holds every corner of the part (to its outline's line).
+          assert.equal(under(seen.box, seen.corners), seen.corners.length, `${s.width}x${s.height} ${i}`);
+          const rect = placeBubble({ stage: s, size, anchor: seen.anchor, part: seen.box, avoid: [], last: null });
+          const where = `${s.width}x${s.height}, direction ${i}: ${JSON.stringify({ rect, box: seen.box })}`;
+          assert.equal(under(rect, seen.corners), 0, where);
+          assert.equal(overlap(rect, seen.box), 0, where);
+          assert.ok(inside(rect, s) && distanceTo(rect, seen.anchor) >= BUBBLE_CLEAR - 1e-9, where);
+          before += under(placeBubble({ stage: s, size, anchor: seen.anchor, avoid: [], last: null }), seen.corners);
+        }
+      }
+      // Where its point alone put it, it covered some of the part.
+      assert.ok(before > 0, `${system}: ${before}`);
+    });
+  }
+
+  test("the transmission through a turn of the camera round it (a drag) and a zoom: never over it, and moved only a few times", () => {
+    const part = partOf("transmission");
+    const s = stages[0];
+    const size = bubbleFor(s);
+    const camera = new THREE.PerspectiveCamera(22, s.width / s.height, 0.05, 200);
+    const { distance, directions } = flightTo(part.box, part.target, machine, camera.fov, s);
+    const start = new THREE.Spherical().setFromVector3(directions[0].clone().multiplyScalar(distance));
+    let last: Rect | null = null;
+    const spots = new Set<string>();
+    for (let frame = 0; frame <= 120; frame++) {
+      const turn = start.clone();
+      turn.theta += (frame / 120) * Math.PI * 0.9;
+      // Closer in over the second half.
+      turn.radius *= frame < 60 ? 1 : 1 - ((frame - 60) / 60) * 0.35;
+      camera.position.copy(part.target).add(new THREE.Vector3().setFromSpherical(turn));
+      camera.lookAt(part.target);
+      const seen = look(camera, s, part);
+      const placed = placeBubble({ stage: s, size, anchor: seen.anchor, part: seen.box, avoid: [], last });
+      const rect = { ...placed, x: Math.round(placed.x), y: Math.round(placed.y) };
+      assert.equal(under(rect, seen.corners), 0, `frame ${frame}: ${JSON.stringify({ rect, box: seen.box })}`);
+      spots.add(`${rect.x},${rect.y}`);
+      last = placed;
+    }
+    assert.ok(spots.size <= 8, [...spots].join(" "));
+  });
+});
+
+describe("the part on the stage", () => {
+  const camera = new THREE.PerspectiveCamera(30, 800 / 600, 0.05, 100);
+  camera.position.set(0, 0, 5);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld();
+  const viewProjection = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const cube = (centre: [number, number, number], half: number) => {
+    const points: number[] = [];
+    for (const x of [-half, half]) for (const y of [-half, half]) for (const z of [-half, half]) points.push(centre[0] + x, centre[1] + y, centre[2] + z);
+    return new Float32Array(points);
+  };
+
+  test("the box round its points as the camera sees them, on the screen's pixels", () => {
+    const rect = screenExtent(cube([0, 0, 0], 0.5), viewProjection, 800, 600)!;
+    // Centred, the near face's corners the widest.
+    assert.ok(Math.abs(rect.x + rect.w / 2 - 400) < 1e-6 && Math.abs(rect.y + rect.h / 2 - 300) < 1e-6, JSON.stringify(rect));
+    const near = new THREE.Vector3(0.5, 0.5, 0.5).project(camera);
+    assert.ok(Math.abs(rect.x + rect.w - ((near.x + 1) / 2) * 800) < 1e-3, JSON.stringify(rect));
+  });
+
+  test("all of it behind the camera: none; reaching round behind it (the camera in among it): all of the screen", () => {
+    assert.equal(screenExtent(cube([0, 0, 8], 0.5), viewProjection, 800, 600), null);
+    assert.deepEqual(screenExtent(cube([0, 0, 5], 1), viewProjection, 800, 600), { x: 0, y: 0, w: 800, h: 600 });
+    assert.equal(screenExtent(new Float32Array(), viewProjection, 800, 600), null);
+  });
+
+  test("its points: corners round its callout's point only, one a cell; a small box's corners where it has none there", () => {
+    const geometry = new THREE.BoxGeometry(0.4, 0.4, 0.4, 8, 8, 8);
+    const at = new THREE.Matrix4().makeTranslation(3, 0, 0);
+    const shape = { geometry, matrixWorld: at };
+    const points = partPoints([shape], new THREE.Vector3(3, 0, 0));
+    assert.ok(points.length > 0 && points.length / 3 < geometry.getAttribute("position").count, String(points.length));
+    for (let i = 0; i < points.length; i += 3) assert.ok(Math.abs(points[i] - 3) <= 0.2 + 1e-6);
+    // Far from its point: the small box round the point.
+    const away = partPoints([shape], new THREE.Vector3(-3, 0, 0));
+    assert.equal(away.length, 24);
+    assert.ok(away.every((value, i) => (i % 3 === 0 ? Math.abs(value + 3) <= 0.15 + 1e-6 : Math.abs(value) <= 0.15 + 1e-6)));
+    // The flight's box is the same part.
+    const box = partBox([shape], new THREE.Vector3(3, 0, 0));
+    assert.ok(Math.abs(box.min.x - 2.8) < 1e-6 && Math.abs(box.max.x - 3.2) < 1e-6, JSON.stringify(box));
   });
 });
 

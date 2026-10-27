@@ -41,7 +41,8 @@ const figures = new Map<string, Job<PageFigures>>();
 let users = 0;
 let releaseTimer: ReturnType<typeof setTimeout> | undefined;
 
-// Two at a time, pictures on the screen before looking for drawings, and
+// Two at a time, pictures on the screen before looking for drawings (which
+// leaves a place for a picture: one page looked at at a time), and
 // nothing for an asker that's gone (src/lib/work-queue.ts).
 const { shared } = workQueue(2);
 

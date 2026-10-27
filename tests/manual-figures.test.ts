@@ -255,7 +255,33 @@ describe("where a page paints its images, from pdf.js's operator list", () => {
     assert.deepEqual([sharp.offsetX, sharp.offsetY, sharp.width, sharp.height], [-0.25 * W * 2, -0.5 * H * 2, 612, 792]);
     assert.ok(cropOf(half, page, 3000, { ratio: 2, pixels: 1_000_000 }).width * cropOf(half, page, 3000, { ratio: 2, pixels: 1_000_000 }).height <= 1_000_000 * 1.01);
     // A tiny drawing isn't drawn bigger than the most.
-    assert.equal(cropOf(area(0.5, 0.5, 0.51, 0.51), page, 320, { ratio: 2, most: 8 }).scale, 8);
+    assert.equal(cropOf(area(0.5, 0.5, 0.51, 0.51), page, 320, { ratio: 2, most: 8, pixels: 40_000_000 }).scale, 8);
+  });
+
+  test("never at a scale the whole page wouldn't fit the most pixels at (pdf.js draws a stencil anywhere on the page whole at it)", () => {
+    const page = { width: W, height: H };
+    const pixels = 12_000_000;
+    const whole = Math.sqrt(pixels / (W * H));
+    assert.ok(Math.abs(whole - 4.98) < 0.01);
+    // A small photo shown large in the panel on a 2x screen, and a tiny
+    // drawing in the bubble: about 5 times a Letter page at most, not 8;
+    // the photo in the bubble needs less, and gets what it needs.
+    for (const [cropped, css, capped] of [
+      [area(0.05, 0.77, 0.3, 0.97), 960, true],
+      [area(0.5, 0.5, 0.51, 0.51), 320, true],
+      [area(0.05, 0.77, 0.3, 0.97), 320, false],
+    ] as const) {
+      const crop = cropOf(cropped, page, css, { ratio: 2, pixels, most: 8 });
+      assert.ok(crop.scale * crop.scale * W * H <= pixels * 1.0001 && crop.width * crop.height <= pixels, JSON.stringify(crop));
+      if (capped) assert.ok(Math.abs(crop.scale - whole) < 1e-9, JSON.stringify(crop));
+      else assert.ok(Math.abs(crop.scale - (css * 2) / (0.25 * W)) < 1e-9, JSON.stringify(crop));
+    }
+    // A drawing that needs less is drawn at what it needs, as before.
+    assert.equal(cropOf(area(0, 0, 0.5, 0.5), page, 306, { ratio: 2, pixels, most: 8 }).scale, 2);
+    // A big page (a fold-out) the same: the whole of it within the pixels.
+    const tabloid = { width: 1224, height: 792 };
+    const big = cropOf(area(0.1, 0.1, 0.2, 0.2), tabloid, 960, { ratio: 2, pixels, most: 8 });
+    assert.ok(big.scale * big.scale * tabloid.width * tabloid.height <= pixels * 1.0001, JSON.stringify(big));
   });
 
   test("nothing off the page, and nothing for a page with no image", async () => {

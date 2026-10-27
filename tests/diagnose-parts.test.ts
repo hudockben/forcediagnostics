@@ -60,7 +60,7 @@ import {
 } from "../src/lib/diagnose-parts";
 import type { DiagnosisReply } from "../src/lib/diagnose-rules";
 import { CAUSE_SYSTEMS, type DrawnSystem } from "../src/lib/diagnose-zones";
-import { searchDrawingPages } from "../src/lib/library";
+import { partViewHeading, searchDrawingPages } from "../src/lib/library";
 import { finishCatalogImport, saveCatalogBatch } from "../src/lib/manual-catalog";
 import { PAGE_FACTS_LIMITS, readPageFacts, savedPageFacts } from "../src/lib/manual-facts";
 import { FACTS_NUDGE, FACTS_TOOL_NAME, PAGE_FACTS_MODEL, type FactsState, type PageAsk, type PageFacts, type PageRef } from "../src/lib/manual-facts-rules";
@@ -171,7 +171,21 @@ const GEARBOX_EXPLODED = `TRANSMISSION EXPLODED VIEW
 10
 1 Transmission case  2 Input shaft  3 Bearing  4 Seal  5 Gear
 9.40`;
-const GEARBOX_PAGES = [...Array.from({ length: 20 }, (_, i) => GEARBOX_PROCEDURE(i + 1)), GEARBOX_EXPLODED];
+// Views headed with the part's own name, in capitals and in title case
+// (pages 22 and 23): searched for, they rank with the exploded view, not
+// with the procedures' "TOP VIEW".
+const GEARBOX_VIEW = `TRANSMISSION VIEW
+1
+2
+3
+4 5
+6
+7
+8
+1 Transmission case  2 Shift drum
+9.42`;
+const GEARBOX_TITLED = GEARBOX_VIEW.replace("TRANSMISSION VIEW", "Transmission View").replace("9.42", "9.43");
+const GEARBOX_PAGES = [...Array.from({ length: 20 }, (_, i) => GEARBOX_PROCEDURE(i + 1)), GEARBOX_EXPLODED, GEARBOX_VIEW, GEARBOX_TITLED];
 
 // Another line's manual with its own starter-solenoid page.
 const RANGER_SOLENOID = `STARTER SOLENOID SERVICE
@@ -767,19 +781,62 @@ describe("the part sheet", () => {
 
   test("a part's exploded view among many procedure pages that name the part more often, in the conversation's manuals only", async () => {
     const sheet = sheetOf(await partSheet(techA, { conversationId: gearboxConversation, system: "transmission", part: "Transmission" }));
-    // The exploded view first, though twenty procedure pages rank higher in
-    // the search (and have callouts and a "TOP VIEW").
-    assert.deepEqual([sheet.drawings[0]?.manualId, sheet.drawings[0]?.page, sheet.drawings[0]?.kind], [gearbox, 21, "exploded"], JSON.stringify(sheet.drawings));
-    assert.equal(sheet.drawings.filter((page) => page.kind === "exploded").length, 1);
-    // The procedure page after it, as a procedure; never the other manual in the shop.
+    // The views first (the exploded view, and the views headed TRANSMISSION
+    // VIEW and Transmission View), though twenty procedure pages rank
+    // higher in the search (and have callouts and a "TOP VIEW").
+    const views = sheet.drawings.slice(0, 3);
+    assert.deepEqual(
+      views.map((page) => [page.manualId, page.page, page.kind]).sort((a, b) => Number(a[1]) - Number(b[1])),
+      [
+        [gearbox, 21, "exploded"],
+        [gearbox, 22, "exploded"],
+        [gearbox, 23, "exploded"],
+      ],
+      JSON.stringify(sheet.drawings),
+    );
+    assert.equal(sheet.drawings.filter((page) => page.kind === "exploded").length, 3);
+    // The procedure page after them, as a procedure; never the other manual in the shop.
     assert.equal(sheet.drawings.find((page) => page.page === sheet.pages[0]?.page)?.kind ?? "procedure", "procedure");
     assert.ok(!sheet.drawings.some((page) => page.manualId === gearboxElsewhere), JSON.stringify(sheet.drawings));
-    // Straight from the search: the view first, at most the limit, all from the manuals asked for.
+    // Straight from the search: the views first, at most the limit, all from the manuals asked for.
     const hits = await searchDrawingPages(techA.shop.id, "transmission", [gearbox], 12, 20_000);
     assert.equal(hits.length, 12);
-    assert.deepEqual([hits[0].manualId, hits[0].pageNumber], [gearbox, 21]);
+    assert.deepEqual(
+      hits
+        .slice(0, 3)
+        .map((hit) => [hit.manualId, hit.pageNumber])
+        .sort((a, b) => Number(a[1]) - Number(b[1])),
+      [
+        [gearbox, 21],
+        [gearbox, 22],
+        [gearbox, 23],
+      ],
+      JSON.stringify(hits.map((hit) => hit.pageNumber)),
+    );
     assert.ok(hits.every((hit) => hit.manualId === gearbox));
     assert.deepEqual(await searchDrawingPages(techB.shop.id, "transmission", [gearbox], 12, 20_000), []);
+  });
+
+  test("a view's heading naming the part, as the search finds it (in Postgres): in capitals or title case, plural or not, every word of the part on it; not a figure's TOP VIEW or a sentence", async () => {
+    const named = async (query: string, text: string) => {
+      const pattern = partViewHeading(query);
+      assert.ok(pattern, query);
+      const { rows } = await systemDb.execute<{ named: boolean }>(sql`select ${text} ~ ${pattern} as named`);
+      return rows[0].named;
+    };
+    assert.equal(await named("transmission", "TRANSMISSION VIEW\n1\n2"), true);
+    assert.equal(await named("transmission", "9.42\nTransmission View"), true);
+    assert.equal(await named("Transmission", "TRANSMISSIONS VIEW"), true);
+    assert.equal(await named("Valves", "VALVE TRAIN VIEW"), true);
+    assert.equal(await named("Regulator rectifier", "REGULATOR / RECTIFIER VIEW"), true);
+    assert.equal(await named("Regulator rectifier", "REGULATOR VIEW"), false);
+    assert.equal(await named("transmission", "TRANSMISSION REMOVAL\nTOP VIEW"), false);
+    assert.equal(await named("transmission", "Refer to the transmission view."), false);
+    assert.equal(await named("transmission", "transmission view"), false);
+    // Nothing of the search is read as the pattern's own.
+    assert.equal(partViewHeading('"(.*)" ['), null);
+    assert.equal(await named("a.b (c*)", "A B C VIEW"), true);
+    assert.equal(await named("a.b (c*)", "A B VIEW"), false);
   });
 
   test("a part no page is about: the pages that name it, without a card", async () => {

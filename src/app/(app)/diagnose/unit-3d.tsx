@@ -744,7 +744,7 @@ function Callouts({
   const { callouts, compact, ruledOut } = calloutLayout(frame, states, { keep, full, top });
   const radius = LABEL_FONT * 0.74;
   return (
-    <div className="pointer-events-none absolute inset-0" data-labels data-compact={compact}>
+    <div className="pointer-events-none absolute inset-0" data-labels data-compact={compact} data-top={top}>
       <svg className="absolute inset-0 size-full" aria-hidden>
         {callouts.map((callout: Callout) => {
           const cy = callout.y + callout.h / 2;
@@ -907,7 +907,9 @@ function Examine({
   const bubble =
     ready && system && room !== "none" && shown?.system === system && shown.state !== "none" && drawings.closed !== stageDrawingsKey(shown) ? shown : null;
   const docked = room === "dock";
-  const top = bubble && docked ? stripTop() + 4 : 0;
+  // The callouts go under the strip once it has a drawing, or is sure to
+  // (not for a frame that may come to nothing: they'd drop and come back).
+  const top = bubble && docked && (bubble.state === "found" || bubble.sure) ? stripTop() + 4 : 0;
 
   function closeBubble() {
     setDrawings((old) => ({ shown: old.shown, closed: old.shown ? stageDrawingsKey(old.shown) : null }));
@@ -1087,10 +1089,14 @@ function roomOf(frame: ProjectedFrame | null): "float" | "dock" | "none" {
   return bubbleDocked(frame) ? "dock" : "float";
 }
 
+// Round the part's box on the stage: its outline's line.
+const PART_LINE = 3;
+
 // The drawing's bubble on the stage and its leader to the part: placed
 // again on every frame the camera moves (as the callouts are), straight on
-// the elements, nothing rendered again: beside the part, off the callouts,
-// where it was while that's still clear (src/lib/unit-3d/bubble.ts); docked
+// the elements, nothing rendered again: beside the part (off all of it, as
+// the frame has its shape, however big), off the callouts, where it was
+// while that's still clear (src/lib/unit-3d/bubble.ts); docked
 // across the top on a narrow stage. Where it was is kept as worked out,
 // not as drawn on whole pixels (half a pixel nearer the part mustn't send
 // it across). The leader goes when the part's point leaves the stage (or,
@@ -1136,14 +1142,19 @@ function BubbleLayer({
       }
       const stage = { width: frame.width, height: frame.height };
       const anchor = onStage(frame.points.get(system), stage);
+      // The part itself, as this frame has it, and its outline's line.
+      const extent = frame.extent(system);
+      const part = extent && { x: extent.x - PART_LINE, y: extent.y - PART_LINE, w: extent.w + PART_LINE * 2, h: extent.h + PART_LINE * 2 };
       const { avoid, soft, own } = keepOff.current(frame);
-      const placed = docked ? stripRect(stage) : placeBubble({ stage, size, anchor, avoid, soft, last: last.current });
+      const placed = docked ? stripRect(stage) : placeBubble({ stage, size, anchor, part, avoid, soft, last: last.current });
       last.current = placed;
       const rect = { x: Math.round(placed.x), y: Math.round(placed.y), w: placed.w, h: placed.h };
       element.style.transform = `translate(${rect.x}px, ${rect.y}px)`;
       element.style.width = docked ? `${rect.w}px` : "";
       element.style.visibility = "";
       element.dataset.placed = `${rect.x},${rect.y},${Math.round(rect.w)},${Math.round(rect.h)}`;
+      // Where the part is on the stage (the page's checks read it).
+      element.dataset.part = part ? [part.x, part.y, part.w, part.h].map((n) => n.toFixed(1)).join(",") : "";
       const shown = leaderOf(rect, anchor, { below: docked, blocked: docked && own ? [own] : [] });
       if (!shown) {
         lead.style.display = "none";
