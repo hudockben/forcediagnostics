@@ -112,6 +112,15 @@ export const FAILURE_MESSAGES: Record<FailureReason, string> = {
   error: "Something went wrong talking to Claude. Retry.",
 };
 
+// The API has also turned a request down for an account out of credit with
+// a 400 ("Your credit balance is too low to access the Anthropic API"), not
+// a 402: that's billing too.
+function outOfCredit(error: InstanceType<typeof Anthropic.APIError>) {
+  const body = error.error as { error?: { message?: unknown } } | undefined;
+  const said = typeof body?.error?.message === "string" ? body.error.message : error.message;
+  return /credit balance/i.test(said);
+}
+
 // Sorts an error from the SDK into what the tech is told. Most specific
 // class first: they all extend APIError.
 export function classifyError(error: unknown): FailureReason {
@@ -119,7 +128,7 @@ export function classifyError(error: unknown): FailureReason {
   if (error instanceof Anthropic.RateLimitError) return "rate_limited";
   if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) return "setup";
   if (error instanceof Anthropic.NotFoundError) return "setup";
-  if (error instanceof Anthropic.BadRequestError) return "bad_request";
+  if (error instanceof Anthropic.BadRequestError) return outOfCredit(error) ? "billing" : "bad_request";
   if (error instanceof Anthropic.InternalServerError) return "overloaded";
   if (error instanceof Anthropic.APIConnectionTimeoutError) return "timeout";
   if (error instanceof Anthropic.APIConnectionError) return "connection";

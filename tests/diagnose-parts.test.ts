@@ -835,6 +835,16 @@ describe("reading a page once", () => {
       [apiError(500, "api_error"), "error"],
       [apiError(429, "rate_limit_error"), "error"],
       [apiError(402, "billing_error"), "error"],
+      // Out of credit, as the API has also said it: a 400.
+      [
+        Anthropic.APIError.generate(
+          400,
+          { type: "error", error: { type: "invalid_request_error", message: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." } },
+          undefined,
+          new Headers(),
+        ),
+        "error",
+      ],
       [apiError(401, "authentication_error"), "setup"],
       [apiError(403, "permission_error"), "setup"],
       [new Anthropic.APIConnectionTimeoutError(), "error"],
