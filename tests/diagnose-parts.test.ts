@@ -40,7 +40,6 @@ import {
   partSearchText,
   rankPages,
   samePage,
-  stepGaps,
   type PageCandidate,
   type PartCard,
   type PartPage,
@@ -289,7 +288,7 @@ function message(content: unknown[], stopReason: Message["stop_reason"] = "tool_
   } as unknown as Message;
 }
 const recorded = (input: Record<string, unknown>) =>
-  message([{ type: "tool_use", id: `toolu_${++ids}`, name: FACTS_TOOL_NAME, input: { title: "", steps: [], tools: [], cautions: [], ...input } }]);
+  message([{ type: "tool_use", id: `toolu_${++ids}`, name: FACTS_TOOL_NAME, input: { title: "", tools: [], ...input } }]);
 
 type Script = Message | Error | ((params: Params) => Message);
 
@@ -306,16 +305,12 @@ function fakeClaude(script: Script[], { delayMs = 0 } = {}) {
   return { ask, calls };
 }
 
-// The starter solenoid page as Claude reads it, with one step that gives a
-// torque (the page's TORQUE boxes are read on the page, never on the card).
+// The starter solenoid page as Claude reads it, with a tool whose part
+// number the page doesn't print (its steps and TORQUE boxes are read on the
+// page, never on the card).
 const SOLENOID_READING = {
   title: "STARTER SOLENOID REPLACEMENT",
-  steps: [
-    { n: 1, text: "Raise dump bed." },
-    { n: 2, text: "Remove battery access panel." },
-    { n: 3, text: "Disconnect battery positive (+) and negative (-) cables." },
-    { n: 4, text: "Torque the starter solenoid fasteners to 97 in-lbs (11 N·m)." },
-  ],
+  tools: ["Battery Terminal Wrench PU-50964"],
 };
 
 const shopKey = (user: CurrentUser) => `page-facts:shop:${user.shop.id}`;
@@ -513,22 +508,11 @@ describe("the sheet on the screen", () => {
     assert.deepEqual(cardOf({ facts }, pages[0]), { status: "unread" });
     assert.equal(cardOf({ facts }, pages[1]), null);
     assert.equal(cardOf({ facts: null }, pages[0]), null);
-    const ready: FactsState = { status: "ready", facts: { title: "", steps: [{ n: 1, text: "Raise dump bed." }], tools: [], cautions: [], torqueOnPage: false }, partial: false };
+    const ready: FactsState = { status: "ready", facts: { title: "", tools: [], readOnPage: true, torqueOnPage: false } };
     assert.ok(cardSettled(ready) && cardSettled({ status: "empty" }));
     // No key, the day's readings used, a failed read: not asked again now.
     for (const reason of ["setup", "limit", "error"] as const) assert.ok(cardSettled({ status: "unavailable", reason }));
     assert.ok(!cardSettled({ status: "unread" }) && !cardSettled({ status: "reading" }));
-  });
-
-  test("a card the check left a step out of shows where: the gaps in its numbers", () => {
-    const steps = [{ n: 1 }, { n: 3 }, { n: 4 }, { n: 7 }];
-    assert.deepEqual([...stepGaps(steps, true)], [
-      [1, [2, 2]],
-      [3, [5, 6]],
-    ]);
-    assert.deepEqual([...stepGaps([{ n: 2 }, { n: 3 }], true)], [[0, [1, 1]]]);
-    // A card the check left nothing out of: the page's own numbering.
-    assert.equal(stepGaps(steps, false).size, 0);
   });
 
   test("a part with no page: the Library's search for it", () => {
@@ -600,13 +584,9 @@ describe("the part sheet", () => {
     assert.match(JSON.stringify(claude.calls[0].messages), /STARTER SOLENOID REPLACEMENT/);
     assert.equal(first.state.status, "ready");
     const facts = first.state.status === "ready" ? first.state.facts : null;
-    // What the check left out is said.
-    assert.equal(first.state.status === "ready" && first.state.partial, true);
-    assert.equal(facts?.title, "STARTER SOLENOID REPLACEMENT");
-    assert.equal(facts?.steps.length, 3);
-    // The step with a torque is gone; the card says the page has its torque specs.
-    assert.ok(facts?.torqueOnPage);
-    assert.doesNotMatch(JSON.stringify(facts), /97|in-lbs|torques/);
+    // The title, no tool (its number isn't on the page), and the line saying
+    // the page has its steps and torque specs.
+    assert.deepEqual(facts, { title: "STARTER SOLENOID REPLACEMENT", tools: [], readOnPage: true, torqueOnPage: true });
     const row = await savedRow(page(rzr, 3));
     assert.equal(row.status, "ready");
     assert.equal(row.dropped, 1);
@@ -682,10 +662,7 @@ describe("reading a page once", () => {
   });
 
   const starter = () => page(rzr, 4);
-  const STARTER_READING = {
-    title: "STARTER MOTOR REMOVAL",
-    steps: [{ n: 1, text: "Disconnect battery negative (-) cable." }],
-  };
+  const STARTER_READING = { title: "STARTER MOTOR REMOVAL", tools: [] };
 
   test("two devices opening the same page at once: one request, the other told it's being read, then both have the card", async () => {
     const claude = fakeClaude([recorded(STARTER_READING), recorded(STARTER_READING)], { delayMs: 300 });
@@ -702,7 +679,7 @@ describe("reading a page once", () => {
     assert.equal(counter.count, 1);
   });
 
-  test("a card saved in an earlier shape (a torque list, notes, a torque in a step) is read without error, as these rules allow it", async () => {
+  test("a card saved in an earlier shape (steps, cautions, a torque list, notes) is read without error, as these rules allow it", async () => {
     // As an earlier version saved it, with fields the card no longer has.
     const old = {
       title: "STARTER MOTOR REMOVAL",
@@ -720,17 +697,19 @@ describe("reading a page once", () => {
       withShop(techA.shop.id, (tx) => tx.insert(manualPageFacts).values({ manualId: rzr, shopId: techA.shop.id, pageNumber: 4, status, facts: facts as PageFacts }));
     await save("ready", old);
     const claude = fakeClaude([]);
-    const card: FactsState = {
-      status: "ready",
-      facts: { title: "STARTER MOTOR REMOVAL", steps: [{ n: 1, text: "Disconnect battery negative (-) cable." }], tools: [], cautions: [], torqueOnPage: true },
-      partial: true,
-    };
+    const card: FactsState = { status: "ready", facts: { title: "STARTER MOTOR REMOVAL", tools: [], readOnPage: true, torqueOnPage: true } };
     assert.deepEqual(await readPageFacts(techA.shop.id, starter(), { ask: claude.ask }), card);
     assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), card);
-    // A card that had only torques and notes: the line saying the page has torque specs.
-    await forget(starter());
-    await save("ready", { title: "", steps: [], torques: old.torques, tools: [], cautions: [], notes: old.notes });
-    assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), { status: "ready", facts: { title: "", steps: [], tools: [], cautions: [], torqueOnPage: true }, partial: false });
+    // A card that had only torques and notes, or one saved as having nothing
+    // for a card: the line saying the page has its steps and torque specs.
+    for (const [status, facts] of [
+      ["ready", { title: "", steps: [], torques: old.torques, tools: [], cautions: [], notes: old.notes }],
+      ["empty", { title: "", steps: [], tools: [], cautions: [], torqueOnPage: false }],
+    ] as const) {
+      await forget(starter());
+      await save(status, facts);
+      assert.deepEqual(await savedPageFacts(techA.shop.id, starter()), { status: "ready", facts: { title: "", tools: [], readOnPage: true, torqueOnPage: true } });
+    }
     // Nothing read again for either.
     assert.equal(claude.calls.length, 0);
   });

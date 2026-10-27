@@ -488,12 +488,13 @@ export const manualPages = pgTable(
 
 export const manualPageToRead = pageToRead(manualPages);
 
-// What a manual page says (its procedure's title, steps, tools and
-// cautions, never a torque), as Claude read it the first time someone
-// opened the page on Diagnose's part sheet and as checked against the
-// page's text (see src/lib/manual-facts.ts). Saved so a page is read once: also when it had
-// nothing worth showing (empty), and when the read failed, which is tried
-// again only after a while.
+// What a manual page says (its procedure's title and special tools, and
+// whether it has steps, torque specs and cautions to read on it), as Claude
+// read it the first time someone opened the page on Diagnose's part sheet
+// and as checked against the page's text (see src/lib/manual-facts.ts).
+// Saved so a page is read once: also when it had nothing worth showing
+// (empty), and when the read failed, which is tried again only after a
+// while.
 export const manualPageFacts = pgTable(
   "manual_page_facts",
   {
@@ -502,8 +503,8 @@ export const manualPageFacts = pgTable(
     pageNumber: integer("page_number").notNull(),
     status: text("status").notNull().$type<PageFactsStatus>(),
     // Set once the page is read (ready or empty). Checked against the page
-    // again when it's shown, so a card saved in an earlier shape (with a
-    // torque list or notes) is read without them.
+    // again when it's shown, so a card saved in an earlier shape (with
+    // steps, cautions, a torque list or notes) is read without them.
     facts: jsonb("facts").$type<PageFacts>(),
     // How many of the values Claude gave the check against the page dropped.
     dropped: integer("dropped").notNull().default(0),

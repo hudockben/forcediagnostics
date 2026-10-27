@@ -27,14 +27,14 @@ import { cutText } from "@/lib/manual-rules";
 
 // Reading a manual page once, for the card beside it on Diagnose's part
 // sheet. The first time anyone in the shop opens a page, Claude reads its
-// text and records its title, steps, tools and cautions (never a torque:
-// the card says the page has torque specs, read on the page itself); what
-// it records is checked against the page's own text (src/lib/manual-
+// text and records its title and special tools (the card says the page has
+// steps, torque specs and cautions, read on the page itself); what it
+// records is checked against the page's own text (src/lib/manual-
 // facts-rules.ts) and saved in manual_page_facts, so the page is never read
 // again, also when it had nothing for a card. A saved card is checked
 // against the page again each time it's shown, so one saved by an earlier
-// version of the rules (with a torque list or notes) shows only what these
-// allow. Two devices opening the same page at once read it once: the first
+// version of the rules (with steps, cautions, a torque list or notes)
+// shows only what these allow. Two devices opening the same page at once read it once: the first
 // to claim the page's row reads it, the other is told it's being read.
 // Readings count against the shop's daily allowance; without an API key,
 // past the allowance or when the read fails, the page still shows without
@@ -81,8 +81,8 @@ type Row = typeof manualPageFacts.$inferSelect;
 function savedState(row: Row | undefined, pageText: string, now = Date.now()): FactsState | null {
   if (!row) return null;
   if ((row.status === "ready" || row.status === "empty") && row.facts) {
-    const { facts, dropped } = checkFacts(row.facts, pageText);
-    return hasFacts(facts) ? { status: "ready", facts, partial: row.dropped + dropped > 0 } : { status: "empty" };
+    const { facts } = checkFacts(row.facts, pageText);
+    return hasFacts(facts) ? { status: "ready", facts } : { status: "empty" };
   }
   if (row.status === "ready" || row.status === "empty") return { status: "empty" };
   const age = now - row.attemptedAt.getTime();
@@ -262,7 +262,7 @@ export async function readPageFacts(shopId: string, ref: PageRef, options: { ask
     const { facts, dropped } = checkFacts(reply.input, page.text);
     const status = hasFacts(facts) ? "ready" : "empty";
     await saveReading(shopId, ref, { status, facts, dropped, usage });
-    return status === "ready" ? { status, facts, partial: dropped > 0 } : { status };
+    return status === "ready" ? { status, facts } : { status };
   } catch (error) {
     const reason = classifyError(error);
     const detail = apiErrorDetail(error);

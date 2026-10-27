@@ -361,20 +361,6 @@ export function cardOf(sheet: Pick<PartSheet, "facts">, page: PageRef): FactsSta
   return sheet.facts && samePage(sheet.facts.page, page) ? sheet.facts.state : null;
 }
 
-// Where a card's numbered steps skip numbers (the check against the page
-// left a step out): each gap's first and last number, before the step
-// after it. Only for a card the check left something out of; a page's own
-// numbering can skip.
-export function stepGaps(steps: { n: number }[], partial: boolean): Map<number, [number, number]> {
-  const gaps = new Map<number, [number, number]>();
-  if (!partial) return gaps;
-  steps.forEach((step, index) => {
-    const before = index === 0 ? 0 : steps[index - 1].n;
-    if (step.n > before + 1) gaps.set(index, [before + 1, step.n - 1]);
-  });
-  return gaps;
-}
-
 // Whether asking about a page's card again now would change nothing: read,
 // read with nothing on it, or not readable now (no API key, the day's
 // readings used, a failed read tried again only later). "unread" and

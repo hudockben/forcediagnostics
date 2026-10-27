@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
-import { cardSettled, cardOf, largePage, otherPages, partLibraryHref, stepGaps, type PartCard, type PartPage, type PartSheet } from "@/lib/diagnose-parts";
+import { cardSettled, cardOf, largePage, otherPages, partLibraryHref, type PartCard, type PartPage, type PartSheet } from "@/lib/diagnose-parts";
 import { SYSTEM_LABELS, type DrawnSystem } from "@/lib/diagnose-zones";
 import type { FactsState, PageFacts, PageRef } from "@/lib/manual-facts-rules";
 
-import { BookIcon, SearchIcon, WarningIcon, WrenchIcon, ZoomInIcon } from "./icons";
+import { BookIcon, SearchIcon, WrenchIcon, ZoomInIcon } from "./icons";
 import { usePagePicture, usePageView } from "./manual-pictures";
 
 // From the manual, at the top of a system's sheet: the system's parts to
@@ -15,11 +15,11 @@ import { usePagePicture, usePageView } from "./manual-pictures";
 // page drawn large (a tap opens it full screen to zoom into; Open in manual
 // goes to the viewer at it), a few other pages that show it, and beside the
 // page (under it on a phone) what it says: the procedure's title, its
-// steps, the special tools and cautions, and which page that is. Torque
-// specs are never copied onto it: when the page prints them, a line in the
-// manual's teal says so and opens the page full screen, zoomed toward its
-// TORQUE boxes, to read them there (src/lib/manual-facts-rules.ts says
-// why). The server finds the pages and reads each page once, the first
+// special tools as the page prints them, and which page that is. Its
+// steps, torque specs and cautions are never put on it: when the page has
+// them, a line in the manual's teal says so and opens the page full screen
+// to read them there, zoomed toward its TORQUE boxes when it has torque
+// specs (src/lib/manual-facts-rules.ts says why). The server finds the pages and reads each page once, the first
 // time anyone in the shop opens it (src/app/api/diagnose/part-sheet/
 // route.ts): the page shows while it's read, and on its own when it can't
 // be. A part no page is about (another part's procedure only names it on
@@ -263,7 +263,14 @@ export function PartSheetSection({
           <div className="grid gap-3 @[34rem]:grid-cols-2 @[34rem]:grid-rows-[auto_1fr] @[34rem]:items-start @[34rem]:gap-x-4">
             <LargePage key={cardKey(large)} page={large} onOpen={() => openPage?.({ manualId: large.manualId, page: large.page, title: large.title })} />
             <OtherPages pages={otherPages(answer, large)} onPick={(page) => setChosen({ manualId: page.manualId, page: page.page })} />
-            {carded && <PageCard state={state} page={large} onTorque={() => openPage?.({ manualId: large.manualId, page: large.page, title: large.title, focus: "torque" })} className="@[34rem]:col-start-2 @[34rem]:row-span-2 @[34rem]:row-start-1" />}
+            {carded && (
+              <PageCard
+                state={state}
+                page={large}
+                onRead={(torque) => openPage?.({ manualId: large.manualId, page: large.page, title: large.title, ...(torque ? { focus: "torque" as const } : {}) })}
+                className="@[34rem]:col-start-2 @[34rem]:row-span-2 @[34rem]:row-start-1"
+              />
+            )}
           </div>
           {answer.noManual && <p className="text-xs text-ink-muted">This unit&apos;s manuals aren&apos;t in the library: these are pages its causes cite.</p>}
         </div>
@@ -376,8 +383,8 @@ function LargePage({ page, onOpen }: { page: PartPage; onOpen: () => void }) {
 
 // What the page says, as read once and checked against its text; while
 // it's read, a line saying so (the page is already there to look at).
-// onTorque opens the page full screen at its torque specs.
-function PageCard({ state, page, onTorque, className = "" }: { state: FactsState | null; page: PartPage; onTorque: () => void; className?: string }) {
+// onRead opens the page full screen, at its torque specs when it has them.
+function PageCard({ state, page, onRead, className = "" }: { state: FactsState | null; page: PartPage; onRead: (torque: boolean) => void; className?: string }) {
   const status = state === null || state.status === "unread" ? "reading" : state.status;
   return (
     <section
@@ -389,13 +396,13 @@ function PageCard({ state, page, onTorque, className = "" }: { state: FactsState
     >
       {/* Said to a screen reader as it changes (the lines below come and go). */}
       <p role="status" className="sr-only">
-        {status === "reading" ? `Reading page ${page.page} for its steps.` : status === "ready" ? `What page ${page.page} says is here.` : ""}
+        {status === "reading" ? `Reading page ${page.page}.` : status === "ready" ? `What page ${page.page} says is here.` : ""}
       </p>
       {state?.status === "ready" ? (
-        <Facts facts={state.facts} partial={state.partial} onTorque={onTorque} />
+        <Facts facts={state.facts} onRead={() => onRead(state.facts.torqueOnPage)} />
       ) : status === "reading" ? (
         <p data-facts-loading className="text-sm text-ink-muted">
-          Reading this page for its steps…
+          Reading this page…
         </p>
       ) : status === "empty" ? (
         <p className="text-sm text-ink-muted">Nothing to list from this page: it&apos;s all in the page itself.</p>
@@ -416,10 +423,11 @@ function PageCard({ state, page, onTorque, className = "" }: { state: FactsState
 
 const sectionLabel = "text-xs font-semibold text-ink-muted";
 
-// partial: the check against the page left lines out; where a step is
-// missing its number says so, and the card ends saying the page has it all.
-function Facts({ facts, partial, onTorque }: { facts: PageFacts; partial: boolean; onTorque: () => void }) {
-  const gaps = stepGaps(facts.steps, partial);
+// The title, the line saying the page has its steps, torque specs and
+// cautions (in the teal of a MANUAL spec: read on the page itself, opened
+// full screen, never put here in other words), and the special tools as
+// the page prints them.
+function Facts({ facts, onRead }: { facts: PageFacts; onRead: () => void }) {
   return (
     <>
       {facts.title && (
@@ -427,55 +435,13 @@ function Facts({ facts, partial, onTorque }: { facts: PageFacts; partial: boolea
           {facts.title}
         </h4>
       )}
-      {/* Cautions first, as the Safety card comes before the causes. */}
-      {facts.cautions.length > 0 && (
-        <ul data-facts-cautions aria-label="Cautions" className="space-y-1.5 rounded-md border border-trail/40 bg-trail/10 px-3 py-2 text-sm leading-5 text-trail">
-          {facts.cautions.map((caution, index) => (
-            <li key={index} className="flex gap-2">
-              <WarningIcon className="mt-0.5 size-4" />
-              <span className="min-w-0 break-words">{caution}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {facts.steps.length > 0 && (
-        <ol data-facts-steps aria-label="Steps" className="space-y-1.5 text-sm leading-5 text-ink">
-          {facts.steps.map((step, index) => {
-            const gap = gaps.get(index);
-            return (
-              <Fragment key={index}>
-                {gap && (
-                  <li data-fact-gap={gap.join("-")} className="flex gap-2 text-ink-muted">
-                    <span aria-hidden className="w-6 shrink-0 text-right font-mono tabular-nums">
-                      {gap[0] === gap[1] ? `${gap[0]}.` : `${gap[0]}–${gap[1]}.`}
-                    </span>
-                    <span className="min-w-0 italic">
-                      <span className="sr-only">{gap[0] === gap[1] ? `Step ${gap[0]}: ` : `Steps ${gap[0]} to ${gap[1]}: `}</span>
-                      On the page, not listed here
-                    </span>
-                  </li>
-                )}
-                <li data-fact-step={step.n} className="flex gap-2">
-                  <span aria-hidden className="w-6 shrink-0 text-right font-mono text-glow/80 tabular-nums">
-                    {step.n}.
-                  </span>
-                  <span className="min-w-0 break-words">{step.text}</span>
-                </li>
-              </Fragment>
-            );
-          })}
-        </ol>
-      )}
-      {facts.torqueOnPage && (
-        // The manual's own specs, in the teal of a MANUAL spec: read on the
-        // page itself (opened full screen, zoomed toward its TORQUE boxes),
-        // never copied here.
-        <div data-facts-torque className="flex flex-wrap items-center justify-between gap-x-3 rounded-md border border-glow/45 bg-glow/10 py-0.5 pr-1 pl-3">
-          <p className="py-2 text-sm leading-5 font-medium text-glow">Torque specs are on this page</p>
+      {facts.readOnPage && (
+        <div data-facts-on-page className="flex flex-wrap items-center justify-between gap-x-3 rounded-md border border-glow/45 bg-glow/10 py-0.5 pr-1 pl-3">
+          <p className="py-2 text-sm leading-5 font-medium text-glow">Steps, torque specs and cautions are on this page</p>
           <button
             type="button"
-            data-facts-torque-open
-            onClick={onTorque}
+            data-facts-on-page-open
+            onClick={onRead}
             className="inline-flex min-h-11 items-center gap-1.5 rounded-lg px-2 text-sm font-semibold text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
           >
             <ZoomInIcon className="size-4" />
@@ -495,11 +461,6 @@ function Facts({ facts, partial, onTorque }: { facts: PageFacts; partial: boolea
             ))}
           </ul>
         </div>
-      )}
-      {partial && (
-        <p data-facts-partial className="text-xs leading-5 text-ink-muted">
-          Some lines couldn&apos;t be matched to the page, so they aren&apos;t listed. The page has everything.
-        </p>
       )}
     </>
   );
