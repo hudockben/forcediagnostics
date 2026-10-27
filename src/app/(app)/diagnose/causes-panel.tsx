@@ -55,8 +55,9 @@ import {
   WarningIcon,
   WrenchIcon,
 } from "./icons";
+import { overlayRoot, useMounted } from "./overlays";
 import { PartSheetSection } from "./part-sheet";
-import { SheetView, Unit3D, UnitHeader, UnitKey, isDrawnSystem, overlayRoot, unitName, useMounted } from "./unit-3d";
+import { SheetView, Unit3D, UnitHeader, UnitKey, isDrawnSystem, unitName } from "./unit-3d";
 import { UnitGraphic } from "./unit-graphic";
 import { UnitPicker } from "./unit-picker";
 import { useHistoryParam } from "./use-history-param";

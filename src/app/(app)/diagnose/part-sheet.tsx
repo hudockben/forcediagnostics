@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 import {
   cardSettled,
   cardOf,
+  drawingKey,
+  drawingLabel,
   largePage,
   otherPages,
   panelDrawings,
@@ -20,6 +22,7 @@ import { SYSTEM_LABELS, type DrawnSystem } from "@/lib/diagnose-zones";
 import type { FactsState, PageFacts, PageRef } from "@/lib/manual-facts-rules";
 import { areaParam } from "@/lib/manual-figures";
 
+import { useStageDrawings } from "./drawing-bubble";
 import { BookIcon, SearchIcon, WrenchIcon, ZoomInIcon } from "./icons";
 import { usePagePicture, usePageView, usePartDrawings } from "./manual-pictures";
 
@@ -27,11 +30,13 @@ import { usePagePicture, usePageView, usePartDrawings } from "./manual-pictures"
 // pick from (those its causes name first), the picked part's drawings
 // cropped out of its manual pages and shown large (an exploded view first:
 // the first across the sheet, the others in a strip under it; a tap opens
-// the page full screen zoomed to the drawing), the part's best manual
-// page drawn whole (a tap opens it full screen to zoom into; Open in manual
-// goes to the viewer at it), a few other pages that show it, and beside the
-// page (under it on a phone) what it says: the procedure's title, its
-// special tools as the page prints them, and which page that is. Its
+// the page full screen zoomed to the drawing; in the examine view they're
+// on the 3D unit too, in a bubble by the part: drawing-bubble.tsx), the
+// part's best manual page drawn whole (a tap opens it full screen to zoom
+// into; Open in manual goes to the viewer at it), a few other pages that
+// show it, and beside the page (under it on a phone) what it says: the
+// procedure's title, its special tools as the page prints them, and which
+// page that is. Its
 // steps, torque specs and cautions are never put on it: when the page has
 // them, a line in the manual's teal says so and opens the page full screen
 // to read them there, zoomed toward its TORQUE boxes when it has torque
@@ -169,6 +174,15 @@ export function PartSheetSection({
   // an exploded view with nothing to crop unless it's the large page).
   const found = usePartDrawings(sheet?.drawings ?? NO_PAGES);
   const drawings = panelDrawings(found.drawings, large);
+  // And the examine view's bubble on the 3D unit (drawing-bubble.tsx): the
+  // part's drawings with no page under them, an exploded view whole too.
+  const onStage = panelDrawings(found.drawings, null);
+  useStageDrawings({
+    system,
+    part,
+    state: answer === null || stale || (sheet !== null && found.state === "finding") ? "loading" : onStage.length > 0 ? "found" : "none",
+    drawings: onStage,
+  });
 
   // The large page's card: as the sheet brought it when that's settled,
   // else asked for (and read, the first time anyone opens the page).
@@ -420,8 +434,6 @@ function LargePage({ page, onOpen }: { page: PartPage; onOpen: () => void }) {
   );
 }
 
-const drawingKey = (drawing: PartDrawing) => `${drawing.manualId}:${drawing.page}:${drawing.area ? areaParam(drawing.area) : "page"}`;
-const drawingLabel = (drawing: PartDrawing) => (drawing.kind === "exploded" ? "Exploded view" : "Drawing");
 // Very wide or tall drawings get a box within these shapes (the drawing
 // fits inside it), so none is a sliver; the large one is as wide as the
 // sheet unless that would make it taller than this, then centred.

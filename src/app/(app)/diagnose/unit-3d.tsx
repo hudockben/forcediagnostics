@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -16,11 +18,14 @@ import { createPortal } from "react-dom";
 
 import { CAUSE_SYSTEMS, SYSTEM_LABELS, type CauseSystem, type DrawnSystem, type Glow, type UnitVehicle, type ZoneState } from "@/lib/diagnose-zones";
 import { FLAG_COLOURS, KEY_WORDS, LINE_COLOURS, METER_LIT, calloutItems, calloutMark, glowWords, isLit, modeByDefault, unitSummary, type ViewMode } from "@/lib/unit-3d/look";
+import { STRIP_HEIGHT, bubbleDocked, bubbleFits, leaderOf, onStage, placeBubble, stripRect, stripTop, type Rect } from "@/lib/unit-3d/bubble";
 import type { ProjectedFrame, UnitViewer, ViewPreset } from "@/lib/unit-3d/viewer";
 import { CIRCLE_AT, fitCallouts, type Callout } from "@/lib/unit-graphic/callouts";
 import { UNIT_LINE_NAMES, type UnitSpec } from "@/lib/unit-vehicle";
 
+import { DrawingBubble, StageDrawingsContext, sameStageDrawings, stageDrawingsKey, type StageDrawings } from "./drawing-bubble";
 import { BackIcon, CheckIcon, CrossIcon, ExpandIcon, PhantomIcon, ResetIcon, SolidIcon, UnitIcon, ZoomInIcon, ZoomOutIcon } from "./icons";
+import { holdPage, overlayRoot } from "./overlays";
 import { UnitGraphic } from "./unit-graphic";
 
 // The unit as a shaded 3D model of the machine (its line, seats and
@@ -33,7 +38,9 @@ import { UnitGraphic } from "./unit-graphic";
 // are highlighted in the list) and tapping any part, flagged or not, opens
 // the full-screen view on its system; Expand opens it on the whole unit to
 // spin, zoom and pan, where tapping a system flies to it and opens its
-// sheet: its parts with their manual pages, and its causes. three.js is
+// sheet: its parts with their manual pages, and its causes; the part
+// picked there gets a bubble on the unit beside it with its drawings from
+// the manual (drawing-bubble.tsx), a leader to it. three.js is
 // only loaded here (a dynamic import); until it's ready, and wherever WebGL
 // isn't there or fails, the line drawing shows instead, in the same box, so
 // nothing jumps, and a system tapped on it opens the same sheet full screen
@@ -66,24 +73,6 @@ function useReducedMotion() {
     () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
     () => false,
   );
-}
-
-// True in the browser once hydrated, false on the server: portals into
-// the document only where there is one.
-const noSubscribe = () => () => {};
-export function useMounted() {
-  return useSyncExternalStore(
-    noSubscribe,
-    () => true,
-    () => false,
-  );
-}
-
-// Where full-screen views go: inside the app's shell (so the bay tablet's
-// lock, which makes the whole shell inert, covers them too), beside the
-// page they cover.
-export function overlayRoot() {
-  return document.getElementById("app-overlays") ?? document.body;
 }
 
 // The latest projected frame, for the callouts (only they redraw as the
@@ -551,37 +540,6 @@ export function Unit3D({
   );
 }
 
-// While a full-screen view is open: the page behind it doesn't scroll and
-// is inert (out of the tab order and hidden from screen readers): every
-// part of the app's shell but the overlays the views live in. The bay
-// tablet's lock makes the whole shell inert on top of that, views and all,
-// and lifting it leaves the page held. Returns the undo. Counted, so the
-// page is let go when the last view goes, in whatever order they go (Back
-// closes the top one; leaving the page, say by Open in manual, takes them
-// all).
-let holds = 0;
-let held: { overflow: string; inert: [Element, boolean][] } | null = null;
-export function holdPage(focus: HTMLElement | null) {
-  const root = document.documentElement;
-  if (holds++ === 0) {
-    const shell = document.getElementById("app-shell");
-    const page = shell ? [...shell.children].filter((child) => child.id !== "app-overlays") : [];
-    held = { overflow: root.style.overflow, inert: page.map((element): [Element, boolean] => [element, (element as HTMLElement).inert]) };
-    root.style.overflow = "hidden";
-    for (const element of page) (element as HTMLElement).inert = true;
-  }
-  focus?.focus({ preventScroll: true });
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    if (--holds > 0 || !held) return;
-    root.style.overflow = held.overflow;
-    for (const [element, inert] of held.inert) (element as HTMLElement).inert = inert;
-    held = null;
-  };
-}
-
 // On a mouse, the part under the pointer (a finger has no hover): the
 // cursor says it can be tapped, its system's name sits by the pointer, and
 // data-hover on the canvas's box says which. One raycast a frame at most,
@@ -673,6 +631,71 @@ function tapEnd(event: ReactMouseEvent) {
 const LINE = "#262a2f";
 const RANK: Record<Glow, number> = { confirmed: 5, high: 4, medium: 3, low: 2, ruled_out: 1, none: 0 };
 
+type CalloutOptions = {
+  // Full screen: the system whose name stays when the others are numbers.
+  keep?: DrawnSystem | null;
+  // Full screen: full labels allowed at any width.
+  full?: boolean;
+  // What the stage's top has over it (the drawing's strip on a phone):
+  // the callouts go under it.
+  top?: number;
+};
+
+// Where the callouts go for a frame (the callouts themselves, and what
+// the drawing's bubble keeps off): the lit systems' labels and leaders,
+// and the ruled-out systems' points, those on the canvas.
+function calloutLayout(frame: ProjectedFrame, states: ZoneState[], { keep = null, full = false, top = 0 }: CalloutOptions) {
+  const { width, height } = frame;
+  const onCanvas = (point: { x: number; y: number; behind: boolean } | undefined): point is { x: number; y: number; behind: boolean } =>
+    !!point && !point.behind && point.x >= 0 && point.x <= width && point.y >= 0 && point.y <= height;
+  const items = states
+    .filter((state) => isLit(state.glow) && isDrawnSystem(state.system))
+    .map((state) => ({ state, point: frame.points.get(state.system as DrawnSystem) }))
+    .filter((item): item is { state: ZoneState; point: { x: number; y: number; behind: boolean } } => onCanvas(item.point));
+  const margin = 6;
+  const bounds = { x: margin, y: margin + top, w: width - margin * 2, h: height - margin * 2 - top };
+  // The machine's outline, leaving at least a row of callouts above and
+  // below.
+  const row = LABEL_FONT * 3;
+  const inner = {
+    x: Math.max(margin, frame.box.x),
+    y: Math.max(margin + top + row, frame.box.y),
+    w: Math.min(width - margin * 2, frame.box.w),
+    h: Math.min(height - margin * 2 - top - row * 2, frame.box.h),
+  };
+  inner.w = Math.max(40, Math.min(inner.w, width - margin - inner.x));
+  inner.h = Math.max(40, Math.min(inner.h, height - margin - row - inner.y));
+  const { callouts, compact } = fitCallouts(
+    items.map(({ state, point }) => ({
+      zone: state.system as DrawnSystem,
+      anchor: [point.x, point.y] as const,
+      // A confirmed one's check sits after its number: room for it.
+      text: SYSTEM_LABELS[state.system] + (state.glow === "confirmed" ? "\u2003\u2003" : ""),
+      rank: RANK[state.glow] + (state.muted ? -2 : 0),
+    })),
+    inner,
+    LABEL_FONT,
+    bounds,
+    { keep, compactOnly: !full && width < FULL_LABELS_FROM },
+  );
+  const ruledOut = states
+    .filter((state) => state.glow === "ruled_out" && isDrawnSystem(state.system))
+    .map((state) => ({ system: state.system as DrawnSystem, point: frame.points.get(state.system as DrawnSystem) }))
+    .filter((item): item is { system: DrawnSystem; point: { x: number; y: number; behind: boolean } } => onCanvas(item.point));
+  return { callouts, compact, ruledOut };
+}
+
+// What the drawing's bubble mustn't cover: each callout's label (and a
+// little round it), the dot its leader ends in, and the ruled-out marks.
+function calloutObstacles(frame: ProjectedFrame, states: ZoneState[], options: CalloutOptions): Rect[] {
+  const { callouts, ruledOut } = calloutLayout(frame, states, options);
+  const around = (x: number, y: number, r: number): Rect => ({ x: x - r, y: y - r, w: r * 2, h: r * 2 });
+  return [
+    ...callouts.flatMap((callout) => [{ x: callout.x - 4, y: callout.y - 4, w: callout.w + 8, h: callout.h + 8 }, around(callout.leader[0][0], callout.leader[0][1], 8)]),
+    ...ruledOut.map(({ point }) => around(point.x, point.y, 10)),
+  ];
+}
+
 // Each lit system's callout, as in a service manual: a numbered circle (its
 // cause's number in the Likely causes list) with the system's name and the
 // list's likelihood meter beside it, laid out round the machine (a band
@@ -690,56 +713,20 @@ function Callouts({
   onPick,
   keep = null,
   full = false,
+  top = 0,
   action,
-}: {
+}: CalloutOptions & {
   store: FrameStore;
   states: ZoneState[];
   active: CauseSystem | null;
   onPick: (system: DrawnSystem) => void;
-  // Full screen: the system whose name stays when the others are numbers.
-  keep?: DrawnSystem | null;
-  // Full screen: full labels allowed at any width.
-  full?: boolean;
   // What a callout does, for its label ("Show its causes", "Examine").
   action: string;
 }) {
   const frame = useSyncExternalStore(store.subscribe, store.get, () => null);
   if (!frame || frame.width < 2 || frame.height < 2) return null;
-  const { width, height } = frame;
   const byZone = new Map(states.map((state) => [state.system, state]));
-  const onCanvas = (point: { x: number; y: number; behind: boolean } | undefined): point is { x: number; y: number; behind: boolean } =>
-    !!point && !point.behind && point.x >= 0 && point.x <= width && point.y >= 0 && point.y <= height;
-  const items = states
-    .filter((state) => isLit(state.glow) && isDrawnSystem(state.system))
-    .map((state) => ({ state, point: frame.points.get(state.system as DrawnSystem) }))
-    .filter((item): item is { state: ZoneState; point: { x: number; y: number; behind: boolean } } => onCanvas(item.point));
-  const margin = 6;
-  const bounds = { x: margin, y: margin, w: width - margin * 2, h: height - margin * 2 };
-  // The machine's outline, leaving at least a row of callouts above and
-  // below.
-  const row = LABEL_FONT * 3;
-  const inner = {
-    x: Math.max(margin, frame.box.x),
-    y: Math.max(margin + row, frame.box.y),
-    w: Math.min(width - margin * 2, frame.box.w),
-    h: Math.min(height - margin * 2 - row * 2, frame.box.h),
-  };
-  inner.w = Math.max(40, Math.min(inner.w, width - margin - inner.x));
-  inner.h = Math.max(40, Math.min(inner.h, height - margin - row - inner.y));
-  const { callouts, compact } = fitCallouts(
-    items.map(({ state, point }) => ({
-      zone: state.system as DrawnSystem,
-      anchor: [point.x, point.y] as const,
-      // A confirmed one's check sits after its number: room for it.
-      text: SYSTEM_LABELS[state.system] + (state.glow === "confirmed" ? "\u2003\u2003" : ""),
-      rank: RANK[state.glow] + (state.muted ? -2 : 0),
-    })),
-    inner,
-    LABEL_FONT,
-    bounds,
-    { keep, compactOnly: !full && width < FULL_LABELS_FROM },
-  );
-  const ruledOut = states.filter((state) => state.glow === "ruled_out" && isDrawnSystem(state.system));
+  const { callouts, compact, ruledOut } = calloutLayout(frame, states, { keep, full, top });
   const radius = LABEL_FONT * 0.74;
   return (
     <div className="pointer-events-none absolute inset-0" data-labels data-compact={compact}>
@@ -756,16 +743,12 @@ function Callouts({
             </g>
           );
         })}
-        {ruledOut.map((state) => {
-          const point = frame.points.get(state.system as DrawnSystem);
-          if (!onCanvas(point)) return null;
-          return (
-            <g key={state.system} data-ruled-out={state.system} data-mark="ruled_out" stroke="#5f656b" strokeWidth={1.4}>
-              <circle cx={point.x} cy={point.y} r={7} fill="#ffffff" stroke="#6b7076" strokeWidth={1.2} />
-              <path d={`M${point.x - 3} ${point.y - 3}l6 6m0 -6l-6 6`} />
-            </g>
-          );
-        })}
+        {ruledOut.map(({ system, point }) => (
+          <g key={system} data-ruled-out={system} data-mark="ruled_out" stroke="#5f656b" strokeWidth={1.4}>
+            <circle cx={point.x} cy={point.y} r={7} fill="#ffffff" stroke="#6b7076" strokeWidth={1.2} />
+            <path d={`M${point.x - 3} ${point.y - 3}l6 6m0 -6l-6 6`} />
+          </g>
+        ))}
       </svg>
       {callouts.map((callout: Callout) => {
         const state = byZone.get(callout.zone)!;
@@ -886,6 +869,35 @@ function Examine({
   const system = examining && examining !== "unit" ? examining : null;
   const state = system ? states.find((s) => s.system === system) : undefined;
 
+  // The part picked in the sheet, and its drawings for the bubble on the
+  // stage, as the sheet finds them; the part whose bubble was closed (it
+  // stays closed until another part is picked).
+  const [drawings, setDrawings] = useState<{ shown: StageDrawings | null; closed: string | null }>({ shown: null, closed: null });
+  const report = useCallback(
+    (of: DrawnSystem, next: StageDrawings | null) =>
+      setDrawings((old) => {
+        if (!next) return old.shown?.system === of ? { shown: null, closed: old.closed } : old;
+        if (old.shown && sameStageDrawings(old.shown, next)) return old;
+        return { shown: next, closed: old.closed === stageDrawingsKey(next) ? old.closed : null };
+      }),
+    [],
+  );
+  // Floating beside the part, docked across the top (a narrow stage), or
+  // none (a stage too short for it, or no frame yet).
+  const room = useSyncExternalStore(frames.subscribe, () => roomOf(frames.get()), () => "none" as const);
+  const shown = drawings.shown;
+  const bubble =
+    ready && system && room !== "none" && shown?.system === system && shown.state !== "none" && drawings.closed !== stageDrawingsKey(shown) ? shown : null;
+  const docked = room === "dock";
+  const top = bubble && docked ? stripTop() + 4 : 0;
+
+  function closeBubble() {
+    setDrawings((old) => ({ shown: old.shown, closed: old.shown ? stageDrawingsKey(old.shown) : null }));
+    // To the part's chip in the sheet, where another part is picked.
+    const chip = dialog.current?.querySelector<HTMLElement>('[data-sheet] [data-part-chip][aria-pressed="true"]');
+    (chip ?? closeButton.current)?.focus({ preventScroll: true });
+  }
+
   // The page behind doesn't scroll and can't be tabbed to; focus starts
   // on Back.
   useEffect(() => holdPage(closeButton.current), []);
@@ -905,7 +917,7 @@ function Examine({
     }
     // Keys move the machine unless typing or on a control.
     const target = event.target as HTMLElement;
-    if (!v || target.closest("input, textarea, select, [data-sheet]")) return;
+    if (!v || target.closest("input, textarea, select, [data-sheet], [data-bubble]")) return;
     const step = 0.18;
     const keys: Record<string, () => void> = {
       ArrowLeft: () => (event.shiftKey ? v.pan(-1, 0) : v.orbit(-step, 0)),
@@ -956,7 +968,8 @@ function Examine({
             them) and, under it, the views and zoom. */}
         <div className="unit-plate flex min-h-0 flex-1 flex-col overflow-hidden">
           <div
-            className="relative min-h-0 flex-1 overflow-hidden"
+            // A size container: the bubble on it is sized by the stage.
+            className="relative min-h-0 flex-1 overflow-hidden [container-type:size]"
             onWheel={(event) => {
               // A wheel over a callout zooms too (the canvas's own controls
               // take it over the canvas).
@@ -981,8 +994,13 @@ function Examine({
               onPointerLeave={(event) => hover.leave(event)}
               onContextMenu={(event) => event.preventDefault()}
             />
-            {ready && <Callouts store={frames} states={states} active={system ?? active} onPick={onPick} keep={system} full action="Examine" />}
+            {ready && <Callouts store={frames} states={states} active={system ?? active} onPick={onPick} keep={system} full top={top} action="Examine" />}
             {ready && <HoverLabel picker={hover} />}
+            {bubble && system && (
+              <BubbleLayer frames={frames} system={system} docked={docked} avoid={(frame) => calloutObstacles(frame, states, { keep: system, full: true, top })}>
+                <DrawingBubble shown={bubble} docked={docked} onClose={closeBubble} />
+              </BubbleLayer>
+            )}
             {!ready && <p className="absolute inset-x-0 top-6 text-center text-sm text-[#5f656b]">Loading the 3D unit…</p>}
           </div>
           <div data-examine-tools className="relative flex shrink-0 items-center gap-2 px-2 pt-1 pb-2">
@@ -1027,19 +1045,126 @@ function Examine({
           </div>
         </div>
         {system && (
-          <SystemSheet
-            system={system}
-            state={state}
-            sheet={sheet}
-            onClose={onUnit}
-            // Below the unit on a phone or a portrait tablet; beside it on a
-            // wide screen, wider from 1280 so a part's manual page and what
-            // it says sit side by side.
-            className="max-h-[52%] border-t border-white/10 lg:landscape:max-h-none lg:landscape:w-[26rem] lg:landscape:border-t-0 lg:landscape:border-l xl:landscape:w-[min(44rem,48vw)]"
-          />
+          <StageDrawingsContext value={report}>
+            <SystemSheet
+              system={system}
+              state={state}
+              sheet={sheet}
+              onClose={onUnit}
+              // Below the unit on a phone or a portrait tablet; beside it on a
+              // wide screen, wider from 1280 so a part's manual page and what
+              // it says sit side by side.
+              className="max-h-[52%] border-t border-white/10 lg:landscape:max-h-none lg:landscape:w-[26rem] lg:landscape:border-t-0 lg:landscape:border-l xl:landscape:w-[min(44rem,48vw)]"
+            />
+          </StageDrawingsContext>
         )}
       </div>
     </div>
+  );
+}
+
+// The bubble's room on the stage (see src/lib/unit-3d/bubble.ts).
+function roomOf(frame: ProjectedFrame | null): "float" | "dock" | "none" {
+  if (!frame || !bubbleFits(frame)) return "none";
+  return bubbleDocked(frame) ? "dock" : "float";
+}
+
+// The drawing's bubble on the stage and its leader to the part: placed
+// again on every frame the camera moves (as the callouts are), straight on
+// the elements, nothing rendered again: beside the part, off the callouts,
+// where it was while that's still clear (src/lib/unit-3d/bubble.ts); docked
+// across the top on a narrow stage. The leader goes when the part's point
+// leaves the stage. Placed before it's painted, so it never shows where it
+// isn't.
+function BubbleLayer({
+  frames,
+  system,
+  docked,
+  avoid,
+  children,
+}: {
+  frames: FrameStore;
+  system: DrawnSystem;
+  docked: boolean;
+  avoid: (frame: ProjectedFrame) => Rect[];
+  children: ReactNode;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const leader = useRef<SVGGElement>(null);
+  const last = useRef<Rect | null>(null);
+  const placeNow = useRef<(() => void) | null>(null);
+  // The latest callouts to keep off: they can change without a new frame
+  // (a cause marked in the sheet), and then it's placed again.
+  const keepOff = useRef(avoid);
+  useEffect(() => {
+    keepOff.current = avoid;
+    placeNow.current?.();
+  });
+  useLayoutEffect(() => {
+    const element = box.current;
+    const lead = leader.current;
+    const line = lead?.querySelector("line");
+    const dot = lead?.querySelector("circle");
+    if (!element || !lead || !line || !dot) return;
+    let size = { w: element.offsetWidth, h: element.offsetHeight };
+    const place = () => {
+      const frame = frames.get();
+      if (!frame || frame.width < 2 || frame.height < 2) {
+        element.style.visibility = "hidden";
+        lead.style.display = "none";
+        return;
+      }
+      const stage = { width: frame.width, height: frame.height };
+      const anchor = onStage(frame.points.get(system), stage);
+      const placed = docked ? stripRect(stage) : placeBubble({ stage, size, anchor, avoid: keepOff.current(frame), last: last.current });
+      const rect = { x: Math.round(placed.x), y: Math.round(placed.y), w: placed.w, h: placed.h };
+      last.current = rect;
+      element.style.transform = `translate(${rect.x}px, ${rect.y}px)`;
+      element.style.width = docked ? `${rect.w}px` : "";
+      element.style.visibility = "";
+      element.dataset.placed = `${rect.x},${rect.y},${Math.round(rect.w)},${Math.round(rect.h)}`;
+      const shown = leaderOf(rect, anchor, { below: docked });
+      if (!shown) {
+        lead.style.display = "none";
+        lead.dataset.shown = "false";
+        return;
+      }
+      line.setAttribute("x1", String(shown.from.x));
+      line.setAttribute("y1", String(shown.from.y));
+      line.setAttribute("x2", String(shown.to.x));
+      line.setAttribute("y2", String(shown.to.y));
+      dot.setAttribute("cx", String(shown.to.x));
+      dot.setAttribute("cy", String(shown.to.y));
+      lead.style.display = "";
+      lead.dataset.shown = "true";
+    };
+    // Its size as it's drawn (the drawing loaded, another one swiped to).
+    const observer = new ResizeObserver(() => {
+      size = { w: element.offsetWidth, h: element.offsetHeight };
+      place();
+    });
+    observer.observe(element);
+    const stop = frames.subscribe(place);
+    placeNow.current = place;
+    place();
+    return () => {
+      placeNow.current = null;
+      observer.disconnect();
+      stop();
+    };
+  }, [frames, system, docked]);
+  return (
+    <>
+      <svg aria-hidden className="pointer-events-none absolute inset-0 size-full">
+        <g ref={leader} data-bubble-leader style={{ display: "none" }}>
+          <line stroke={LINE_COLOURS.picked} strokeWidth={1.25} />
+          <circle r={3.2} fill={LINE_COLOURS.picked} stroke="#ffffff" strokeWidth={1} />
+        </g>
+      </svg>
+      <div ref={box} data-bubble={system} data-docked={docked} className={`absolute top-0 left-0 ${docked ? "" : "w-max"}`} style={{ visibility: "hidden", height: docked ? STRIP_HEIGHT : undefined }} onWheel={(event) => event.stopPropagation()}>
+        {children}
+      </div>
+    </>
   );
 }
 

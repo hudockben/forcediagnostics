@@ -12,7 +12,7 @@
 
 import { causeSystem, isCauseSystem, type CauseState, type DrawnSystem, type UnitVehicle } from "@/lib/diagnose-zones";
 import { stem, wordsOf, type FactsState, type PageRef } from "@/lib/manual-facts-rules";
-import { aspectOf, type PageArea, type PageFigures } from "@/lib/manual-figures";
+import { areaParam, aspectOf, type PageArea, type PageFigures } from "@/lib/manual-figures";
 
 export const isDrawnSystem = (value: unknown): value is DrawnSystem => isCauseSystem(value) && value !== "other";
 
@@ -605,6 +605,14 @@ export function drawingsOf(found: { page: DrawingPage; figures: PageFigures | nu
 // exploded view with nothing to crop (all lines, or a scan) as its page,
 // unless it's the page drawn large under them anyway. A procedure or cited
 // page with nothing to crop is only that page, already there to open.
+// With no page drawn large (the bubble on the 3D unit), an exploded view
+// with nothing to crop is always one.
 export function panelDrawings(drawings: PartDrawing[], large: PageRef | null): PartDrawing[] {
   return drawings.filter((drawing) => drawing.area !== null || (drawing.kind === "exploded" && !(large && samePage(drawing, large))));
 }
+
+// One drawing, the same however its area came (to a thousandth of the page).
+export const drawingKey = (drawing: PartDrawing) => `${drawing.manualId}:${drawing.page}:${drawing.area ? areaParam(drawing.area) : "page"}`;
+// What a drawing is called by it: an exploded (assembly, component) view,
+// or a drawing on the part's procedure or a cited page.
+export const drawingLabel = (drawing: PartDrawing) => (drawing.kind === "exploded" ? "Exploded view" : "Drawing");

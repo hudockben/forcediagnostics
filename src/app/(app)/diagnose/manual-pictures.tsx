@@ -10,7 +10,7 @@ import { areaParam, fitArea, parseAreaParam, type PageArea } from "@/lib/manual-
 
 import { BackIcon, BookIcon, ZoomInIcon, ZoomOutIcon } from "./icons";
 import { drawPage, figurePicture, headingArea, holdManuals, pageFigures, pagePicture } from "./manual-pages";
-import { holdPage, overlayRoot, useMounted } from "./unit-3d";
+import { holdPage, overlayRoot, useMounted } from "./overlays";
 import { useHistoryParam } from "./use-history-param";
 
 // The real Polaris manual pages Claude cites, as pictures: small ones on
