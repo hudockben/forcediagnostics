@@ -28,6 +28,12 @@ export const CAPABILITIES = [
     roles: ["tech", "manager", "admin"],
   },
   {
+    key: "diagnostics.delete",
+    label: "Delete diagnoses",
+    detail: "Delete a diagnosis and its messages for good; the Activity log keeps a record",
+    roles: ["manager", "admin"],
+  },
+  {
     key: "library.read",
     label: "Manual library",
     detail: "Search and read the shop's service and owner manuals",
@@ -64,6 +70,12 @@ export const CAPABILITIES = [
     roles: ["manager", "admin"],
   },
   {
+    key: "audit.read",
+    label: "Activity log",
+    detail: "Every change made in the shop: who, what and when. Nobody can edit or delete it",
+    roles: ["manager", "admin"],
+  },
+  {
     key: "bay_tablets.manage",
     label: "Bay tablets",
     detail: "Pair and remove shared bay tablets, unlock locked PINs",
@@ -97,10 +109,13 @@ export function can(role: Role, capability: Capability) {
 
 // Admin areas need a password sign-in; a PIN on a bay tablet isn't enough.
 // So do customers' contact details, which stay off the shared tablets
-// (Diagnose shows a customer's name and vehicles only).
+// (Diagnose shows a customer's name and vehicles only), deleting a
+// diagnosis, and the Activity log.
 const PASSWORD_ONLY: ReadonlySet<Capability> = new Set<Capability>([
   "accounts.manage",
+  "audit.read",
   "bay_tablets.manage",
+  "diagnostics.delete",
   "repair_orders.intake",
   "settings.manage",
 ]);
@@ -127,4 +142,5 @@ export const ADMIN_SECTIONS: { href: string; label: string; capability: Capabili
   { href: "/admin/bay-tablets", label: "Bay tablets", capability: "bay_tablets.manage" },
   { href: "/admin/manuals", label: "Manuals", capability: "settings.manage" },
   { href: "/admin/permissions", label: "Permissions", capability: "accounts.manage" },
+  { href: "/admin/activity-log", label: "Activity log", capability: "audit.read" },
 ];

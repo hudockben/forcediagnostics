@@ -51,6 +51,17 @@ async function Diagnose({ searchParams }: { searchParams: PageProps<"/diagnose">
 
       {!isClaudeConfigured && <Notice tone="trail">{SETUP_MESSAGE}</Notice>}
 
+      {typeof params.deleted === "string" && (
+        <Notice>
+          Deleted “{params.deleted}”.{" "}
+          {allows(user, "audit.read") && (
+            <Link href="/admin/activity-log?area=diagnoses" className="font-medium underline">
+              See it in the Activity log
+            </Link>
+          )}
+        </Notice>
+      )}
+
       {allows(user, "reports.kpis") && <MonthCard shopId={user.shop.id} />}
 
       <Card title="Recent diagnoses" description={list.total === 0 && !searching ? undefined : "The whole shop's, most recently used first."}>

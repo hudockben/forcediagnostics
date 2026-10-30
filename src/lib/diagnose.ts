@@ -4,7 +4,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { customerVehicles, customers, diagnosisConversations, diagnosisTurns, users } from "@/db/schema";
+import { auditLog, customerVehicles, customers, diagnosisConversations, diagnosisTurns, users } from "@/db/schema";
 import { giveBackAttempt, takeAttempt } from "@/lib/attempts";
 import { conversationCustomer, type ConversationCustomer } from "@/lib/customer-rules";
 import { customerOf, findChoice } from "@/lib/customers";
@@ -57,8 +57,8 @@ import type { CurrentUser } from "@/lib/session";
 import { VIN_LENGTH, checkVin, vinMatchesModelNumber, vinModelCode, vinYears } from "@/lib/vin";
 
 // Diagnose's conversations: starting one, each tech message (a turn) and
-// Claude's work on it, the tech's feedback on causes and ticks on checks, and
-// the shop's usage.
+// Claude's work on it, the tech's feedback on causes and ticks on checks,
+// the shop's usage, and deleting one.
 // Callers check diagnostics.work first; everything here runs inside withShop
 // for the user's own shop.
 
@@ -1055,6 +1055,9 @@ async function saveOutcome(
       .from(diagnosisConversations)
       .where(eq(diagnosisConversations.id, conversation.id))
       .for("update");
+    // Deleted while this message ran (its server had gone quiet long enough
+    // to count as stopped): there's nothing left to save it to.
+    if (!current) throw new Error("The diagnosis was deleted while Claude was answering, so the answer wasn't saved.");
     // A retry is the same row, and its earlier attempts were billed too:
     // their tokens, web searches and cost are added to, never replaced.
     const [before] = await tx
@@ -1410,4 +1413,74 @@ export async function carryOver(user: CurrentUser, id: string) {
     lines.push("Checks that were next:", ...reply.nextChecks.map((check) => `- ${check.action}${said(check)}`));
   }
   return { id: detail.conversation.id, unit: detail.conversation.unit, customer: detail.conversation.customer, text: lines.join("\n") };
+}
+
+// --- Deleting --------------------------------------------------------------
+
+// Deletes a diagnosis and its messages for good, for managers and admins
+// (diagnostics.delete; the caller checks). Not while Claude is answering one
+// of its messages. The Activity log keeps what it was, written in the same
+// transaction: its title, unit and VIN, who started it and when, how far it
+// got and what it cost, whose vehicle it was, and why it was deleted.
+export async function deleteConversation(
+  user: CurrentUser,
+  input: { conversationId: string; reason?: string },
+): Promise<{ title: string } | { error: string }> {
+  if (!isUuid(input.conversationId)) return { error: "That diagnosis isn't in this shop." };
+  const reason = str(input.reason, DIAGNOSE_LIMITS.deleteReason);
+  return withShop(user.shop.id, async (tx) => {
+    // Locked first, as a message starting or being saved locks it, so none
+    // starts or finishes while it goes.
+    const [conversation] = await tx
+      .select()
+      .from(diagnosisConversations)
+      .where(eq(diagnosisConversations.id, input.conversationId))
+      .for("update");
+    if (!conversation) return { error: "That diagnosis isn't in this shop." };
+    await failStaleTurns(tx, conversation.id);
+    const [turns] = await tx
+      .select({
+        sent: sql<number>`count(*)::int`,
+        running: sql<number>`(count(*) filter (where ${diagnosisTurns.status} = 'running'))::int`,
+      })
+      .from(diagnosisTurns)
+      .where(eq(diagnosisTurns.conversationId, conversation.id));
+    if (turns.running > 0) return { error: "Claude is still answering a message in this diagnosis. Stop it, or wait for it to finish, then delete it." };
+    const names = await userNames(tx, [conversation.userId]);
+    const [customer] = conversation.customerVehicleId
+      ? await tx
+          .select({ id: customers.id, name: customers.name })
+          .from(customerVehicles)
+          .innerJoin(customers, eq(customers.id, customerVehicles.customerId))
+          .where(eq(customerVehicles.id, conversation.customerVehicleId))
+      : [];
+    await tx.insert(auditLog).values({
+      shopId: user.shop.id,
+      actorUserId: user.id,
+      action: "diagnosis.deleted",
+      targetType: "diagnosis",
+      targetId: conversation.id,
+      details: {
+        title: conversation.title,
+        unit: conversation.unitLabel,
+        modelNumber: conversation.unitModelNumber,
+        vin: conversation.unitVin,
+        status: conversation.status,
+        fix: conversation.outcome?.title ?? null,
+        startedBy: conversation.userId,
+        startedByName: names.get(conversation.userId) ?? null,
+        startedAt: conversation.createdAt.toISOString(),
+        lastUsedAt: conversation.updatedAt.toISOString(),
+        // Every message the techs sent, whether or not Claude finished it.
+        messages: turns.sent,
+        costCents: conversation.costCents,
+        customerVehicleId: conversation.customerVehicleId,
+        customerId: customer?.id ?? null,
+        customerName: customer?.name ?? null,
+        reason: reason || null,
+      },
+    });
+    await tx.delete(diagnosisConversations).where(eq(diagnosisConversations.id, conversation.id));
+    return { title: conversation.title };
+  });
 }

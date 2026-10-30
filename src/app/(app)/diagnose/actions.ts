@@ -1,12 +1,13 @@
 "use server";
 
 import { DrizzleQueryError } from "drizzle-orm";
-import { unstable_rethrow } from "next/navigation";
+import { RedirectType, redirect, unstable_rethrow } from "next/navigation";
 
 import type { ConversationCustomer, CustomerVehicleChoice } from "@/lib/customer-rules";
 import { searchCustomerVehicles } from "@/lib/customers";
 import {
   changeUnit,
+  deleteConversation,
   getConversation,
   linkCustomerVehicle,
   markCause,
@@ -152,6 +153,21 @@ export async function linkCustomerAction(input: {
 export async function stopTurnAction(turnId: string): Promise<{ ok: boolean } | Failed> {
   const user = await requireCapability("diagnostics.work");
   return attempt("stop the message", async () => ({ ok: await requestStop(user, String(turnId ?? "")) }));
+}
+
+// Deletes a diagnosis for good (managers and admins, signed in with a
+// password); the Activity log keeps what it was. Then the list, in the
+// diagnosis's place in the history, so Back doesn't lead to it.
+export async function deleteConversationAction(_previous: { error?: string }, form: FormData): Promise<{ error?: string }> {
+  const user = await requireCapability("diagnostics.delete");
+  const result = await attempt("delete the diagnosis", () =>
+    deleteConversation(user, {
+      conversationId: String(form.get("conversationId") ?? ""),
+      reason: String(form.get("reason") ?? ""),
+    }),
+  );
+  if ("error" in result) return { error: result.error };
+  redirect(`/diagnose?deleted=${encodeURIComponent(result.title)}`, RedirectType.replace);
 }
 
 // The whole conversation again, after a message finished somewhere else.

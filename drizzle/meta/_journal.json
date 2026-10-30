@@ -239,6 +239,34 @@
       "when": 1793385357190,
       "tag": "0033_suppliers_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1793391037688,
+      "tag": "0034_audit_log_chain",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1793391044144,
+      "tag": "0035_audit_log_locked",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1793391238245,
+      "tag": "0036_diagnosis_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1793391239574,
+      "tag": "0037_diagnosis_delete_grants",
+      "breakpoints": true
     }
   ]
 }

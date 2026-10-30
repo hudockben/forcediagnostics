@@ -155,7 +155,15 @@ export const users = pgTable(
   ],
 );
 
-// Who did what to which record, per shop. Rows are only ever added.
+// Who did what to which record, per shop: the Activity log (System Admin >
+// Activity log, src/lib/audit-log.ts). Rows are only ever added. Nothing
+// can change or delete one, not even the database's owner: triggers refuse
+// it (drizzle/0035_audit_log_locked.sql), and an entry only goes when its
+// whole shop is removed. As a transaction that added entries commits, each
+// is sealed: numbered in its shop's order (seq), stamped with the time,
+// given its author's name as it was then, and a SHA-256 hash over all of
+// that and the hash of the entry before it, so an entry changed or taken
+// out behind the triggers' back breaks the chain (see verifyAuditLog).
 export const auditLog = pgTable(
   "audit_log",
   {
@@ -169,9 +177,16 @@ export const auditLog = pgTable(
     targetId: text("target_id").notNull(),
     details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: createdAt(),
+    // Filled in by the seal at commit, whatever an insert gives them;
+    // null only inside the transaction that adds the entry.
+    seq: bigint("seq", { mode: "number" }),
+    actorName: text("actor_name"),
+    prevHash: text("prev_hash"),
+    hash: text("hash"),
   },
   (t) => [
     index("audit_log_shop_created").on(t.shopId, t.createdAt),
+    uniqueIndex("audit_log_shop_seq").on(t.shopId, t.seq),
     pgPolicy("audit_log_read_own_shop", {
       for: "select",
       to: appUser,
@@ -1017,6 +1032,15 @@ export const diagnosisConversations = pgTable(
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
       withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // A manager or admin deletes one, its messages with it, and the
+    // Activity log keeps what it was (deleteConversation in
+    // src/lib/diagnose.ts); the grant is in
+    // drizzle/0037_diagnosis_delete_grants.sql.
+    pgPolicy("diagnosis_conversations_remove_own_shop", {
+      for: "delete",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
     }),
   ],
 );
