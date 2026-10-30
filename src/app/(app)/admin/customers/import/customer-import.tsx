@@ -9,14 +9,18 @@ import {
   CUSTOMER_IMPORT_FIELDS,
   HEADER_SEARCH_ROWS,
   IMPORT_FIELD_LABELS,
+  MAX_UNITS_PER_ROW,
   TEMPLATE_CSV,
   VEHICLE_IMPORT_FIELDS,
   findHeaderRow,
   guessMapping,
   importBatches,
+  isVehicleField,
   planImport,
   readSpreadsheet,
   reportCsv,
+  targetKey,
+  type ColumnTarget,
   type ImportField,
   type ImportNote,
   type ImportOutcome,
@@ -96,7 +100,7 @@ export function CustomerImport() {
   const [readError, setReadError] = useState<string | null>(null);
   const [sheetIndex, setSheetIndex] = useState(0);
   const [headerRow, setHeaderRow] = useState(0);
-  const [mapping, setMapping] = useState<(ImportField | null)[]>([]);
+  const [mapping, setMapping] = useState<(ColumnTarget | null)[]>([]);
   const [defaultRelation, setDefaultRelation] = useState<VehicleRelation>("bought");
   const [run, setRun] = useState<Run | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -109,8 +113,8 @@ export function CustomerImport() {
     () => (sheet ? planImport(rows, { headerRow, mapping, defaultRelation }) : null),
     [sheet, rows, headerRow, mapping, defaultRelation],
   );
-  const hasName = mapping.includes("name") || mapping.includes("firstName") || mapping.includes("lastName");
-  const mapsVehicles = mapping.some((field) => field !== null && VEHICLE_IMPORT_FIELDS.includes(field) && field !== "relation");
+  const hasName = mapping.some((target) => target && ["name", "firstName", "lastName"].includes(target.field));
+  const mapsVehicles = mapping.some((target) => target && isVehicleField(target.field) && target.field !== "relation");
   const running = run?.state === "running";
 
   // Closing the tab mid-import loses the batches not yet sent.
@@ -156,8 +160,16 @@ export function CustomerImport() {
     }
   }
 
-  function setColumn(column: number, field: ImportField | null) {
-    setMapping((old) => old.map((current, index) => (index === column ? field : field !== null && current === field ? null : current)));
+  // A column's field (and unit); a field (or unit's field) can only come
+  // from one column, so another column that had it is left out.
+  function setColumn(column: number, target: ColumnTarget | null) {
+    setMapping((old) => {
+      const next = [...old];
+      while (next.length <= column) next.push(null);
+      return next.map((current, index) =>
+        index === column ? target : target && current && targetKey(current) === targetKey(target) ? null : current,
+      );
+    });
   }
 
   async function start() {
@@ -210,6 +222,7 @@ export function CustomerImport() {
     const all = [...(plan?.notes ?? [])];
     for (const outcome of run?.outcomes ?? []) {
       if (outcome.result === "failed") all.push({ row: outcome.rows[0] ?? 0, message: `Left out: ${outcome.error}`, skipped: true });
+      if (outcome.note) all.push({ row: outcome.rows[0] ?? 0, message: outcome.note, skipped: false });
     }
     return all;
   }, [plan, run]);
@@ -370,31 +383,56 @@ export function CustomerImport() {
                       </th>
                       <td className="max-w-56 px-3 py-2 text-xs break-words text-ink-muted">{examples.join(" · ") || "—"}</td>
                       <td className="px-5 py-2 sm:px-6">
-                        <div className="relative min-w-52">
-                          <select
-                            aria-label={`Where ${label} goes`}
-                            value={mapping[column] ?? ""}
-                            disabled={running}
-                            onChange={(event) => setColumn(column, (event.target.value || null) as ImportField | null)}
-                            className={`${selectClass} ${mapping[column] ? "border-glow/40 text-ink" : "text-ink-muted"}`}
-                          >
-                            <option value="">Leave out</option>
-                            <optgroup label="Customer">
-                              {CUSTOMER_IMPORT_FIELDS.map((field) => (
-                                <option key={field} value={field}>
-                                  {IMPORT_FIELD_LABELS[field]}
-                                </option>
-                              ))}
-                            </optgroup>
-                            <optgroup label="Vehicle">
-                              {VEHICLE_IMPORT_FIELDS.map((field) => (
-                                <option key={field} value={field}>
-                                  {IMPORT_FIELD_LABELS[field]}
-                                </option>
-                              ))}
-                            </optgroup>
-                          </select>
-                          <Chevron />
+                        <div className="flex gap-2">
+                          <div className="relative min-w-52 flex-1">
+                            <select
+                              aria-label={`Where ${label} goes`}
+                              value={mapping[column]?.field ?? ""}
+                              disabled={running}
+                              onChange={(event) => {
+                                const field = (event.target.value || null) as ImportField | null;
+                                setColumn(column, field && { field, unit: mapping[column]?.unit ?? 1 });
+                              }}
+                              className={`${selectClass} ${mapping[column] ? "border-glow/40 text-ink" : "text-ink-muted"}`}
+                            >
+                              <option value="">Leave out</option>
+                              <optgroup label="Customer">
+                                {CUSTOMER_IMPORT_FIELDS.map((field) => (
+                                  <option key={field} value={field}>
+                                    {IMPORT_FIELD_LABELS[field]}
+                                  </option>
+                                ))}
+                              </optgroup>
+                              <optgroup label="Vehicle">
+                                {VEHICLE_IMPORT_FIELDS.map((field) => (
+                                  <option key={field} value={field}>
+                                    {IMPORT_FIELD_LABELS[field]}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            </select>
+                            <Chevron />
+                          </div>
+                          {/* A customer's units can sit side by side in a row. */}
+                          {mapping[column] && isVehicleField(mapping[column].field) && (
+                            <div className="relative w-28 shrink-0">
+                              <select
+                                aria-label={`Which of the customer's units ${label} is for`}
+                                value={mapping[column].unit}
+                                disabled={running}
+                                onChange={(event) => setColumn(column, { field: mapping[column]!.field, unit: Number(event.target.value) })}
+                                className={`${selectClass} border-glow/40 text-ink`}
+                                data-import-unit
+                              >
+                                {Array.from({ length: MAX_UNITS_PER_ROW }, (_, index) => (
+                                  <option key={index} value={index + 1}>
+                                    Unit {index + 1}
+                                  </option>
+                                ))}
+                              </select>
+                              <Chevron />
+                            </div>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -455,9 +493,9 @@ function Preview({ plan, notes, fileName }: { plan: NonNullable<ReturnType<typeo
       <p className="text-sm leading-6 text-ink" data-import-summary>
         {plural(plan.rowsRead, "row", "rows")} read: {plural(plan.customers.length, "customer", "customers")} with{" "}
         {plural(plan.vehicles, "vehicle", "vehicles")}
-        {plan.rowsSkipped > 0 ? `, ${plural(plan.rowsSkipped, "row", "rows")} left out` : ""}. Customers already on file are matched by
-        name and phone number or email: their blank details are filled in, nothing they have is changed, and vehicles they already have
-        aren&apos;t added again.
+        {plan.rowsSkipped > 0 ? `, ${plural(plan.rowsSkipped, "row", "rows")} left out` : ""}. Customers already on file are recognised by
+        name, and by phone number or email where the file has them: their blank details are filled in, nothing they have is changed, and
+        units they already have aren&apos;t added again.
       </p>
       {shown.length > 0 && (
         <div className="-mx-5 overflow-x-auto sm:-mx-6">

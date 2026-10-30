@@ -25,8 +25,10 @@ import {
   guessMapping,
   importBatches,
   parseImportDate,
+  matchCustomer,
   parseRelation,
   planImport,
+  readHeading,
   readSpreadsheet,
   reportCsv,
   sameCustomer,
@@ -43,6 +45,9 @@ async function sheetOf(fileName: string, bytes: Uint8Array) {
   assert.ok("sheets" in read, JSON.stringify(read));
   return read.sheets[0].rows;
 }
+
+// The fields of a guessed mapping, unit 1's (as most files have one unit a row).
+const fieldsOf = (headings: string[]) => guessMapping(headings).map((target) => target?.field ?? null);
 
 // Reads a sheet as the page does: the headings found, the columns guessed.
 function plan(rows: string[][], defaultRelation: "bought" | "sold" | "owned" = "bought") {
@@ -88,7 +93,7 @@ describe("reading the file", () => {
   test("an Excel export with a title row, two phone columns, dates and a number ZIP", async () => {
     const rows = await sheetOf("customers.xlsx", new Uint8Array(readFileSync(new URL("./fixtures/customers/customers.xlsx", import.meta.url))));
     assert.equal(findHeaderRow(rows), 2);
-    const mapping = guessMapping(rows[2]);
+    const mapping = fieldsOf(rows[2]);
     assert.equal(mapping[rows[2].indexOf("Mobile")], "phone", "the mobile number over the home one");
     assert.equal(mapping[rows[2].indexOf("Home Phone")], null);
     const result = plan(rows);
@@ -120,18 +125,41 @@ describe("reading the file", () => {
 describe("matching columns", () => {
   test("headings from dealer systems and hand-kept lists", () => {
     const headings = ["Customer Name", "Cell Phone", "E-mail", "Street Address", "Town", "Province", "Postal Code", "Model #", "Model", "Serial Number", "Colour", "Delivery Date", "Deal Type"];
-    assert.deepEqual(guessMapping(headings), [
+    assert.deepEqual(fieldsOf(headings), [
       "name", "phone", "email", "addressLine1", "city", "state", "postalCode", "modelNumber", "model", "vin", "color", "relationDate", "relation",
     ] satisfies (ImportField | null)[]);
   });
 
   test("a Name column is the name, even with first and last name columns too", () => {
-    assert.deepEqual(guessMapping(["First Name", "Last Name", "Name"]), [null, null, "name"]);
-    assert.deepEqual(guessMapping(["First Name", "Last Name"]), ["firstName", "lastName"]);
+    assert.deepEqual(fieldsOf(["First Name", "Last Name", "Name"]), [null, null, "name"]);
+    assert.deepEqual(fieldsOf(["First Name", "Last Name"]), ["firstName", "lastName"]);
   });
 
   test("each field goes to one column, and unknown headings are left out", () => {
-    assert.deepEqual(guessMapping(["Phone", "Mobile", "Favourite colour", ""]), [null, "phone", null, null]);
+    assert.deepEqual(fieldsOf(["Phone", "Mobile", "Favourite colour", ""]), [null, "phone", null, null]);
+  });
+
+  test("headings with a unit number are that unit's; a customer's own details have no number", () => {
+    const read = (heading: string) => {
+      const found = readHeading(heading);
+      return found && [found.field, found.unit];
+    };
+    assert.deepEqual(read("Unit 2 Model"), ["model", 2]);
+    assert.deepEqual(read("Vehicle 2 VIN"), ["vin", 2]);
+    assert.deepEqual(read("2nd Unit Year"), ["year", 2]);
+    assert.deepEqual(read("Second Vehicle Make"), ["make", 2]);
+    assert.deepEqual(read("Unit 3 Model #"), ["modelNumber", 3]);
+    assert.deepEqual(read("Model 2"), ["model", 2]);
+    assert.deepEqual(read("VIN #2"), ["vin", 2]);
+    assert.deepEqual(read("Unit 1 Serial Number"), ["vin", 1]);
+    assert.deepEqual(read("Vehicle 2"), ["model", 2]);
+    // Not units: a second address line, the first phone; and no second phone.
+    assert.deepEqual(read("Address 2"), ["addressLine2", 1]);
+    assert.deepEqual(read("Phone 1"), ["phone", 1]);
+    assert.equal(read("Phone 2"), null);
+    assert.equal(read("Email 2"), null);
+    assert.equal(read("Unit 11 Model"), null);
+    assert.equal(read("First Name") && read("First Name")![0], "firstName");
   });
 
   test("the template's headings are all known", () => {
@@ -166,13 +194,90 @@ describe("values", () => {
     assert.ok(sameCustomer(person("Jo Smith", null, "JO@x.com"), person("Jo Smith", "555-0100", "jo@x.com")));
     assert.ok(sameCustomer(person("Jo Smith", null, null), person("Jo Smith", null, null)));
     assert.ok(!sameCustomer(person("Jo Smith", "555-0100", null), person("Jo Smith", "555-0199", null)));
-    assert.ok(!sameCustomer(person("Jo Smith", "555-0100", null), person("Jo Smith", null, null)));
     assert.ok(!sameCustomer(person("Jo Smith", "555-0100", null), person("Joe Smith", "555-0100", null)));
+    // A number on only one of them doesn't tell them apart; two different
+    // numbers (or emails) do.
+    assert.ok(sameCustomer(person("Jo Smith", "555-0100", null), person("Jo Smith", null, null)));
+    assert.ok(sameCustomer(person("Jo Smith", "555-0100", null), person("Jo Smith", null, "jo@x.com")));
+    assert.ok(!sameCustomer(person("Jo Smith", "555-0100", "jo@x.com"), person("Jo Smith", "555-0199", null)));
+    assert.ok(!sameCustomer(person("Jo Smith", null, "jo@x.com"), person("Jo Smith", null, "joe@y.com")));
+  });
+
+  test("of several customers of a name, the one with the same number; never a guess", () => {
+    const one = { name: "Jo Smith", phone: "555-0100", email: null };
+    const two = { name: "Jo Smith", phone: "555-0199", email: null };
+    const bare = { name: "Jo Smith", phone: null, email: null };
+    assert.equal(matchCustomer([one, two], { ...two }).match, two);
+    assert.equal(matchCustomer([one], bare).match, one, "the only one it could be");
+    assert.deepEqual(matchCustomer([one, two], bare), { match: null, ambiguous: 2 });
+    assert.equal(matchCustomer([one, two], bare, two).match, two, "the one just above it in the file");
+    // A customer with no number on file is the sure match for a row with none.
+    assert.equal(matchCustomer([one, two, bare], { ...bare }).match, bare);
   });
 });
 
 describe("planning the import", () => {
   const csv = (lines: string[]) => lines.map((line) => line.split("|"));
+
+  test("a customer's several units, however the file lays them out", () => {
+    const layouts: [string, string[]][] = [
+      ["contact on every row", ["Name|Phone|Model", "Jo Smith|814-555-0100|RZR", "Jo Smith|814-555-0100|Sportsman", "Jo Smith|814-555-0100|Ranger"]],
+      ["contact on the first row only", ["Name|Phone|Model", "Jo Smith|814-555-0100|RZR", "Jo Smith||Sportsman", "Jo Smith||Ranger"]],
+      ["name on the first row only", ["Name|Phone|Model", "Jo Smith|814-555-0100|RZR", "||Sportsman", "||Ranger"]],
+      ["side by side", ["Name|Phone|Unit 1 Model|Unit 1 VIN|Unit 2 Model|Unit 2 VIN|Unit 3 Model", "Jo Smith|814-555-0100|RZR||Sportsman||Ranger"]],
+      ["side by side, numbered after", ["Name|Phone|Model|Model 2|Model 3", "Jo Smith|814-555-0100|RZR|Sportsman|Ranger"]],
+    ];
+    for (const [layout, lines] of layouts) {
+      const result = plan(csv(lines));
+      assert.equal(result.customers.length, 1, layout);
+      assert.equal(result.customers[0].customer.phone, "(814) 555-0100", layout);
+      assert.deepEqual(
+        result.customers[0].vehicles.map((vehicle) => vehicle.model),
+        ["RZR", "Sportsman", "Ranger"],
+        layout,
+      );
+      assert.deepEqual(result.notes, [], layout);
+    }
+  });
+
+  test("units side by side each have their own deal, date and notes", () => {
+    const result = plan(
+      csv([
+        "Name|Unit 1 Model|Unit 1 Deal Type|Unit 1 Date|Unit 2 Model|Unit 2 Deal Type|Unit 2 VIN|Unit 3 Model",
+        "Jo Smith|RZR|Bought|6/24/2024|Ranger|Trade-in|SHORTVIN|",
+      ]),
+    );
+    assert.deepEqual(
+      result.customers[0].vehicles.map((vehicle) => [vehicle.model, vehicle.relation, vehicle.relationDate, vehicle.vin]),
+      [
+        ["RZR", "bought", "2024-06-24", null],
+        ["Ranger", "sold", null, null],
+      ],
+    );
+    assert.deepEqual(
+      result.notes.map((note) => note.message.split(":")[0]),
+      ["Unit 2"],
+    );
+  });
+
+  test("a row with only a name, when two customers in the file have it, goes with the one above", () => {
+    const result = plan(
+      csv(["Name|Phone|Model", "Jo Smith|814-555-0100|RZR", "Jo Smith|814-555-0199|Ranger", "Jo Smith||Sportsman", "Al Ng||General", "Jo Smith||Scrambler"]),
+    );
+    assert.deepEqual(
+      result.customers.map((customer) => [customer.customer.name, customer.customer.phone, customer.vehicles.map((vehicle) => vehicle.model)]),
+      [
+        ["Jo Smith", "(814) 555-0100", ["RZR"]],
+        ["Jo Smith", "(814) 555-0199", ["Ranger", "Sportsman"]],
+        ["Al Ng", null, ["General"]],
+        ["Jo Smith", null, ["Scrambler"]],
+      ],
+    );
+    assert.deepEqual(
+      result.notes.map((note) => [note.row, note.message]),
+      [[6, "2 customers in this file are called Jo Smith, and this has no phone number or email to tell which: added as another customer."]],
+    );
+  });
 
   test("rows of one customer become one customer with their vehicles, each once", () => {
     const result = plan(
@@ -428,19 +533,49 @@ describe("saving an import", () => {
     assert.ok(vehicles.every((row) => row.shopId === other.shop.id));
   });
 
+  test("units go to the customer on file even when the file leaves out their number", async () => {
+    const result = await send(writer, plan([["Name", "Model"], ["Rhett Carver", "Sportsman 570"]]).customers);
+    assert.ok("outcomes" in result);
+    assert.equal(result.outcomes[0].result, "matched");
+    assert.equal(result.outcomes[0].vehiclesAdded, 1);
+    const rhett = await getCustomer(writer.shop.id, result.outcomes[0].customerId!);
+    assert.equal(rhett?.customer.phone, "(814) 555-0123");
+    assert.deepEqual(
+      rhett?.vehicles.map((vehicle) => vehicle.model).sort(),
+      ["RZR XP 1000", "Sportsman 570"],
+    );
+  });
+
+  test("a name two customers on file share, with nothing to tell which, is added apart once", async () => {
+    for (const phone of ["5552220001", "5552220002"]) {
+      const made = await createCustomer(writer, { name: "Sam Twin", phone, email: "", addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", notes: "" });
+      assert.ok("id" in made);
+    }
+    const planned = plan([["Name", "Model"], ["Sam Twin", "RZR"]]).customers;
+    const first = await send(writer, planned);
+    assert.ok("outcomes" in first);
+    assert.equal(first.outcomes[0].result, "created");
+    assert.match(first.outcomes[0].note ?? "", /2 customers on file are called Sam Twin/);
+    // Importing it again finds that one: it has no number either.
+    const again = await send(writer, planned);
+    assert.ok("outcomes" in again);
+    assert.deepEqual([again.outcomes[0].result, again.outcomes[0].customerId, again.outcomes[0].vehiclesAdded], ["matched", first.outcomes[0].customerId, 0]);
+    assert.equal((await listCustomers(writer.shop.id, { query: "sam twin" })).total, 3);
+  });
+
   test("two imports of the same people at once add each of them once", async () => {
-    const rows = [["Name", "Phone", "Model"], ...Array.from({ length: 30 }, (_, index) => [`Twin ${index}`, `814-555-${String(1000 + index)}`, "RZR"])];
+    const rows = [["Name", "Phone", "Model"], ...Array.from({ length: 30 }, (_, index) => [`Racer ${index}`, `814-555-${String(1000 + index)}`, "RZR"])];
     const planned = plan(rows).customers;
     const [a, b] = await Promise.all([send(writer, planned), send(writer, planned)]);
     assert.ok("outcomes" in a && "outcomes" in b);
     const created = [...a.outcomes, ...b.outcomes].filter((outcome) => outcome.result === "created").length;
     assert.equal(created, 30);
-    assert.equal((await listCustomers(writer.shop.id, { query: "twin", perPage: 100 })).total, 30);
+    assert.equal((await listCustomers(writer.shop.id, { query: "racer", perPage: 100 })).total, 30);
     const vehicles = await systemDb
       .select({ count: sql<number>`count(*)::int` })
       .from(customerVehicles)
       .innerJoin(customers, eq(customers.id, customerVehicles.customerId))
-      .where(sql`${customers.shopId} = ${writer.shop.id} and ${customers.name} like 'Twin %'`);
+      .where(sql`${customers.shopId} = ${writer.shop.id} and ${customers.name} like 'Racer %'`);
     assert.equal(vehicles[0].count, 30);
   });
 });

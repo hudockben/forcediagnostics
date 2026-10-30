@@ -20,9 +20,10 @@ import {
 import {
   MAX_IMPORT_BATCH_CUSTOMERS,
   MAX_IMPORT_VEHICLES_PER_CUSTOMER,
+  ambiguousNote,
   fillBlanks,
+  matchCustomer,
   nameKey,
-  sameCustomer,
   sameVehicle,
   type ImportOutcome,
 } from "@/lib/customer-import-rules";
@@ -494,10 +495,11 @@ const rowNumbers = (value: unknown) =>
   (Array.isArray(value) ? value : []).filter((row): row is number => Number.isInteger(row) && row >= 1).slice(0, 1000);
 
 // Saves one batch of an import: each customer is checked as the forms check
-// them, matched with one already on file (the same name, and the same
-// phone number or email; see sameCustomer), whose blank details are filled
-// in but never changed, or added; then their vehicles, leaving out any
-// they already have on record. Importing the same file again adds nothing.
+// them, matched with one already on file (the same name, and nothing that
+// tells them apart; see matchCustomer), whose blank details are filled in
+// but never changed, or added; then their vehicles, leaving out any they
+// already have on record. One that could be any of several customers of
+// that name is added as another, with a note, rather than guessed. Importing the same file again adds nothing.
 // One import at a time per shop (a lock held to the end of the batch), so
 // two at once can't add the same customer twice. The batch is recorded in
 // audit_log as customers.imported, with its counts.
@@ -544,11 +546,13 @@ export async function importCustomers(
     const filledCustomers = new Map<string, CustomerFields>();
     for (const entry of checked) {
       if ("error" in entry.customer) {
-        outcomes.push({ rows: entry.rows, result: "failed", customerId: null, filled: [], vehiclesAdded: 0, vehiclesOnFile: 0, error: entry.customer.error });
+        outcomes.push({ rows: entry.rows, result: "failed", customerId: null, filled: [], vehiclesAdded: 0, vehiclesOnFile: 0, error: entry.customer.error, note: null });
         continue;
       }
       const incoming = entry.customer.customer;
-      let match = known.find((customer) => sameCustomer(customer, incoming));
+      const found = matchCustomer(known, incoming);
+      let match = found.match ?? undefined;
+      const note = found.ambiguous > 1 ? ambiguousNote(incoming.name, found.ambiguous, "on file") : null;
       let filled: (keyof CustomerFields)[] = [];
       if (match) {
         filled = fillBlanks(match, incoming);
@@ -573,7 +577,7 @@ export async function importCustomers(
       }
       vehiclesOf.set(match.id, theirs);
       const result = newCustomers.some((customer) => customer.id === match.id) ? "created" : "matched";
-      outcomes.push({ rows: entry.rows, result, customerId: match.id, filled, vehiclesAdded: added, vehiclesOnFile: already, error: null });
+      outcomes.push({ rows: entry.rows, result, customerId: match.id, filled, vehiclesAdded: added, vehiclesOnFile: already, error: null, note });
     }
 
     if (newCustomers.length > 0) await tx.insert(customers).values(newCustomers);
