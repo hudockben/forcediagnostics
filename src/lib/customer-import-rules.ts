@@ -61,19 +61,27 @@ export function decodeText(bytes: Uint8Array): string {
   }
 }
 
-// Commas, or semicolons or tabs when the first line has more of those
-// (outside quotes).
+// Commas, or semicolons or tabs when a line has more of those (outside
+// quotes): the most of each in any of the first ten lines, so a title line
+// above the headings ("Supplier list") doesn't decide it.
 export function detectDelimiter(text: string): "," | ";" | "\t" {
-  const counts = { ",": 0, ";": 0, "\t": 0 };
+  const most = { ",": 0, ";": 0, "\t": 0 };
+  let counts = { ",": 0, ";": 0, "\t": 0 };
+  let lines = 0;
   let quoted = false;
-  for (let i = 0; i < text.length && i < 64 * 1024; i++) {
+  for (let i = 0; i <= text.length && i < 64 * 1024 && lines < 10; i++) {
     const c = text[i];
     if (c === '"') quoted = !quoted;
-    else if (!quoted && (c === "\n" || c === "\r")) break;
     else if (!quoted && (c === "," || c === ";" || c === "\t")) counts[c]++;
+    else if (!quoted && (c === "\n" || c === "\r" || c === undefined)) {
+      for (const key of [",", ";", "\t"] as const) most[key] = Math.max(most[key], counts[key]);
+      counts = { ",": 0, ";": 0, "\t": 0 };
+      if (c === "\n" || c === undefined) lines++;
+    }
   }
-  if (counts["\t"] > counts[","] && counts["\t"] >= counts[";"]) return "\t";
-  if (counts[";"] > counts[","]) return ";";
+  for (const key of [",", ";", "\t"] as const) most[key] = Math.max(most[key], counts[key]);
+  if (most["\t"] > most[","] && most["\t"] >= most[";"]) return "\t";
+  if (most[";"] > most[","]) return ";";
   return ",";
 }
 

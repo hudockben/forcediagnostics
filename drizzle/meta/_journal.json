@@ -225,6 +225,20 @@
       "when": 1793384382443,
       "tag": "0031_sticker_plate_log_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1793385356071,
+      "tag": "0032_suppliers",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1793385357190,
+      "tag": "0033_suppliers_grants",
+      "breakpoints": true
     }
   ]
 }
