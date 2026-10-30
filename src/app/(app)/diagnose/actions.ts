@@ -3,7 +3,17 @@
 import { DrizzleQueryError } from "drizzle-orm";
 import { unstable_rethrow } from "next/navigation";
 
-import { changeUnit, getConversation, markCause, markStep, requestStop, type ConversationDetail } from "@/lib/diagnose";
+import type { ConversationCustomer, CustomerVehicleChoice } from "@/lib/customer-rules";
+import { searchCustomerVehicles } from "@/lib/customers";
+import {
+  changeUnit,
+  getConversation,
+  linkCustomerVehicle,
+  markCause,
+  markStep,
+  requestStop,
+  type ConversationDetail,
+} from "@/lib/diagnose";
 import type {
   CauseVerdict,
   ConversationView,
@@ -113,6 +123,28 @@ export async function changeUnitAction(input: {
       conversationId: String(input?.conversationId ?? ""),
       modelNumber: typeof input?.modelNumber === "string" ? input.modelNumber : undefined,
       wholeLibrary: input?.wholeLibrary === true,
+    }),
+  );
+}
+
+// Customers' vehicles for the picker: whose each is and what it is, found
+// by the customer's name or phone, or the vehicle's model or VIN.
+export async function searchCustomerVehiclesAction(query: string): Promise<CustomerVehicleChoice[]> {
+  const user = await requireCapability("diagnostics.work");
+  const result = await attempt("look up customers' vehicles", () => searchCustomerVehicles(user.shop.id, String(query ?? "")));
+  return Array.isArray(result) ? result : [];
+}
+
+// Ties a diagnosis to a customer's vehicle, or to none (null).
+export async function linkCustomerAction(input: {
+  conversationId: string;
+  vehicleId: string | null;
+}): Promise<{ customer: ConversationCustomer | null } | Failed> {
+  const user = await requireCapability("diagnostics.work");
+  return attempt("link the customer", () =>
+    linkCustomerVehicle(user, {
+      conversationId: String(input?.conversationId ?? ""),
+      vehicleId: typeof input?.vehicleId === "string" ? input.vehicleId : null,
     }),
   );
 }

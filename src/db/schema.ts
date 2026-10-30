@@ -22,6 +22,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+import { MAX_VEHICLE_YEAR, MIN_VEHICLE_YEAR, VEHICLE_RELATIONS, type VehicleRelation } from "../lib/customer-rules";
 import {
   CONVERSATION_STATUSES,
   TURN_STATUSES,
@@ -734,6 +735,100 @@ export const manualCatalogModels = pgTable(
   ],
 );
 
+// The shop's customers (System Admin > Customers, src/lib/customers.ts):
+// how to reach them, and through customer_vehicles what they've bought,
+// sold and brought in. Contact details stay on these screens; Diagnose only
+// ever sees a customer's name and vehicles.
+export const customers = pgTable(
+  "customers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    // As the form tidied it: "(555) 123-4567" (see normalizePhone in
+    // src/lib/customer-rules.ts).
+    phone: text("phone"),
+    email: text("email"),
+    addressLine1: text("address_line1"),
+    addressLine2: text("address_line2"),
+    city: text("city"),
+    state: text("state"),
+    postalCode: text("postal_code"),
+    notes: text("notes"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // Lets customer_vehicles tie a vehicle to a customer *and* their shop.
+    unique("customers_id_shop").on(t.id, t.shopId),
+    index("customers_shop_name").on(t.shopId, sql`lower(${t.name})`),
+    check("customers_name", sql`length(${t.name}) between 1 and 120`),
+    // Which columns can change is set by the grant in
+    // drizzle/0029_customers_grants.sql.
+    pgPolicy("customers_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// A vehicle on a customer's record: one they bought from the dealership,
+// sold or traded in to it, or brought in for service. The same VIN can be on
+// two records (traded in by one customer, bought by the next).
+export const customerVehicles = pgTable(
+  "customer_vehicles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id").notNull(),
+    customerId: uuid("customer_id").notNull(),
+    relation: text("relation").notNull().$type<VehicleRelation>(),
+    // When they bought it or sold it to us; none for a vehicle that's only
+    // serviced.
+    relationDate: date("relation_date"),
+    year: integer("year"),
+    make: text("make"),
+    model: text("model"),
+    // Upper-cased, e.g. "Z19VDE99AM".
+    modelNumber: text("model_number"),
+    // 17 characters, upper case (see src/lib/vin.ts).
+    vin: text("vin"),
+    color: text("color"),
+    notes: text("notes"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // Lets a diagnosis tie itself to a vehicle *and* its shop.
+    unique("customer_vehicles_id_shop").on(t.id, t.shopId),
+    // A vehicle can only ever belong to a customer in its own shop, and
+    // goes with them.
+    foreignKey({
+      name: "customer_vehicles_customer_shop_fk",
+      columns: [t.customerId, t.shopId],
+      foreignColumns: [customers.id, customers.shopId],
+    }).onDelete("cascade"),
+    index("customer_vehicles_customer").on(t.customerId),
+    index("customer_vehicles_shop_vin").on(t.shopId, t.vin),
+    check(
+      "customer_vehicles_relation",
+      sql`${t.relation} in (${sql.raw(VEHICLE_RELATIONS.map((r) => `'${r}'`).join(", "))})`,
+    ),
+    check("customer_vehicles_year", sql`${t.year} between ${sql.raw(String(MIN_VEHICLE_YEAR))} and ${sql.raw(String(MAX_VEHICLE_YEAR))}`),
+    // 17 letters and digits, never I, O or Q.
+    check("customer_vehicles_vin", sql`${t.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'`),
+    pgPolicy("customer_vehicles_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
 
 // Diagnose: a tech and Claude talking a unit's problem through, one
 // conversation per unit and complaint (src/lib/diagnose.ts). The shop's
@@ -757,6 +852,9 @@ export const diagnosisConversations = pgTable(
     // src/lib/vin.ts). Set when the conversation starts, or when the unit is
     // looked up or changed by VIN.
     unitVin: text("unit_vin"),
+    // The customer's vehicle it's for, when the tech picked one (or it was
+    // linked later). Never sent to Claude.
+    customerVehicleId: uuid("customer_vehicle_id"),
     // The manuals Claude's tools search and read. Null: the whole library.
     scopeManualIds: uuid("scope_manual_ids").array(),
     // Whether web search was declared when it started. The tool list stays
@@ -804,6 +902,14 @@ export const diagnosisConversations = pgTable(
       columns: [t.userId, t.shopId],
       foreignColumns: [users.id, users.shopId],
     }).onDelete("cascade"),
+    // A diagnosis can only be for a vehicle in its own shop. A vehicle with
+    // diagnoses can't be removed: they're the shop's records of it.
+    foreignKey({
+      name: "diagnosis_conversations_customer_vehicle_fk",
+      columns: [t.customerVehicleId, t.shopId],
+      foreignColumns: [customerVehicles.id, customerVehicles.shopId],
+    }),
+    index("diagnosis_conversations_customer_vehicle").on(t.customerVehicleId),
     index("diagnosis_conversations_shop_updated").on(t.shopId, t.updatedAt),
     check(
       "diagnosis_conversations_status",
@@ -822,8 +928,8 @@ export const diagnosisConversations = pgTable(
       withCheck: sql`${t.shopId} = ${currentShopId}`,
     }),
     // Which columns can change is set by the grants in
-    // drizzle/0019_diagnosis_grants.sql, 0023_diagnosis_vin_grants.sql and
-    // 0025_diagnosis_step_checks_grants.sql.
+    // drizzle/0019_diagnosis_grants.sql, 0023_diagnosis_vin_grants.sql,
+    // 0025_diagnosis_step_checks_grants.sql and 0029_customers_grants.sql.
     pgPolicy("diagnosis_conversations_update_own_shop", {
       for: "update",
       to: appUser,

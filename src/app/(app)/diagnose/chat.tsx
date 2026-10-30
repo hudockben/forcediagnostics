@@ -6,6 +6,12 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type FormEvent,
 
 import { Badge, Notice, PageHeading } from "@/components/app/ui";
 import { inputBaseClass, labelClass, primaryLinkClass } from "@/components/hud";
+import {
+  conversationCustomer,
+  diagnoseStartFields,
+  type ConversationCustomer,
+  type CustomerVehicleChoice,
+} from "@/lib/customer-rules";
 import { addAsk } from "@/lib/diagnose-cause-steps";
 import {
   DIAGNOSE_LIMITS,
@@ -28,6 +34,7 @@ import { VIN_LENGTH, checkVin, vinDisagreement } from "@/lib/vin";
 import { Chevron, vehicleOptions } from "../library/search-form";
 import { loadConversationAction, previewVinAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
+import { CustomerLine, CustomerName, CustomerVehiclePicker } from "./customer-picker";
 import {
   CausesIcon,
   ChatIcon,
@@ -61,7 +68,9 @@ export type StarterOptions = {
   brands: { brand: string; manuals: number }[];
   years: number[];
   // Carrying on from a full conversation.
-  carry: { id: string; unit: string | null; text: string } | null;
+  carry: { id: string; unit: string | null; customer: ConversationCustomer | null; text: string } | null;
+  // A customer's vehicle to start with (Start a diagnosis on its record).
+  customer: CustomerVehicleChoice | null;
 };
 
 const POLL_MS = 2500;
@@ -412,19 +421,28 @@ function Starter({
   busy: boolean;
   onStart: (start: Record<string, string>) => Promise<boolean>;
 }) {
+  // A customer's vehicle from its record fills in its model number and
+  // VIN, or with no model number its year and model as the Model.
+  const startFields = options.customer ? diagnoseStartFields(options.customer) : null;
   const [fields, setFields] = useState<StartFields>({
-    modelNumber: "",
-    vin: "",
+    modelNumber: startFields?.modelNumber ?? "",
+    vin: startFields?.vin ?? "",
     vehicle: "",
     year: "",
-    model: "",
+    model: startFields?.model ?? "",
     complaint: "",
     faultCodes: "",
     checked: "",
     message: options.carry?.text ?? "",
   });
   const [picked, setPicked] = useState<UnitSuggestion | null>(null);
-  const [byVehicle, setByVehicle] = useState(false);
+  const [byVehicle, setByVehicle] = useState(Boolean(startFields && !startFields.modelNumber && startFields.model));
+  // The customer's vehicle it's for, if any; a carried-on diagnosis keeps
+  // the earlier one's unless it's changed here.
+  const [customer, setCustomer] = useState<ConversationCustomer | null>(
+    options.customer ? conversationCustomer(options.customer) : (options.carry?.customer ?? null),
+  );
+  const [pickingCustomer, setPickingCustomer] = useState(false);
   const set = (name: keyof StartFields) => (value: string) => setFields((old) => ({ ...old, [name]: value }));
   const codes = normalizeFaultCodes(fields.faultCodes);
   const vin = checkVin(fields.vin);
@@ -471,6 +489,28 @@ function Starter({
     set("modelNumber")(value);
   }
 
+  function pickCustomer(choice: CustomerVehicleChoice) {
+    setCustomer(conversationCustomer(choice));
+    setPickingCustomer(false);
+    // A carried-on diagnosis keeps its unit and manuals.
+    if (options.carry) return;
+    const start = diagnoseStartFields(choice);
+    setMovedVin(false);
+    if (start.modelNumber) {
+      setByVehicle(false);
+      setPicked(null);
+      setFields((old) => ({ ...old, modelNumber: start.modelNumber, vin: start.vin || old.vin }));
+    } else if (start.model) {
+      setByVehicle(true);
+      setFields((old) => ({ ...old, vehicle: "", year: "", model: start.model, vin: start.vin || old.vin }));
+    } else if (start.vin) {
+      setFields((old) => ({ ...old, vin: start.vin }));
+    }
+  }
+
+  // Sent with either form: "" for none.
+  const customerField = { customerVehicle: customer?.vehicleId ?? "" };
+
   function unitFields(): Record<string, string> {
     if (options.carry) return { from: options.carry.id };
     const vinField: Record<string, string> = vin.status === "ok" || vin.status === "partial" ? { vin: vin.vin } : {};
@@ -489,6 +529,7 @@ function Starter({
     if (vinBlocks) return;
     void onStart({
       ...unitFields(),
+      ...customerField,
       complaint: fields.complaint,
       faultCodes: fields.faultCodes,
       checked: fields.checked,
@@ -497,249 +538,296 @@ function Starter({
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void onStart({ ...(options.carry ? { from: options.carry.id } : {}), message: fields.message });
+    void onStart({ ...(options.carry ? { from: options.carry.id } : {}), ...customerField, message: fields.message });
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-      <form
-        onSubmit={submitForm}
-        aria-label="Quick start"
-        className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
+    <div className="space-y-6">
+      <section
+        aria-labelledby="start-customer-label"
+        data-start-customer
+        className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
       >
-        <h2 className="text-base font-semibold text-ink">Quick start</h2>
-        {options.carry ? (
-          <p className="text-sm leading-6 text-ink-muted">
-            Unit: <span className="text-ink">{options.carry.unit ?? "as before"}</span>, with the same manuals.
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <h2 id="start-customer-label" className="text-base font-semibold text-ink">
+            Customer&apos;s vehicle <span className="text-sm font-normal text-ink-muted">(optional)</span>
+          </h2>
+          {customer && !pickingCustomer && (
+            <span className="flex gap-1">
+              <button type="button" onClick={() => setPickingCustomer(true)} className="min-h-11 rounded-lg px-2 text-sm font-medium text-glow/90 hover:text-glow hover:underline">
+                Change
+              </button>
+              <button type="button" onClick={() => setCustomer(null)} className="min-h-11 rounded-lg px-2 text-sm text-ink-muted hover:text-ink">
+                Remove
+              </button>
+            </span>
+          )}
+        </div>
+        {customer && !pickingCustomer ? (
+          <p className="mt-1 text-sm leading-6 break-words" data-start-customer-picked>
+            <CustomerName customer={customer} canOpen={false} />
           </p>
-        ) : !byVehicle ? (
-          <div>
-            <label htmlFor="start-model-number" className={labelClass}>
-              Unit model number
+        ) : (
+          <div className="mt-2 space-y-1.5">
+            <label htmlFor="start-customer" className="sr-only">
+              Find the customer&apos;s vehicle
             </label>
-            <div className="mt-1.5">
-              <UnitPicker
-                id="start-model-number"
-                value={fields.modelNumber}
-                onChange={setModelNumber}
-                picked={picked}
-                onPick={setPicked}
-              />
-            </div>
-            {movedVin && (
-              <p role="status" data-vin-moved className="mt-1.5 flex items-start gap-1.5 text-xs leading-5 text-glow">
-                <CheckIcon className="mt-0.5 size-3.5" />
-                That&apos;s the VIN: it&apos;s in the VIN box below now.
-              </p>
-            )}
-            <p className="mt-1.5 text-xs text-ink-muted">
-              On the frame or VIN plate (Z19VDE99AM, not the 17-character VIN).{" "}
-              {showFilters && (
-                <button type="button" onClick={() => setByVehicle(true)} className="text-glow/90 hover:text-glow hover:underline">
-                  No model number? Pick the vehicle instead.
-                </button>
+            <CustomerVehiclePicker id="start-customer" autoFocus={pickingCustomer} onPick={pickCustomer} />
+            <p className="text-xs leading-5 text-ink-muted">
+              Ties this diagnosis and its fix to the customer&apos;s record.{" "}
+              {options.carry ? "" : "Picking one fills in its model number and VIN."}
+              {customer && (
+                <>
+                  {" "}
+                  <button type="button" onClick={() => setPickingCustomer(false)} className="text-glow/90 hover:text-glow hover:underline">
+                    Keep {customer.customerName}
+                  </button>
+                </>
               )}
             </p>
           </div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="min-w-0">
-                <label htmlFor="start-vehicle" className={labelClass}>
-                  Vehicle
-                </label>
-                <div className="relative mt-1.5">
-                  <select
-                    id="start-vehicle"
-                    value={fields.vehicle}
-                    onChange={(event) => set("vehicle")(event.target.value)}
-                    className={`${inputBaseClass} appearance-none truncate pr-10`}
-                  >
-                    <option value="">Any vehicle</option>
-                    {vehicles.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                  <Chevron />
-                </div>
-              </div>
-              <div className="min-w-0">
-                <label htmlFor="start-year" className={labelClass}>
-                  Year
-                </label>
-                <div className="relative mt-1.5">
-                  <select
-                    id="start-year"
-                    value={fields.year}
-                    onChange={(event) => set("year")(event.target.value)}
-                    className={`${inputBaseClass} appearance-none pr-10`}
-                  >
-                    <option value="">Any year</option>
-                    {options.years.map((year) => (
-                      <option key={year} value={String(year)}>
-                        {year}
-                      </option>
-                    ))}
-                  </select>
-                  <Chevron />
-                </div>
-              </div>
-              <div className="min-w-0">
-                <label htmlFor="start-model" className={labelClass}>
-                  Model
-                </label>
-                <input
-                  id="start-model"
-                  value={fields.model}
-                  onChange={(event) => set("model")(event.target.value)}
-                  placeholder="RZR XP 1000"
-                  autoComplete="off"
-                  maxLength={60}
-                  className={`mt-1.5 ${inputBaseClass}`}
+        )}
+      </section>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <form
+          onSubmit={submitForm}
+          aria-label="Quick start"
+          className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
+        >
+          <h2 className="text-base font-semibold text-ink">Quick start</h2>
+          {options.carry ? (
+            <p className="text-sm leading-6 text-ink-muted">
+              Unit: <span className="text-ink">{options.carry.unit ?? "as before"}</span>, with the same manuals.
+            </p>
+          ) : !byVehicle ? (
+            <div>
+              <label htmlFor="start-model-number" className={labelClass}>
+                Unit model number
+              </label>
+              <div className="mt-1.5">
+                <UnitPicker
+                  id="start-model-number"
+                  value={fields.modelNumber}
+                  onChange={setModelNumber}
+                  picked={picked}
+                  onPick={setPicked}
                 />
               </div>
+              {movedVin && (
+                <p role="status" data-vin-moved className="mt-1.5 flex items-start gap-1.5 text-xs leading-5 text-glow">
+                  <CheckIcon className="mt-0.5 size-3.5" />
+                  That&apos;s the VIN: it&apos;s in the VIN box below now.
+                </p>
+              )}
+              <p className="mt-1.5 text-xs text-ink-muted">
+                On the frame or VIN plate (Z19VDE99AM, not the 17-character VIN).{" "}
+                {showFilters && (
+                  <button type="button" onClick={() => setByVehicle(true)} className="text-glow/90 hover:text-glow hover:underline">
+                    No model number? Pick the vehicle instead.
+                  </button>
+                )}
+              </p>
             </div>
-            <button type="button" onClick={() => setByVehicle(false)} className="text-xs text-glow/90 hover:text-glow hover:underline">
-              Use the model number instead
-            </button>
-          </div>
-        )}
+          ) : (
+            <div className="space-y-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="min-w-0">
+                  <label htmlFor="start-vehicle" className={labelClass}>
+                    Vehicle
+                  </label>
+                  <div className="relative mt-1.5">
+                    <select
+                      id="start-vehicle"
+                      value={fields.vehicle}
+                      onChange={(event) => set("vehicle")(event.target.value)}
+                      className={`${inputBaseClass} appearance-none truncate pr-10`}
+                    >
+                      <option value="">Any vehicle</option>
+                      {vehicles.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <Chevron />
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <label htmlFor="start-year" className={labelClass}>
+                    Year
+                  </label>
+                  <div className="relative mt-1.5">
+                    <select
+                      id="start-year"
+                      value={fields.year}
+                      onChange={(event) => set("year")(event.target.value)}
+                      className={`${inputBaseClass} appearance-none pr-10`}
+                    >
+                      <option value="">Any year</option>
+                      {options.years.map((year) => (
+                        <option key={year} value={String(year)}>
+                          {year}
+                        </option>
+                      ))}
+                    </select>
+                    <Chevron />
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <label htmlFor="start-model" className={labelClass}>
+                    Model
+                  </label>
+                  <input
+                    id="start-model"
+                    value={fields.model}
+                    onChange={(event) => set("model")(event.target.value)}
+                    placeholder="RZR XP 1000"
+                    autoComplete="off"
+                    maxLength={60}
+                    className={`mt-1.5 ${inputBaseClass}`}
+                  />
+                </div>
+              </div>
+              <button type="button" onClick={() => setByVehicle(false)} className="text-xs text-glow/90 hover:text-glow hover:underline">
+                Use the model number instead
+              </button>
+            </div>
+          )}
 
-        {!options.carry && (
+          {!options.carry && (
+            <div>
+              <label htmlFor="start-vin" className={labelClass}>
+                VIN <span className="font-normal text-ink-muted">(optional)</span>
+              </label>
+              <input
+                id="start-vin"
+                value={fields.vin}
+                onChange={(event) => {
+                  setMovedVin(false);
+                  set("vin")(event.target.value);
+                }}
+                onFocus={() => setVinFocused(true)}
+                onBlur={() => setVinFocused(false)}
+                placeholder="17 characters, from the frame"
+                autoComplete="off"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="next"
+                maxLength={40}
+                aria-invalid={vinBlocks}
+                aria-describedby={vinBlocks ? "start-vin-note start-blocked" : "start-vin-note"}
+                // Something that isn't a VIN gets an amber edge: it's the one
+                // thing here that holds the start up.
+                className={`mt-1.5 ${
+                  vinBlocks
+                    ? inputBaseClass.replace("border-white/10", "border-trail/80").replace("focus:border-glow/60", "focus:border-trail").replace("focus:ring-glow/25", "focus:ring-trail/30")
+                    : inputBaseClass
+                } font-mono tracking-wide uppercase placeholder:font-sans placeholder:tracking-normal placeholder:normal-case`}
+              />
+              <VinNote
+                check={vin}
+                typing={vinFocused}
+                preview={okVin && preview?.vin === okVin ? preview.found : undefined}
+                disagreement={disagreement}
+                vehiclePicked={vehiclePicked}
+              />
+            </div>
+          )}
+
           <div>
-            <label htmlFor="start-vin" className={labelClass}>
-              VIN <span className="font-normal text-ink-muted">(optional)</span>
+            <label htmlFor="start-complaint" className={labelClass}>
+              Complaint
+            </label>
+            <textarea
+              id="start-complaint"
+              value={fields.complaint}
+              onChange={(event) => set("complaint")(event.target.value)}
+              rows={2}
+              maxLength={1000}
+              placeholder="Misfires under load, worse when hot"
+              className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
+            />
+          </div>
+          <div>
+            <label htmlFor="start-codes" className={labelClass}>
+              Fault codes
             </label>
             <input
-              id="start-vin"
-              value={fields.vin}
-              onChange={(event) => {
-                setMovedVin(false);
-                set("vin")(event.target.value);
-              }}
-              onFocus={() => setVinFocused(true)}
-              onBlur={() => setVinFocused(false)}
-              placeholder="17 characters, from the frame"
+              id="start-codes"
+              value={fields.faultCodes}
+              onChange={(event) => set("faultCodes")(event.target.value)}
+              placeholder="P0300, P0301"
               autoComplete="off"
               autoCapitalize="characters"
-              autoCorrect="off"
               spellCheck={false}
-              enterKeyHint="next"
-              maxLength={40}
-              aria-invalid={vinBlocks}
-              aria-describedby={vinBlocks ? "start-vin-note start-blocked" : "start-vin-note"}
-              // Something that isn't a VIN gets an amber edge: it's the one
-              // thing here that holds the start up.
-              className={`mt-1.5 ${
-                vinBlocks
-                  ? inputBaseClass.replace("border-white/10", "border-trail/80").replace("focus:border-glow/60", "focus:border-trail").replace("focus:ring-glow/25", "focus:ring-trail/30")
-                  : inputBaseClass
-              } font-mono tracking-wide uppercase placeholder:font-sans placeholder:tracking-normal placeholder:normal-case`}
+              maxLength={400}
+              aria-describedby="start-codes-seen"
+              className={`mt-1.5 ${inputBaseClass}`}
             />
-            <VinNote
-              check={vin}
-              typing={vinFocused}
-              preview={okVin && preview?.vin === okVin ? preview.found : undefined}
-              disagreement={disagreement}
-              vehiclePicked={vehiclePicked}
+            <p id="start-codes-seen" className="mt-1.5 flex flex-wrap gap-1.5" aria-live="polite">
+              {codes.map((code) => (
+                <span key={code} className="rounded-full bg-white/5 px-2.5 py-0.5 font-mono text-xs text-ink">
+                  {code}
+                </span>
+              ))}
+            </p>
+          </div>
+          <div>
+            <label htmlFor="start-checked" className={labelClass}>
+              What&apos;s been checked
+            </label>
+            <textarea
+              id="start-checked"
+              value={fields.checked}
+              onChange={(event) => set("checked")(event.target.value)}
+              rows={2}
+              maxLength={1000}
+              placeholder="New plugs, battery tested good"
+              className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
             />
           </div>
-        )}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              type="submit"
+              disabled={busy || (!fields.complaint.trim() && codes.length === 0) || vinBlocks}
+              aria-describedby={vinBlocks ? "start-blocked" : undefined}
+              className={primaryLinkClass}
+            >
+              Start diagnosis
+            </button>
+            {vinBlocks && (
+              <p id="start-blocked" role="status" className="flex items-center gap-1.5 text-sm font-medium text-trail">
+                <WarningIcon className="size-4" />
+                Fix or clear the VIN to start.
+              </p>
+            )}
+          </div>
+        </form>
 
-        <div>
-          <label htmlFor="start-complaint" className={labelClass}>
-            Complaint
+        <form
+          onSubmit={submitMessage}
+          aria-label="Just type it"
+          className="flex flex-col gap-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
+        >
+          <h2 className="text-base font-semibold text-ink">Or just type it</h2>
+          <label htmlFor="start-message" className="sr-only">
+            Describe the unit and the problem
           </label>
           <textarea
-            id="start-complaint"
-            value={fields.complaint}
-            onChange={(event) => set("complaint")(event.target.value)}
-            rows={2}
-            maxLength={1000}
-            placeholder="Misfires under load, worse when hot"
-            className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
+            id="start-message"
+            value={fields.message}
+            onChange={(event) => set("message")(event.target.value)}
+            rows={8}
+            maxLength={DIAGNOSE_LIMITS.techText}
+            placeholder="2019 RZR XP 1000, misfire under load, P0300. Plugs are new."
+            className={`${inputBaseClass} h-auto flex-1 py-3`}
           />
-        </div>
-        <div>
-          <label htmlFor="start-codes" className={labelClass}>
-            Fault codes
-          </label>
-          <input
-            id="start-codes"
-            value={fields.faultCodes}
-            onChange={(event) => set("faultCodes")(event.target.value)}
-            placeholder="P0300, P0301"
-            autoComplete="off"
-            autoCapitalize="characters"
-            spellCheck={false}
-            maxLength={400}
-            aria-describedby="start-codes-seen"
-            className={`mt-1.5 ${inputBaseClass}`}
-          />
-          <p id="start-codes-seen" className="mt-1.5 flex flex-wrap gap-1.5" aria-live="polite">
-            {codes.map((code) => (
-              <span key={code} className="rounded-full bg-white/5 px-2.5 py-0.5 font-mono text-xs text-ink">
-                {code}
-              </span>
-            ))}
-          </p>
-        </div>
-        <div>
-          <label htmlFor="start-checked" className={labelClass}>
-            What&apos;s been checked
-          </label>
-          <textarea
-            id="start-checked"
-            value={fields.checked}
-            onChange={(event) => set("checked")(event.target.value)}
-            rows={2}
-            maxLength={1000}
-            placeholder="New plugs, battery tested good"
-            className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <button
-            type="submit"
-            disabled={busy || (!fields.complaint.trim() && codes.length === 0) || vinBlocks}
-            aria-describedby={vinBlocks ? "start-blocked" : undefined}
-            className={primaryLinkClass}
-          >
-            Start diagnosis
+          <button type="submit" disabled={busy || !fields.message.trim()} className={primaryLinkClass}>
+            Send to Claude
           </button>
-          {vinBlocks && (
-            <p id="start-blocked" role="status" className="flex items-center gap-1.5 text-sm font-medium text-trail">
-              <WarningIcon className="size-4" />
-              Fix or clear the VIN to start.
-            </p>
-          )}
-        </div>
-      </form>
-
-      <form
-        onSubmit={submitMessage}
-        aria-label="Just type it"
-        className="flex flex-col gap-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
-      >
-        <h2 className="text-base font-semibold text-ink">Or just type it</h2>
-        <label htmlFor="start-message" className="sr-only">
-          Describe the unit and the problem
-        </label>
-        <textarea
-          id="start-message"
-          value={fields.message}
-          onChange={(event) => set("message")(event.target.value)}
-          rows={8}
-          maxLength={DIAGNOSE_LIMITS.techText}
-          placeholder="2019 RZR XP 1000, misfire under load, P0300. Plugs are new."
-          className={`${inputBaseClass} h-auto flex-1 py-3`}
-        />
-        <button type="submit" disabled={busy || !fields.message.trim()} className={primaryLinkClass}>
-          Send to Claude
-        </button>
-      </form>
+        </form>
+      </div>
     </div>
   );
 }
@@ -877,17 +965,30 @@ function VinMatch({ preview, vehiclePicked }: { preview: VinPreview | null | und
 // it stays the same for Back and Forward, which find that conversation as it
 // was. "Start a new diagnosis for this unit" from a conversation started here
 // only changes ?from=, which keeps bfcacheId, so the carried one is in the key.
-export function NewDiagnosisChat({ starter }: { starter: StarterOptions }) {
+// Start a diagnosis on a customer's vehicle only changes ?vehicle=, so the
+// vehicle is in the key too.
+export function NewDiagnosisChat({ starter, customerLinks }: { starter: StarterOptions; customerLinks: boolean }) {
   const { bfcacheId } = useRouter();
-  return <DiagnoseChat key={`${bfcacheId}:${starter.carry?.id ?? ""}`} initial={null} starter={starter} />;
+  return (
+    <DiagnoseChat
+      key={`${bfcacheId}:${starter.carry?.id ?? ""}:${starter.customer?.vehicleId ?? ""}`}
+      initial={null}
+      starter={starter}
+      customerLinks={customerLinks}
+    />
+  );
 }
 
 export function DiagnoseChat({
   initial,
   starter,
+  customerLinks,
 }: {
   initial: Detail | null;
   starter: StarterOptions | null;
+  // Whether the viewer can open customers' records (System Admin >
+  // Customers), so the customer's name links to theirs.
+  customerLinks: boolean;
 }) {
   const [conversation, setConversation] = useState<ConversationView | null>(initial?.conversation ?? null);
   const [turns, setTurns] = useState<TurnView[]>(initial?.turns ?? []);
@@ -1200,6 +1301,12 @@ export function DiagnoseChat({
           </Link>
           <h1 className="mt-1 text-xl font-semibold tracking-tight break-words text-ink max-lg:mt-0 max-lg:text-lg max-lg:leading-snug">{conversation.title}</h1>
           {conversation.unit && <p className="text-sm text-ink-muted">{conversation.unit}</p>}
+          <CustomerLine
+            conversationId={conversation.id}
+            customer={conversation.customer}
+            canOpen={customerLinks}
+            onChange={(customer) => setConversation((old) => (old ? { ...old, customer } : old))}
+          />
         </div>
       </header>
 

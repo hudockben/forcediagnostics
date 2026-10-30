@@ -16,8 +16,21 @@ const TYPING_PAUSE_MS = 300;
 // from the server). The search lives in the address (/diagnose?q=…), so
 // Back and shared links keep it, and a new search starts on page 1. Without
 // JavaScript it's a plain GET form (Enter searches, × is a link to the
-// whole list); with it, the list follows as you type.
-export function ListSearch({ query, children }: { query: string; children: ReactNode }) {
+// whole list); with it, the list follows as you type. System Admin >
+// Customers uses it too, at its own path.
+export function ListSearch({
+  query,
+  children,
+  path = "/diagnose",
+  label = "Search diagnoses",
+  placeholder = "Complaint, unit, VIN, customer or tech",
+}: {
+  query: string;
+  children: ReactNode;
+  path?: string;
+  label?: string;
+  placeholder?: string;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [text, setText] = useState(query);
@@ -62,8 +75,8 @@ export function ListSearch({ query, children }: { query: string; children: React
     setSent((list) => [...list.slice(-20), next]);
     setPushed(push);
     startTransition(() => {
-      if (push) router.push(listHref(next), { scroll: false });
-      else router.replace(listHref(next), { scroll: false });
+      if (push) router.push(listHref(next, 1, path), { scroll: false });
+      else router.replace(listHref(next, 1, path), { scroll: false });
     });
   }
 
@@ -79,7 +92,7 @@ export function ListSearch({ query, children }: { query: string; children: React
   return (
     <div>
       <form
-        action="/diagnose"
+        action={path}
         role="search"
         className="relative"
         onSubmit={(event) => {
@@ -87,13 +100,13 @@ export function ListSearch({ query, children }: { query: string; children: React
           search(text);
         }}
       >
-        <label htmlFor="diagnose-q" className="sr-only">
-          Search diagnoses
+        <label htmlFor="list-q" className="sr-only">
+          {label}
         </label>
         <SearchIcon className="pointer-events-none absolute top-1/2 left-3.5 size-4 -translate-y-1/2 text-ink-muted" />
         <input
           ref={input}
-          id="diagnose-q"
+          id="list-q"
           name="q"
           type="search"
           value={text}
@@ -110,7 +123,7 @@ export function ListSearch({ query, children }: { query: string; children: React
             if (timer.current !== undefined) search(text);
           }}
           maxLength={MAX_LIST_QUERY_LENGTH}
-          placeholder="Complaint, unit, VIN or tech"
+          placeholder={placeholder}
           autoComplete="off"
           enterKeyHint="search"
           data-list-search
@@ -118,7 +131,7 @@ export function ListSearch({ query, children }: { query: string; children: React
         />
         {text && (
           <Link
-            href="/diagnose"
+            href={path}
             aria-label="Clear the search"
             data-search-clear
             onClick={(event) => {

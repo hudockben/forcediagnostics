@@ -2,7 +2,9 @@
 // by CRLF (a bare LF or CR works too), and a field in double quotes may hold
 // commas, line breaks and quotes written twice (""). A byte order mark at the
 // start is dropped, and so is the line break after the last row. Kept free of
-// other imports so the browser can use it.
+// other imports so the browser can use it. Another delimiter can be given:
+// Excel saves "CSV" with semicolons where the comma is the decimal point, and
+// tabs in its "Unicode Text" files.
 
 export class CsvError extends Error {
   constructor(
@@ -14,7 +16,8 @@ export class CsvError extends Error {
   }
 }
 
-export function parseCsv(text: string): string[][] {
+export function parseCsv(text: string, delimiter: "," | ";" | "\t" = ","): string[][] {
+  const separator = delimiter.charCodeAt(0);
   const rows: string[][] = [];
   let row: string[] = [];
   const end = text.length;
@@ -40,16 +43,19 @@ export function parseCsv(text: string): string[][] {
         }
       }
       const next = text[at];
-      if (at < end && next !== "," && next !== "\r" && next !== "\n") {
-        throw new CsvError("Something follows a closing quote before the next comma.", rows.length + 1);
+      if (at < end && next !== delimiter && next !== "\r" && next !== "\n") {
+        throw new CsvError(
+          `Something follows a closing quote before the next ${delimiter === "," ? "comma" : delimiter === ";" ? "semicolon" : "tab"}.`,
+          rows.length + 1,
+        );
       }
     } else {
-      // Unquoted: up to the next comma or line break. A stray quote inside
-      // is kept as it is, as spreadsheet programs do.
+      // Unquoted: up to the next delimiter or line break. A stray quote
+      // inside is kept as it is, as spreadsheet programs do.
       let stop = at;
       while (stop < end) {
         const c = text.charCodeAt(stop);
-        if (c === 44 /* , */ || c === 13 /* \r */ || c === 10 /* \n */) break;
+        if (c === separator || c === 13 /* \r */ || c === 10 /* \n */) break;
         stop++;
       }
       field = text.slice(at, stop);
@@ -61,7 +67,7 @@ export function parseCsv(text: string): string[][] {
       rows.push(row);
       return rows;
     }
-    if (text[at] === ",") {
+    if (text[at] === delimiter) {
       at++;
       // A comma at the very end still means one more (empty) field.
       if (at >= end) {

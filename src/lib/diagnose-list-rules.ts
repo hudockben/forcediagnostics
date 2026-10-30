@@ -89,11 +89,12 @@ export function pageItems(page: number, pages: number, around = 1): (number | nu
 }
 
 // The list's address for a search and a page; no search and page 1 are
-// left out, so the plain list stays /diagnose.
-export function listHref(query: string, page = 1) {
+// left out, so the plain list stays /diagnose. System Admin > Customers
+// pages its list the same way, at its own path.
+export function listHref(query: string, page = 1, path = "/diagnose") {
   const params = new URLSearchParams();
   if (query) params.set("q", query);
   if (page > 1) params.set("page", String(page));
   const search = params.toString();
-  return search ? `/diagnose?${search}` : "/diagnose";
+  return search ? `${path}?${search}` : path;
 }

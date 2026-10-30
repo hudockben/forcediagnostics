@@ -35,8 +35,8 @@ export const CAPABILITIES = [
   },
   {
     key: "repair_orders.intake",
-    label: "Repair order intake",
-    detail: "Customers, units, complaints and write-ups",
+    label: "Customers and intake",
+    detail: "Customers, their contact details and vehicles; complaints and write-ups",
     roles: ["service_writer", "manager", "admin"],
   },
   {
@@ -96,9 +96,12 @@ export function can(role: Role, capability: Capability) {
 }
 
 // Admin areas need a password sign-in; a PIN on a bay tablet isn't enough.
+// So do customers' contact details, which stay off the shared tablets
+// (Diagnose shows a customer's name and vehicles only).
 const PASSWORD_ONLY: ReadonlySet<Capability> = new Set<Capability>([
   "accounts.manage",
   "bay_tablets.manage",
+  "repair_orders.intake",
   "settings.manage",
 ]);
 
@@ -117,6 +120,7 @@ export function allows(user: { role: Role; bay: object | null }, capability: Cap
 // The System Admin sections, in menu order. The tab opens the first one the
 // user may use.
 export const ADMIN_SECTIONS: { href: string; label: string; capability: Capability }[] = [
+  { href: "/admin/customers", label: "Customers", capability: "repair_orders.intake" },
   { href: "/admin/accounts", label: "Accounts", capability: "accounts.manage" },
   { href: "/admin/bay-tablets", label: "Bay tablets", capability: "bay_tablets.manage" },
   { href: "/admin/manuals", label: "Manuals", capability: "settings.manage" },
