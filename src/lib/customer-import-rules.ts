@@ -353,8 +353,16 @@ const RELATION_WORDS: Record<string, VehicleRelation> = {
 export const parseRelation = (text: string): VehicleRelation | null => RELATION_WORDS[headingKey(text)] ?? null;
 
 // A US ZIP code Excel stored as a number lost its leading zeros ("2134"
-// for 02134): put them back.
-const padZip = (text: string) => (/^\d{3,4}$/.test(text) ? text.padStart(5, "0") : text);
+// for 02134) and a ZIP+4 its dash too ("21341234" for 02134-1234): put
+// them back.
+export function padZip(text: string) {
+  if (/^\d{3,4}$/.test(text)) return text.padStart(5, "0");
+  if (/^\d{8,9}$/.test(text)) {
+    const digits = text.padStart(9, "0");
+    return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+  }
+  return text;
+}
 
 // --- Planning -------------------------------------------------------------------------
 

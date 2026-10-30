@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { posix } from "node:path";
 import { describe, test } from "node:test";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { crc32, deflateRawSync, constants as zlib } from "node:zlib";
 
 import { XLSX_LIMITS, XlsxError, isZip, readXlsx, type XlsxSheet } from "../src/lib/xlsx";
@@ -30,6 +32,9 @@ type ZipFile = {
   compressedSize?: number;
   flags?: number;
   method?: number;
+  // A second directory entry for the data already written under this name,
+  // rather than a copy of its own.
+  dataOf?: string;
 };
 
 type ZipOptions = {
@@ -44,8 +49,17 @@ type ZipOptions = {
 function makeZip(files: ZipFile[], options: ZipOptions = {}): Uint8Array {
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
+  const written = new Map<string, Buffer>();
   let offset = 0;
   for (const file of files) {
+    const shared = file.dataOf === undefined ? undefined : written.get(file.dataOf);
+    if (shared) {
+      const name = Buffer.from(file.name, "utf8");
+      const central = Buffer.from(shared);
+      central.writeUInt16LE(name.length, 28);
+      centrals.push(central, name);
+      continue;
+    }
     const raw = typeof file.data === "string" ? Buffer.from(file.data, "utf8") : Buffer.from(file.data);
     const packed = file.packed ? Buffer.from(file.packed) : file.store ? raw : deflateRawSync(raw);
     const method = file.method ?? (file.store ? 0 : 8);
@@ -88,6 +102,7 @@ function makeZip(files: ZipFile[], options: ZipOptions = {}): Uint8Array {
     central.writeUInt16LE(name.length, 28);
     central.writeUInt32LE(offset, 42);
     centrals.push(central, name);
+    written.set(file.name, central);
 
     const entry = Buffer.concat(parts);
     locals.push(entry);
@@ -212,6 +227,27 @@ async function refusal(bytes: Uint8Array, limits?: Partial<typeof XLSX_LIMITS>):
   }
   assert.fail("expected the workbook to be refused");
 }
+
+// Where a part's packed bytes are in a zip, found through its directory.
+function packedRange(zip: Uint8Array, name: string): [number, number] {
+  const bytes = Buffer.from(zip.buffer, zip.byteOffset, zip.byteLength);
+  const end = bytes.lastIndexOf(Buffer.from([0x50, 0x4b, 5, 6]));
+  let at = bytes.readUInt32LE(end + 16);
+  for (let i = 0; i < bytes.readUInt16LE(end + 10); i++) {
+    const nameLength = bytes.readUInt16LE(at + 28);
+    if (bytes.toString("utf8", at + 46, at + 46 + nameLength) === name) {
+      const local = bytes.readUInt32LE(at + 42);
+      const start = local + 30 + bytes.readUInt16LE(local + 26) + bytes.readUInt16LE(local + 28);
+      return [start, start + bytes.readUInt32LE(at + 20)];
+    }
+    at += 46 + nameLength + bytes.readUInt16LE(at + 30) + bytes.readUInt16LE(at + 32);
+  }
+  throw new Error(`${name} isn't in the zip`);
+}
+
+// Garbage collection on demand, to see what a result keeps hold of.
+setFlagsFromString("--expose-gc");
+const collectGarbage = runInNewContext("gc") as () => void;
 
 // ---------------------------------------------------------------------------
 
@@ -349,17 +385,25 @@ describe("the zip", () => {
     for (let length = 4; length < ours.length; length++) await refusal(ours.subarray(0, length));
   });
 
-  test("bytes changed here and there: read or refused, never a crash", async () => {
-    const whole = new Uint8Array(fixture("customers-libreoffice.xlsx"));
+  test("bytes changed here and there: refused, or read unchanged, never a crash", async () => {
     let seed = 7;
     const random = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
-    for (let round = 0; round < 300; round++) {
-      const bytes = whole.slice();
-      for (let n = 0; n < 1 + round % 4; n++) bytes[Math.floor(random() * bytes.length)] = Math.floor(random() * 256);
-      try {
-        await readXlsx(bytes);
-      } catch (error) {
-        assert.ok(error instanceof XlsxError, `round ${round}: ${String(error)}`);
+    for (const name of ["customers-libreoffice.xlsx", "dates-1904-openpyxl.xlsx"]) {
+      const whole = new Uint8Array(fixture(name));
+      const good = JSON.stringify(await readXlsx(whole));
+      for (let round = 0; round < 300; round++) {
+        const bytes = whole.slice();
+        for (let n = 0; n < 1 + round % 4; n++) bytes[Math.floor(random() * bytes.length)] = Math.floor(random() * 256);
+        let read: string;
+        try {
+          read = JSON.stringify(await readXlsx(bytes));
+        } catch (error) {
+          assert.ok(error instanceof XlsxError, `${name} round ${round}: ${String(error)}`);
+          continue;
+        }
+        // Whatever the change hit (an unused part, the zip's spare fields),
+        // it mustn't have changed a single cell.
+        assert.equal(read, good, `${name} round ${round}`);
       }
     }
   });
@@ -396,6 +440,70 @@ describe("the zip", () => {
     assert.match((await refusal(makeZip(stored))).message, /damaged/);
   });
 
+  test("a part that unpacks to the right size but not the right bytes is refused by its checksum", async () => {
+    // Stored: one letter changed in the file.
+    const stored = book({ ...spec, store: true });
+    const at = Buffer.from(stored).indexOf("<t>Dana</t>");
+    const changed = stored.slice();
+    changed[at + 4] = "e".charCodeAt(0);
+    assert.match((await refusal(changed)).message, /damaged or incomplete/);
+    // Deflated: data for other text of the same length.
+    const swapped = bookFiles(spec).map((file) =>
+      file.name === "xl/sharedStrings.xml" ? { ...file, packed: deflateRawSync(Buffer.from(String(file.data).replace("Dana", "Dena"))) } : file,
+    );
+    assert.match((await refusal(makeZip(swapped))).message, /damaged or incomplete/);
+    // A directory that says a part is empty when it isn't.
+    const emptied = bookFiles(spec).map((file) => (file.name === "xl/sharedStrings.xml" ? { ...file, size: 0 } : file));
+    assert.match((await refusal(makeZip(emptied))).message, /damaged or incomplete/);
+  });
+
+  test("a bit flipped anywhere in a sheet's packed data never changes what's read", async () => {
+    const whole = new Uint8Array(fixture("customers-openpyxl.xlsx"));
+    const good = JSON.stringify(await readXlsx(whole));
+    const [start, end] = packedRange(whole, "xl/worksheets/sheet1.xml");
+    for (let at = start; at < end; at++) {
+      const bytes = whole.slice();
+      bytes[at] ^= 1;
+      let read: string;
+      try {
+        read = JSON.stringify(await readXlsx(bytes));
+      } catch (error) {
+        assert.ok(error instanceof XlsxError, `byte ${at}: ${String(error)}`);
+        continue;
+      }
+      assert.equal(read, good, `byte ${at}`);
+    }
+  });
+
+  test("a name damaged in the zip's directory is refused, rather than its part taken as missing", async () => {
+    const styles = `<styleSheet xmlns="${MAIN}"><cellXfs><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>`;
+    const bytes = book({ sheets: [{ name: "Dates", rows: `<row r="1"><c r="A1" s="1"><v>45444</v></c></row>` }], styles });
+    assert.deepEqual(await readXlsx(bytes), [{ name: "Dates", rows: [["2024-06-01"]] }]);
+    // The directory's copy of the name comes last in the file. Without
+    // styles.xml the date would read as 45444.
+    const renamed = bytes.slice();
+    renamed[Buffer.from(renamed).lastIndexOf("xl/styles.xml") + 8] = "z".charCodeAt(0);
+    assert.match((await refusal(renamed)).message, /damaged or incomplete/);
+  });
+
+  test("two names for the same data in the zip are refused", async () => {
+    // Two sheets with the same content, the second's directory entry
+    // pointing at the first's data: the trick behind some zip bombs.
+    const files = bookFiles({ sheets: [{ name: "A", rows: "" }, { name: "B", rows: "" }] }).map((file) =>
+      file.name === "xl/worksheets/sheet2.xml" ? { ...file, dataOf: "xl/worksheets/sheet1.xml" } : file,
+    );
+    assert.match((await refusal(makeZip(files))).message, /damaged or incomplete/);
+  });
+
+  test("all the parts read may unpack to four times maxEntryBytes between them", async () => {
+    // Sheets of about 3.7 KB each, under a 4 KB limit apiece.
+    const sheets = (count: number) =>
+      Array.from({ length: count }, (_, i) => ({ name: `S${i}`, xml: sheetPart(`<row r="1"><c r="A1"><v>${i}</v></c></row>`) + " ".repeat(3500) }));
+    assert.equal((await readXlsx(book({ sheets: sheets(3) }), { maxEntryBytes: 4096 })).length, 3);
+    const error = await refusal(book({ sheets: sheets(5) }), { maxEntryBytes: 4096 });
+    assert.match(error.message, /too big to import: it unpacks to more than 16 KB in all/);
+  });
+
   // 1 GB of zeros in about 1 MB: 16 MB deflated (a full flush ends it on a
   // byte, so copies can follow one another), 64 times, then a last, empty
   // block.
@@ -414,6 +522,8 @@ describe("the zip", () => {
     // A smaller limit, for a part that isn't a bomb at all.
     const big = bookFiles(spec).map((file) => (file.name === "xl/sharedStrings.xml" ? { ...file, data: file.data + " ".repeat(5000) } : file));
     assert.match((await refusal(makeZip(big), { maxEntryBytes: 4096 })).message, /unpacks to more than 4 KB/);
+    // Under 1 KB, the limit is given in bytes rather than as "0 KB".
+    assert.match((await refusal(book(spec), { maxEntryBytes: 200 })).message, /unpacks to more than 200 bytes\./);
   });
 
   test("a part that unpacks to more than it claims is stopped as soon as it passes the claim", async () => {
@@ -508,6 +618,18 @@ describe("finding the sheets", () => {
     // A hidden sheet isn't read, so it doesn't matter that it's missing.
     assert.deepEqual(await readXlsx(book({ sheets: [{ name: "Gone", missing: true, state: "hidden" }] })), []);
   });
+
+  test("a part listed as two sheets is refused rather than read again", async () => {
+    const sheets = [{ name: "A", rows: rows("one") }, { name: "B", rows: rows("two") }];
+    // Both sheets naming one relationship.
+    const sameId = bookFiles({ sheets }).map((file) =>
+      file.name === "xl/workbook.xml" ? { ...file, data: String(file.data).replace('r:id="rId2"', 'r:id="rId1"') } : file,
+    );
+    assert.match((await refusal(makeZip(sameId))).message, /damaged: xl\/worksheets\/sheet1\.xml is used twice/);
+    // Two relationships to one part.
+    const sameTarget = await refusal(book({ sheets: sheets.map((sheet) => ({ ...sheet, target: "worksheets/sheet1.xml" })) }));
+    assert.match(sameTarget.message, /is used twice/);
+  });
 });
 
 describe("the XML", () => {
@@ -564,12 +686,45 @@ describe("the XML", () => {
       `</row>`,
       `<row r="1"/><`,
       `< row/>`,
+      // End tags that don't close the element they should.
+      `<row r="1"><c r="A1"><v>8145550199</x></c></row>`,
+      `<row r="1"><c r="A1"><v>1</c></v></row>`,
+      `<x:row r="1"><c r="A1"><v>1</v></c></row>`,
+      `<row r="1"><c r="A1"><v>1</v></c></row></row>`,
+      // Nested deeper than any real workbook.
+      `<row r="1">${"<x>".repeat(300)}${"</x>".repeat(300)}</row>`,
     ]) {
       const error = await refusal(book({ sheets: [{ name: "Broken", xml: `<worksheet xmlns="${MAIN}"><sheetData>${rows}</sheetData></worksheet>` }] }));
       assert.match(error.message, /damaged: xl\/worksheets\/sheet1\.xml can't be read/, rows);
     }
     const strings = await refusal(book({ sheets: [{ name: "A", rows: "" }], strings: `<si><t>open` }));
     assert.match(strings.message, /xl\/sharedStrings\.xml can't be read/);
+  });
+
+  // Files shaped to make the reading slow: each took from a few seconds to
+  // minutes when some step looked further than it had to.
+  test("many <!...> declarations take time in step with their size", async () => {
+    const xml = `<!DOCTYPE worksheet [ <!ENTITY a "b"> ]>${"<!x>".repeat(600_000)}<worksheet xmlns="${MAIN}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>`;
+    const bytes = book({ sheets: [{ name: "Declared", xml }] });
+    const started = Date.now();
+    assert.deepEqual(await readXlsx(bytes), [{ name: "Declared", rows: [["1"]] }]);
+    assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+  });
+
+  test("an element with millions of attributes takes time in step with its size", async () => {
+    const attributes: string[] = [];
+    for (let i = 0; i < 3_000; i++) attributes.push(Array.from({ length: 1_000 }, (_, j) => ` a${i * 1_000 + j}="1"`).join(""));
+    const rows = `<row r="1"><c r="A1"${attributes.join("")} t="inlineStr"><is><t>found</t></is></c></row>`;
+    // Stored, so that the time is the reading, not the unpacking.
+    const bytes = book({ sheets: [{ name: "Wide", rows }], store: true });
+    const started = Date.now();
+    assert.deepEqual(await readXlsx(bytes), [{ name: "Wide", rows: [["found"]] }]);
+    assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+    // A tag with more attributes than are noted as it's read is read again
+    // for each one asked for, by the same rules.
+    const filler = Array.from({ length: 40 }, (_, i) => ` x:a${i}='${i}'`).join("");
+    const wide = `<row r="1"><c xmlns:r="${RELS}"${filler} r = "B1" x:t="inlineStr"><is><t>wide</t></is></c></row>`;
+    assert.deepEqual(await rowsOf(wide), [["", "wide"]]);
   });
 });
 
@@ -580,8 +735,17 @@ describe("cells", () => {
       `<si><r><rPr><b/></rPr><t>Bold</t></r><r><t xml:space="preserve"> and plain</t></r></si>` +
       `<si><r><t>山田</t></r><rPh sb="0" eb="2"><t>ヤマダ</t></rPh><phoneticPr fontId="1"/></si>` +
       `<si><t/></si><si/>`;
-    const rows = `<row r="1">${[0, 1, 2, 3, 4, 5, 99].map((i, n) => `<c r="${"ABCDEFG"[n]}1" t="s"><v>${i}</v></c>`).join("")}<c r="H1" t="s"><v>1</v></c></row>`;
-    assert.deepEqual(await rowsOf(rows, { strings }), [["Dana", "Bold and plain", "山田", "", "", "", "", "Bold and plain"]]);
+    const rows = `<row r="1">${[0, 1, 2, 3, 4].map((i, n) => `<c r="${"ABCDE"[n]}1" t="s"><v>${i}</v></c>`).join("")}<c r="F1" t="s"><v>1</v></c></row>`;
+    assert.deepEqual(await rowsOf(rows, { strings }), [["Dana", "Bold and plain", "山田", "", "", "Bold and plain"]]);
+  });
+
+  test("a cell pointing past the end of the shared strings is damage; with no shared strings at all it's blank", async () => {
+    for (const index of ["1", "99", "-1", "0x0", "x"]) {
+      const rows = `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>${index}</v></c></row>`;
+      const error = await refusal(book({ sheets: [{ name: "Customers", rows }], strings: "<si><t>Dana</t></si>" }));
+      assert.match(error.message, /damaged: sheet "Customers" has a cell whose text is missing/, index);
+    }
+    assert.deepEqual(await rowsOf(`<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>2</v></c></row>`), [["", "2"]]);
   });
 
   test("inline strings, formula strings, booleans, errors, and formulas with and without a value", async () => {
@@ -613,10 +777,43 @@ describe("cells", () => {
       ["1.5E-7", "0.00000015"],
       ["  12  ", "12"],
       ["1e21", "1e+21"],
+      ["+.5", "0.5"],
+      ["5.", "5"],
+      // Small fractions in full down to 1e-20; below that the zeros would
+      // swallow the digits, so the exponent stays.
+      ["1e-20", "0.00000000000000000001"],
+      ["1.5e-21", "1.5e-21"],
+      ["1E-150", "1e-150"],
+      ["-2.5e-120", "-2.5e-120"],
+      ["5e-324", "5e-324"],
+      // Spellings JavaScript reads as numbers but Excel doesn't write.
+      ["0x1F", "0x1F"],
+      ["0b101", "0b101"],
+      ["0o17", "0o17"],
+      ["Infinity", "Infinity"],
+      ["1e999", "1e999"],
+      ["1_000", "1_000"],
       ["not a number", "not a number"],
     ];
     const rows = `<row r="1">${cases.map(([value]) => `<c><v>${value}</v></c>`).join("")}</row>`;
     assert.deepEqual(await rowsOf(rows), [cases.map(([, text]) => text)]);
+  });
+
+  test("a few rows inside a big range with borders read, though Excel writes a cell for every bordered one", async () => {
+    // Borders on A1:Z200, with names in A1:C3: 5,200 <c> elements, 9 values.
+    let rows = "";
+    for (let r = 1; r <= 200; r++) {
+      rows += `<row r="${r}">`;
+      for (let c = 0; c < 26; c++) {
+        const ref = `${"ABCDEFGHIJKLMNOPQRSTUVWXYZ"[c]}${r}`;
+        rows += r <= 3 && c < 3 ? `<c r="${ref}" s="1" t="inlineStr"><is><t>${ref}</t></is></c>` : `<c r="${ref}" s="1"/>`;
+      }
+      rows += "</row>";
+    }
+    const bytes = book({ sheets: [{ name: "Customers", rows }] });
+    const expected = [["A1", "B1", "C1"], ["A2", "B2", "C2"], ["A3", "B3", "C3"]];
+    assert.deepEqual(await readXlsx(bytes, { maxCells: 9 }), [{ name: "Customers", rows: expected }]);
+    assert.match((await refusal(bytes, { maxCells: 8 })).message, /more than 8 cells/);
   });
 
   test("gaps are blank, blank cells at a row's end are dropped, and so are blank rows at the end", async () => {
@@ -639,11 +836,14 @@ describe("cells", () => {
   });
 
   test("a cell outside Excel's grid is refused", async () => {
-    for (const ref of ["XFE1", "A1048577", "ZZZZZZZZZZZZ1"]) {
+    for (const ref of ["XFE1", "A1048577", "ZZZZZZZZZZZZ1", "A0", "1A", "$B$2", "A1e1", "A0x5", "A1.0"]) {
       const error = await refusal(book({ sheets: [{ name: "Far", rows: `<row><c r="${ref}"><v>1</v></c></row>` }] }));
-      assert.match(error.message, /sheet "Far" has a cell outside Excel's grid/);
+      assert.match(error.message, /sheet "Far" has a cell outside Excel's grid/, ref);
     }
-    await refusal(book({ sheets: [{ name: "Far", rows: `<row r="1048577"><c><v>1</v></c></row>` }] }));
+    for (const r of ["1048577", "0", "0x14", "1e1", "-3", "two"]) {
+      const error = await refusal(book({ sheets: [{ name: "Far", rows: `<row r="${r}"><c><v>1</v></c></row>` }] }));
+      assert.match(error.message, /sheet "Far" has a cell outside Excel's grid/, r);
+    }
     // The far corner itself is fine.
     const corner = await rowsOf(`<row r="1048576"><c r="XFD1048576"><v>1</v></c></row>`, {});
     assert.equal(corner.length, 1_048_576);
@@ -659,8 +859,9 @@ describe("cells", () => {
     const padded = `<row r="3"><c r="A3"><v>1</v></c><c r="E3"><v>1</v></c></row>`;
     await readXlsx(book({ sheets: [{ name: "A", rows: padded }] }), { maxCells: 7 });
     await refusal(book({ sheets: [{ name: "A", rows: padded }] }), { maxCells: 6 });
-    // Empty cells count: a sheet of nothing but styled cells is still work.
-    await refusal(book({ sheets: [{ name: "A", rows: `<row r="1">${'<c s="1"/>'.repeat(11)}</row>` }] }), { maxCells: 10 });
+    // A cell with only formatting in it isn't kept, so it doesn't count.
+    const styled = `<row r="1"><c r="A1"><v>1</v></c>${'<c s="1"/>'.repeat(11)}</row>`;
+    assert.deepEqual(await readXlsx(book({ sheets: [{ name: "A", rows: styled }] }), { maxCells: 1 }), [{ name: "A", rows: [["1"]] }]);
     // Across sheets.
     const two = book({ sheets: [{ name: "A", rows: ten }, { name: "B", rows: ten }] });
     await readXlsx(two, { maxCells: 20 });
@@ -749,6 +950,54 @@ describe("dates and times", () => {
     assert.equal(await shown("2958466", 14), "2958466");
   });
 
+  test("a number past 9999-12-31 stays a number in a time or duration format too", async () => {
+    // A phone number in a column styled as a time isn't midnight.
+    assert.equal(await shown("8145550199", 20), "8145550199");
+    assert.equal(await shown("8145550199", "h:mm"), "8145550199");
+    assert.equal(await shown("3000000.25", 21), "3000000.25");
+    assert.equal(await shown("1E+17", "[h]:mm"), "100000000000000000");
+    assert.equal(await shown("1E+20", 46), "100000000000000000000");
+    assert.equal(await shown("2958466", 20), "2958466");
+    // The last day there is still has its time of day.
+    assert.equal(await shown("2958465.75", 20), "18:00");
+    assert.equal(await shown("2957003.5", 20, 'date1904="1"'), "12:00");
+    assert.equal(await shown("2957004", 20, 'date1904="1"'), "2957004");
+  });
+
+  test("[m] and [s] on their own are durations, like [h]", async () => {
+    assert.equal(await shown("0.5", "[h]"), "12:00");
+    assert.equal(await shown("0.5", "[m]"), "12:00");
+    assert.equal(await shown("0.5", "[mm]"), "12:00");
+    assert.equal(await shown("1.25", "[m]"), "30:00");
+    assert.equal(await shown("0.5", "[s]"), "12:00:00");
+    assert.equal(await shown("0.5", "[m]:ss"), "12:00:00");
+  });
+
+  test("built-in formats that are times in Chinese Excel and dates in Japanese and Korean show what the number holds", async () => {
+    for (const id of [34, 52, 55]) {
+      assert.equal(await shown("0.5625", id), "13:30", `format ${id}`);
+      assert.equal(await shown("0", id), "00:00", `format ${id}`);
+      assert.equal(await shown("45444", id), "2024-06-01", `format ${id}`);
+      assert.equal(await shown("45444.5625", id), "2024-06-01 13:30", `format ${id}`);
+    }
+    for (const id of [35, 53, 56]) {
+      assert.equal(await shown("0.5625", id), "13:30:00", `format ${id}`);
+      assert.equal(await shown("45444.5625", id), "2024-06-01 13:30:00", `format ${id}`);
+    }
+    // The others in 27-36 and 50-58 are dates in every language.
+    for (const id of [27, 28, 29, 30, 31, 36, 50, 51, 54, 57, 58]) assert.equal(await shown("45444.5625", id), "2024-06-01", `format ${id}`);
+    for (const id of [32, 33]) assert.equal(await shown("0.5625", id), id === 32 ? "13:30" : "13:30:00");
+  });
+
+  test("one long format code shared by thousands of styles is worked out once", async () => {
+    // 100,000 characters and 2,000 styles, in a file of 2 KB.
+    const formats = `<numFmts><numFmt numFmtId="164" formatCode="${"0".repeat(100_000)}yyyy"/></numFmts>`;
+    const styles = `<styleSheet xmlns="${MAIN}">${formats}<cellXfs>${'<xf numFmtId="164"/>'.repeat(2_000)}</cellXfs></styleSheet>`;
+    const started = Date.now();
+    assert.deepEqual(await rowsOf(`<row r="1"><c r="A1" s="1999"><v>45444</v></c></row>`, { styles }), [["2024-06-01"]]);
+    assert.ok(Date.now() - started < 2000, `took ${Date.now() - started} ms`);
+  });
+
   test("the 1904 system, and LibreOffice's 1900 system without the leap day", async () => {
     for (const flag of ['date1904="1"', 'date1904="true"']) {
       assert.equal(await shown("0", 14, flag), "1904-01-01");
@@ -792,6 +1041,45 @@ describe("dates and times", () => {
     const styles = `<styleSheet xmlns="${MAIN}"><cellXfs><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>`;
     const rows = `<row r="1"><c s="1" t="s"><v>0</v></c><c s="1" t="inlineStr"><is><t>45444</t></is></c><c s="1" t="b"><v>1</v></c></row>`;
     assert.deepEqual(await rowsOf(rows, { styles, strings: "<si><t>45444</t></si>" }), [["45444", "45444", "TRUE"]]);
+  });
+});
+
+describe("zero-padded numbers", () => {
+  test("a format of only zeros, like Excel's Zip Code format, pads whole numbers as Excel shows them", async () => {
+    assert.equal(await shown("2134", "00000"), "02134");
+    assert.equal(await shown("16501", "00000"), "16501");
+    assert.equal(await shown("42", "000000"), "000042");
+    assert.equal(await shown("-42", "00000"), "-00042");
+    assert.equal(await shown("123456", "00000"), "123456");
+    // A fraction is kept rather than rounded away, and other formats with
+    // zeros in them aren't padding.
+    assert.equal(await shown("2134.5", "00000"), "2134.5");
+    assert.equal(await shown("2134", "0"), "2134");
+    assert.equal(await shown("2134", "00000.00"), "2134");
+    assert.equal(await shown("2134", '"ZIP "00000'), "2134");
+  });
+});
+
+describe("memory", () => {
+  test("the rows hold only their own text, not the XML they were read from", async () => {
+    // Long values from three 16 MB parts: a sheet's inline string, formula
+    // text and error, and a shared string.
+    const padding = " ".repeat(16 << 20);
+    const sheet = (text: string) =>
+      `<worksheet xmlns="${MAIN}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>${text}</t></is></c>` +
+      `<c r="B1" t="str"><f>A1</f><v>${text}</v></c><c r="C1" t="e"><v>#${text}</v></c><c r="D1" t="s"><v>0</v></c></row></sheetData>${padding}</worksheet>`;
+    const bytes = book({
+      sheets: [{ name: "One with a long name", xml: sheet("Twenty characters!!") }, { name: "Two", xml: sheet("Another long value") }],
+      strings: `<si><t>A shared string, also long</t></si>${padding}`,
+    });
+    collectGarbage();
+    const before = process.memoryUsage().heapUsed;
+    const sheets = await readXlsx(bytes);
+    collectGarbage();
+    const held = process.memoryUsage().heapUsed - before;
+    assert.deepEqual(sheets[1].rows, [["Another long value", "Another long value", "#Another long value", "A shared string, also long"]]);
+    // Holding on to the parts would be 48 MB or more.
+    assert.ok(held < 8 << 20, `the result holds ${(held / 2 ** 20).toFixed(1)} MB`);
   });
 });
 

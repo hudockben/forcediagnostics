@@ -26,6 +26,7 @@ import {
   importBatches,
   parseImportDate,
   matchCustomer,
+  padZip,
   parseRelation,
   planImport,
   readHeading,
@@ -177,6 +178,15 @@ describe("values", () => {
     assert.equal(parseImportDate("2024-06-24 13:05"), "2024-06-24");
     assert.equal(parseImportDate("2/30/2024"), null);
     assert.equal(parseImportDate("June 24"), null);
+  });
+
+  test("ZIP codes Excel stored as numbers get their zeros and dash back", () => {
+    assert.equal(padZip("2134"), "02134");
+    assert.equal(padZip("16602"), "16602");
+    assert.equal(padZip("21341234"), "02134-1234");
+    assert.equal(padZip("166021234"), "16602-1234");
+    assert.equal(padZip("K1A 0B1"), "K1A 0B1");
+    assert.equal(padZip("12"), "12");
   });
 
   test("deal types; a bare Sold could mean either way", () => {
