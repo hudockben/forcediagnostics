@@ -4,10 +4,12 @@ import { DrizzleQueryError } from "drizzle-orm";
 import { refresh } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 
+import type { ImportOutcome } from "@/lib/customer-import-rules";
 import type { CustomerFields, VehicleFields } from "@/lib/customer-rules";
 import {
   addVehicle,
   createCustomer,
+  importCustomers,
   removeCustomer,
   removeVehicle,
   updateCustomer,
@@ -117,4 +119,27 @@ export async function removeVehicleAction(_previous: FormState, form: FormData):
     if ("error" in result) return { error: result.error };
     redirect(`${customerHref(customerId)}?removed=vehicle`);
   });
+}
+
+// One batch of an import (see src/lib/customer-import-rules.ts); the browser
+// sends them one after another.
+export async function importCustomersAction(input: {
+  importId: string;
+  fileName: string;
+  customers: unknown;
+}): Promise<{ outcomes: ImportOutcome[] } | { error: string }> {
+  try {
+    const user = await requireCapability("repair_orders.intake");
+    return await importCustomers(user, {
+      importId: input?.importId,
+      fileName: input?.fileName,
+      customers: input?.customers,
+    });
+  } catch (error) {
+    unstable_rethrow(error);
+    // The query parameters are customers' details: only the database's own
+    // error goes in the log.
+    console.error("Couldn't import customers", error instanceof DrizzleQueryError ? error.cause : error);
+    return { error: "Couldn't save that batch. Check the connection and try again." };
+  }
 }

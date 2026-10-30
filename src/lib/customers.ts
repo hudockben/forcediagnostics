@@ -1,5 +1,7 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import { DrizzleQueryError, and, asc, desc, eq, inArray, ne, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
@@ -15,6 +17,15 @@ import {
   type VehicleFields,
   type VehicleRelation,
 } from "@/lib/customer-rules";
+import {
+  MAX_IMPORT_BATCH_CUSTOMERS,
+  MAX_IMPORT_VEHICLES_PER_CUSTOMER,
+  fillBlanks,
+  nameKey,
+  sameCustomer,
+  sameVehicle,
+  type ImportOutcome,
+} from "@/lib/customer-import-rules";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid, type ConversationStatus } from "@/lib/diagnose-rules";
 import type { CurrentUser } from "@/lib/session";
@@ -459,6 +470,136 @@ export async function removeVehicle(actor: CurrentUser, customerId: string, vehi
     if (isForeignKeyViolation(error)) return { error: "A diagnosis is tied to this vehicle now, so it stays on the record." };
     throw error;
   }
+}
+
+// --- Importing ----------------------------------------------------------------
+
+// One customer from an import, as the browser sends it (checked again here).
+export type ImportCustomerInput = {
+  rows: unknown;
+  customer: Record<keyof CustomerFields, unknown>;
+  vehicles: unknown;
+};
+
+// The form checks take text, as forms send it.
+const asText = (value: unknown) => (typeof value === "string" ? value : typeof value === "number" ? String(value) : "");
+const textFields = <K extends string>(value: unknown, keys: readonly K[]) => {
+  const record = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return Object.fromEntries(keys.map((key) => [key, asText(record[key])])) as Record<K, string>;
+};
+const CUSTOMER_FIELD_KEYS = ["name", "phone", "email", "addressLine1", "addressLine2", "city", "state", "postalCode", "notes"] as const;
+const VEHICLE_FIELD_KEYS = ["relation", "relationDate", "year", "make", "model", "modelNumber", "vin", "color", "notes"] as const;
+
+const rowNumbers = (value: unknown) =>
+  (Array.isArray(value) ? value : []).filter((row): row is number => Number.isInteger(row) && row >= 1).slice(0, 1000);
+
+// Saves one batch of an import: each customer is checked as the forms check
+// them, matched with one already on file (the same name, and the same
+// phone number or email; see sameCustomer), whose blank details are filled
+// in but never changed, or added; then their vehicles, leaving out any
+// they already have on record. Importing the same file again adds nothing.
+// One import at a time per shop (a lock held to the end of the batch), so
+// two at once can't add the same customer twice. The batch is recorded in
+// audit_log as customers.imported, with its counts.
+export async function importCustomers(
+  actor: CurrentUser,
+  input: { importId: unknown; fileName: unknown; customers: unknown },
+): Promise<{ outcomes: ImportOutcome[] } | { error: string }> {
+  if (!isUuid(input.importId)) return { error: "That import couldn't be read. Choose the file again." };
+  const list = Array.isArray(input.customers) ? (input.customers as ImportCustomerInput[]) : null;
+  if (!list || list.length === 0) return { error: "There were no customers in that batch." };
+  if (list.length > MAX_IMPORT_BATCH_CUSTOMERS) return { error: "That batch is too big. Reload the page and try again." };
+  const fileName = asText(input.fileName).slice(0, 255);
+
+  // Checked before anything is read, the same way the forms check them.
+  const checked = list.map((entry) => {
+    const rows = rowNumbers(entry?.rows);
+    const customer = checkCustomer(textFields(entry?.customer, CUSTOMER_FIELD_KEYS));
+    const vehicles = (Array.isArray(entry?.vehicles) ? entry.vehicles : []).slice(0, MAX_IMPORT_VEHICLES_PER_CUSTOMER).map((vehicle: unknown) => checkVehicle(textFields(vehicle, VEHICLE_FIELD_KEYS)));
+    return { rows, customer, vehicles };
+  });
+
+  return withShop(actor.shop.id, async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('customer-import'), hashtext(${actor.shop.id}))`);
+    const names = [...new Set(checked.flatMap(({ customer }) => ("customer" in customer ? [nameKey(customer.customer.name)] : [])))];
+    const onFile = names.length
+      ? await tx.select(customerColumns).from(customers).where(inArray(sql`lower(${customers.name})`, names))
+      : [];
+    const existingVehicles = onFile.length
+      ? await tx
+          .select(vehicleColumns)
+          .from(customerVehicles)
+          .where(inArray(customerVehicles.customerId, onFile.map((customer) => customer.id)))
+      : [];
+    const vehiclesOf = new Map<string, VehicleFields[]>();
+    for (const vehicle of existingVehicles) vehiclesOf.set(vehicle.customerId, [...(vehiclesOf.get(vehicle.customerId) ?? []), vehicle]);
+    const known: (CustomerFields & { id: string })[] = onFile.map((customer) => ({
+      id: customer.id,
+      ...(Object.fromEntries(CUSTOMER_FIELD_KEYS.map((key) => [key, customer[key]])) as CustomerFields),
+    }));
+
+    const outcomes: ImportOutcome[] = [];
+    const newCustomers: (typeof customers.$inferInsert)[] = [];
+    const newVehicles: (typeof customerVehicles.$inferInsert)[] = [];
+    const filledCustomers = new Map<string, CustomerFields>();
+    for (const entry of checked) {
+      if ("error" in entry.customer) {
+        outcomes.push({ rows: entry.rows, result: "failed", customerId: null, filled: [], vehiclesAdded: 0, vehiclesOnFile: 0, error: entry.customer.error });
+        continue;
+      }
+      const incoming = entry.customer.customer;
+      let match = known.find((customer) => sameCustomer(customer, incoming));
+      let filled: (keyof CustomerFields)[] = [];
+      if (match) {
+        filled = fillBlanks(match, incoming);
+        if (filled.length > 0) filledCustomers.set(match.id, match);
+      } else {
+        match = { ...incoming, id: randomUUID() };
+        known.push(match);
+        newCustomers.push({ ...incoming, id: match.id, shopId: actor.shop.id, createdByUserId: actor.id });
+      }
+      const theirs = vehiclesOf.get(match.id) ?? [];
+      let added = 0;
+      let already = 0;
+      for (const vehicle of entry.vehicles) {
+        if (!("vehicle" in vehicle)) continue;
+        if (theirs.some((other) => sameVehicle(other, vehicle.vehicle))) {
+          already++;
+          continue;
+        }
+        theirs.push(vehicle.vehicle);
+        newVehicles.push({ ...vehicle.vehicle, customerId: match.id, shopId: actor.shop.id });
+        added++;
+      }
+      vehiclesOf.set(match.id, theirs);
+      const result = newCustomers.some((customer) => customer.id === match.id) ? "created" : "matched";
+      outcomes.push({ rows: entry.rows, result, customerId: match.id, filled, vehiclesAdded: added, vehiclesOnFile: already, error: null });
+    }
+
+    if (newCustomers.length > 0) await tx.insert(customers).values(newCustomers);
+    // Only the details that were blank change; what they had stays.
+    for (const [id, customer] of filledCustomers) {
+      const fields = Object.fromEntries(CUSTOMER_FIELD_KEYS.map((key) => [key, customer[key]])) as CustomerFields;
+      await tx.update(customers).set(fields).where(eq(customers.id, id));
+    }
+    if (newVehicles.length > 0) await tx.insert(customerVehicles).values(newVehicles);
+    const count = (result: ImportOutcome["result"]) => outcomes.filter((outcome) => outcome.result === result).length;
+    await audit(
+      tx,
+      actor,
+      "customers.imported",
+      { type: "customer", id: String(input.importId) },
+      {
+        fileName,
+        created: count("created"),
+        matched: count("matched"),
+        filled: filledCustomers.size,
+        failed: count("failed"),
+        vehiclesAdded: newVehicles.length,
+      },
+    );
+    return { outcomes };
+  });
 }
 
 // --- For Diagnose -------------------------------------------------------------

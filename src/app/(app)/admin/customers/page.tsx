@@ -40,9 +40,17 @@ async function Customers({ searchParams }: { searchParams: PageProps<"/admin/cus
         title="Customers"
         description="Everyone the dealership sells to, buys from or services: how to reach them, the vehicles they've bought and sold, and each vehicle's diagnoses and fixes."
         action={
-          <Link href="/admin/customers/new" className={primaryLinkClass}>
-            Add customer
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              href="/admin/customers/import"
+              className="inline-flex h-12 items-center rounded-lg border border-glow/30 px-5 text-base font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+            >
+              Import
+            </Link>
+            <Link href="/admin/customers/new" className={primaryLinkClass}>
+              Add customer
+            </Link>
+          </div>
         }
       />
 
@@ -50,7 +58,13 @@ async function Customers({ searchParams }: { searchParams: PageProps<"/admin/cus
 
       <Card>
         {list.total === 0 && !searching ? (
-          <p className="text-sm leading-6 text-ink-muted">No customers yet. Add the first with Add customer.</p>
+          <p className="text-sm leading-6 text-ink-muted">
+            No customers yet. Add the first with Add customer, or{" "}
+            <Link href="/admin/customers/import" className="text-glow hover:underline">
+              import a list
+            </Link>{" "}
+            from a CSV or Excel file.
+          </p>
         ) : (
           <ListSearch query={query} path={PATH} label="Search customers" placeholder="Name, phone, email, town, model or VIN">
             <Results list={list} query={query} searching={searching} />
