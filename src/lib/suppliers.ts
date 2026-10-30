@@ -115,19 +115,21 @@ export type Category = { code: string; id: string | null; suppliers: number };
 
 // The categories in use, by code, with the Category ID most suppliers of
 // that code have: for the filter, and for filling in a Category ID when a
-// code is picked on the form.
+// code is picked on the form. A code spelt two ways ("DIST", "dist") is
+// one, shown as most of its suppliers spell it; a tie goes by byte order
+// (collate "C"), so the answer doesn't depend on the database's collation.
 export async function listCategories(shopId: string): Promise<Category[]> {
   const rows = await withShop(shopId, (tx) =>
     tx
       .select({
-        code: sql<string>`min(${suppliers.categoryCode})`,
-        id: sql<string | null>`mode() within group (order by ${suppliers.categoryId})`,
+        code: sql<string>`mode() within group (order by ${suppliers.categoryCode} collate "C")`,
+        id: sql<string | null>`mode() within group (order by ${suppliers.categoryId} collate "C")`,
         suppliers: sql<number>`count(*)::int`,
       })
       .from(suppliers)
       .where(sql`${suppliers.categoryCode} is not null`)
       .groupBy(sql`lower(${suppliers.categoryCode})`)
-      .orderBy(sql`lower(min(${suppliers.categoryCode}))`),
+      .orderBy(sql`lower(min(${suppliers.categoryCode} collate "C")) collate "C"`),
   );
   return rows;
 }
