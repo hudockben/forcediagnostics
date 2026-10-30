@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Badge, Notice } from "@/components/app/ui";
 import { inputBaseClass, labelClass, primaryLinkClass } from "@/components/hud";
@@ -15,12 +15,15 @@ import {
   findHeaderRow,
   guessMapping,
   importBatches,
+  isChoiceField,
+  isNumberedField,
   isVehicleField,
   planImport,
   readSpreadsheet,
   reportCsv,
   targetKey,
   type ColumnTarget,
+  type ImportCustomer,
   type ImportField,
   type ImportNote,
   type ImportOutcome,
@@ -42,7 +45,30 @@ type Loaded = { fileName: string; sheets: Sheet[] };
 type Run =
   | { state: "running"; sent: number; total: number; outcomes: ImportOutcome[] }
   | { state: "done"; total: number; outcomes: ImportOutcome[] }
-  | { state: "stopped"; sent: number; total: number; outcomes: ImportOutcome[]; error: string };
+  // canCarryOn: the rest can be sent with Carry on.
+  | { state: "stopped"; sent: number; total: number; outcomes: ImportOutcome[]; error: string; canCarryOn: boolean };
+
+// An import under way: its batches, the next one to send, and what's come
+// back, so a stopped one carries on where it stopped.
+type Job = {
+  importId: string;
+  fileName: string;
+  batches: ImportCustomer[][];
+  // How many customers each batch starts (one with more units than a batch
+  // takes goes in parts, and counts once).
+  counts: number[];
+  next: number;
+  sent: number;
+  total: number;
+  outcomes: ImportOutcome[];
+};
+
+// How the last file imported was set up, so choosing it again (after an
+// import stopped, say) keeps the columns as they were set.
+type Setup = { fileName: string; sheetIndex: number; headerRow: number; headings: string; mapping: (ColumnTarget | null)[]; defaultRelation: VehicleRelation };
+
+const ORDINAL_WORDS = ["1st", "2nd", "3rd"];
+const ordinal = (n: number) => ORDINAL_WORDS[n - 1] ?? `${n}th`;
 
 const selectClass = `${inputBaseClass} h-11 appearance-none pr-9 text-sm`;
 const smallButtonClass =
@@ -105,13 +131,21 @@ export function CustomerImport() {
   const [run, setRun] = useState<Run | null>(null);
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
+  const job = useRef<Job | null>(null);
+  const setup = useRef<Setup | null>(null);
   const fileId = useId();
 
   const sheet = loaded?.sheets[sheetIndex] ?? null;
   const rows = useMemo(() => sheet?.rows ?? [], [sheet]);
+  // Planning a big file takes a moment: the selects answer at once and the
+  // preview follows.
+  const plannedHeader = useDeferredValue(headerRow);
+  const plannedMapping = useDeferredValue(mapping);
+  const plannedRelation = useDeferredValue(defaultRelation);
+  const planning = plannedHeader !== headerRow || plannedMapping !== mapping || plannedRelation !== defaultRelation;
   const plan = useMemo(
-    () => (sheet ? planImport(rows, { headerRow, mapping, defaultRelation }) : null),
-    [sheet, rows, headerRow, mapping, defaultRelation],
+    () => (sheet ? planImport(rows, { headerRow: plannedHeader, mapping: plannedMapping, defaultRelation: plannedRelation }) : null),
+    [sheet, rows, plannedHeader, plannedMapping, plannedRelation],
   );
   const hasName = mapping.some((target) => target && ["name", "firstName", "lastName"].includes(target.field));
   const mapsVehicles = mapping.some((target) => target && isVehicleField(target.field) && target.field !== "relation");
@@ -147,6 +181,16 @@ export function CustomerImport() {
         return;
       }
       setLoaded({ fileName: file.name, sheets: result.sheets });
+      // The same file again, its headings as they were: set up as before.
+      const last = setup.current;
+      const again = last && last.fileName === file.name ? result.sheets[last.sheetIndex]?.rows : undefined;
+      if (last && again && (again[last.headerRow] ?? []).join("\u0000") === last.headings) {
+        setSheetIndex(last.sheetIndex);
+        setHeaderRow(last.headerRow);
+        setMapping(last.mapping);
+        setDefaultRelation(last.defaultRelation);
+        return;
+      }
       // The first sheet with anything on it.
       const first = Math.max(0, result.sheets.findIndex((s) => s.rows.some((row) => row.some((cell) => cell.trim()))));
       showSheet(result.sheets, first);
@@ -160,42 +204,81 @@ export function CustomerImport() {
     }
   }
 
-  // A column's field (and unit); a field (or unit's field) can only come
-  // from one column, so another column that had it is left out.
-  function setColumn(column: number, target: ColumnTarget | null) {
+  // Sets one column's field, leaving every other column as it is (arrowing
+  // through a select's choices mustn't take fields from other columns). A
+  // unit's field or a phone or email that another column has already gets
+  // the next number free; any other field two columns share is flagged by
+  // the table, and the first of them is read.
+  function setColumn(column: number, target: ColumnTarget | null, { nextFree = false } = {}) {
     setMapping((old) => {
       const next = [...old];
       while (next.length <= column) next.push(null);
-      return next.map((current, index) =>
-        index === column ? target : target && current && targetKey(current) === targetKey(target) ? null : current,
-      );
+      let chosen = target;
+      if (chosen && nextFree && isNumberedField(chosen.field)) {
+        const field = chosen.field;
+        const used = new Set(next.flatMap((other, index) => (index !== column && other?.field === field ? [other.unit] : [])));
+        if (used.has(chosen.unit)) {
+          const free = Array.from({ length: MAX_UNITS_PER_ROW }, (_, index) => index + 1).find((unit) => !used.has(unit));
+          if (free) chosen = { field, unit: free };
+        }
+      }
+      next[column] = chosen;
+      return next;
     });
   }
 
-  async function start() {
-    if (!plan || !loaded || running) return;
-    const batches = importBatches(plan.customers);
-    const importId = crypto.randomUUID();
-    const total = plan.customers.length;
-    let sent = 0;
-    const outcomes: ImportOutcome[] = [];
-    setRun({ state: "running", sent, total, outcomes });
-    for (const batch of batches) {
-      const result = await importCustomersAction({ importId, fileName: loaded.fileName, customers: batch }).catch(() => ({
+  // Sends the job's batches from where it stopped, one after another.
+  async function send() {
+    const current = job.current;
+    if (!current) return;
+    setRun({ state: "running", sent: current.sent, total: current.total, outcomes: [...current.outcomes] });
+    while (current.next < current.batches.length) {
+      const batch = current.batches[current.next];
+      const result = await importCustomersAction({ importId: current.importId, fileName: current.fileName, customers: batch }).catch(() => ({
         error: "The connection dropped.",
       }));
       if ("error" in result) {
-        setRun({ state: "stopped", sent, total, outcomes, error: result.error });
+        setRun({ state: "stopped", sent: current.sent, total: current.total, outcomes: [...current.outcomes], error: result.error, canCarryOn: true });
         return;
       }
-      outcomes.push(...result.outcomes);
-      sent += batch.length;
-      setRun({ state: "running", sent, total, outcomes: [...outcomes] });
+      current.outcomes.push(...result.outcomes);
+      current.sent += current.counts[current.next];
+      current.next++;
+      setRun({ state: "running", sent: current.sent, total: current.total, outcomes: [...current.outcomes] });
     }
-    setRun({ state: "done", total, outcomes });
+    job.current = null;
+    setRun({ state: "done", total: current.total, outcomes: current.outcomes });
+  }
+
+  function start() {
+    if (!plan || !loaded || running || planning) return;
+    setup.current = {
+      fileName: loaded.fileName,
+      sheetIndex,
+      headerRow,
+      headings: (rows[headerRow] ?? []).join("\u0000"),
+      mapping,
+      defaultRelation,
+    };
+    // The parts of one customer share their rows.
+    const batches = importBatches(plan.customers);
+    const seen = new Set<number[]>();
+    const counts = batches.map((batch) => batch.filter((part) => !seen.has(part.rows) && Boolean(seen.add(part.rows))).length);
+    job.current = {
+      importId: crypto.randomUUID(),
+      fileName: loaded.fileName,
+      batches,
+      counts,
+      next: 0,
+      sent: 0,
+      total: plan.customers.length,
+      outcomes: [],
+    };
+    void send();
   }
 
   function reset() {
+    job.current = null;
     setLoaded(null);
     setRun(null);
     setReadError(null);
@@ -217,6 +300,15 @@ export function CustomerImport() {
     });
   }, [rows, headerRow]);
 
+  // The first column with each field (and number), which is the one read.
+  const firstColumn = useMemo(() => {
+    const first = new Map<string, number>();
+    mapping.forEach((target, column) => {
+      if (target && !first.has(targetKey(target))) first.set(targetKey(target), column);
+    });
+    return first;
+  }, [mapping]);
+
   // Every row's notes: the plan's, then the server's.
   const notes: ImportNote[] = useMemo(() => {
     const all = [...(plan?.notes ?? [])];
@@ -228,7 +320,15 @@ export function CustomerImport() {
   }, [plan, run]);
 
   if (run && run.state !== "running") {
-    return <Finished run={run} notes={notes} fileName={loaded?.fileName ?? "import"} onAgain={reset} />;
+    return (
+      <Finished
+        run={run}
+        notes={notes}
+        fileName={loaded?.fileName ?? "import"}
+        onAgain={reset}
+        onCarryOn={run.state === "stopped" && run.canCarryOn ? () => void send() : null}
+      />
+    );
   }
 
 
@@ -322,6 +422,8 @@ export function CustomerImport() {
                   onChange={(event) => showSheet(loaded.sheets, sheetIndex, Number(event.target.value))}
                   className={selectClass}
                 >
+                  {/* A list kept by hand can start with its first customer. */}
+                  <option value={-1}>No headings row</option>
                   {Array.from({ length: Math.min(HEADER_SEARCH_ROWS, Math.max(1, rows.length)) }, (_, index) => (
                     <option key={index} value={index}>
                       Row {index + 1}
@@ -376,6 +478,9 @@ export function CustomerImport() {
               </thead>
               <tbody className="divide-y divide-white/10">
                 {columns.map(({ label, examples }, column) => {
+                  const target = mapping[column] ?? null;
+                  // Another column that has this one's field (and number): the first is read.
+                  const first = target ? (firstColumn.get(targetKey(target)) ?? column) : column;
                   return (
                     <tr key={column}>
                       <th scope="row" className="px-5 py-2 text-left font-medium break-words text-ink sm:px-6">
@@ -391,7 +496,7 @@ export function CustomerImport() {
                               disabled={running}
                               onChange={(event) => {
                                 const field = (event.target.value || null) as ImportField | null;
-                                setColumn(column, field && { field, unit: mapping[column]?.unit ?? 1 });
+                                setColumn(column, field && { field, unit: target?.field === field ? target.unit : 1 }, { nextFree: true });
                               }}
                               className={`${selectClass} ${mapping[column] ? "border-glow/40 text-ink" : "text-ink-muted"}`}
                             >
@@ -413,20 +518,25 @@ export function CustomerImport() {
                             </select>
                             <Chevron />
                           </div>
-                          {/* A customer's units can sit side by side in a row. */}
-                          {mapping[column] && isVehicleField(mapping[column].field) && (
-                            <div className="relative w-28 shrink-0">
+                          {/* A customer's units can sit side by side in a row, and a
+                              customer can have several phone numbers and emails. */}
+                          {target && isNumberedField(target.field) && (
+                            <div className="relative w-32 shrink-0">
                               <select
-                                aria-label={`Which of the customer's units ${label} is for`}
-                                value={mapping[column].unit}
+                                aria-label={
+                                  isChoiceField(target.field)
+                                    ? `Which choice of ${IMPORT_FIELD_LABELS[target.field].toLowerCase()} ${label} is`
+                                    : `Which of the customer's units ${label} is for`
+                                }
+                                value={target.unit}
                                 disabled={running}
-                                onChange={(event) => setColumn(column, { field: mapping[column]!.field, unit: Number(event.target.value) })}
+                                onChange={(event) => setColumn(column, { field: target.field, unit: Number(event.target.value) })}
                                 className={`${selectClass} border-glow/40 text-ink`}
                                 data-import-unit
                               >
                                 {Array.from({ length: MAX_UNITS_PER_ROW }, (_, index) => (
                                   <option key={index} value={index + 1}>
-                                    Unit {index + 1}
+                                    {isChoiceField(target.field) ? `${ordinal(index + 1)} choice` : `Unit ${index + 1}`}
                                   </option>
                                 ))}
                               </select>
@@ -434,6 +544,11 @@ export function CustomerImport() {
                             </div>
                           )}
                         </div>
+                        {first !== column && (
+                          <p className="mt-1 text-xs text-trail" data-import-duplicate>
+                            {columns[first]?.label ?? "Another column"} has this too: only that column is read.
+                          </p>
+                        )}
                       </td>
                     </tr>
                   );
@@ -451,16 +566,18 @@ export function CustomerImport() {
 
       {loaded && plan && hasName && (
         <Section title="3. Import">
-          <Preview plan={plan} notes={notes} fileName={loaded.fileName} />
+          <div aria-busy={planning} className={`transition-opacity ${planning ? "opacity-60" : ""}`}>
+            <Preview plan={plan} notes={notes} fileName={loaded.fileName} />
+          </div>
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-3">
             <button
               type="button"
-              onClick={() => void start()}
-              disabled={running || plan.customers.length === 0}
+              onClick={start}
+              disabled={running || planning || plan.customers.length === 0}
               className={primaryLinkClass}
               data-import-start
             >
-              {running ? "Importing…" : `Import ${plural(plan.customers.length, "customer", "customers")}`}
+              {running ? "Importing…" : planning ? "Updating…" : `Import ${plural(plan.customers.length, "customer", "customers")}`}
             </button>
             {run?.state === "running" && (
               <div className="min-w-56 flex-1" role="status">
@@ -556,11 +673,13 @@ const NOTES_SHOWN = 30;
 function Notes({ notes, fileName }: { notes: ImportNote[]; fileName: string }) {
   if (notes.length === 0) return null;
   const sorted = [...notes].sort((a, b) => a.row - b.row);
-  const skipped = notes.filter((note) => note.skipped).length;
+  // Rows, not notes: a row can have several.
+  const rows = new Set(notes.map((note) => note.row)).size;
+  const skipped = new Set(notes.filter((note) => note.skipped).map((note) => note.row)).size;
   return (
     <details className="rounded-lg border border-trail/30 bg-trail/5 px-4 py-3 text-sm" data-import-notes>
       <summary className="cursor-pointer font-medium text-trail">
-        {plural(notes.length, "row needs", "rows need")} a look
+        {plural(rows, "row needs", "rows need")} a look
         {skipped > 0 ? ` (${plural(skipped, "left out", "left out")})` : ""}
       </summary>
       <ul className="mt-2 space-y-1 text-ink">
@@ -587,26 +706,46 @@ function Finished({
   notes,
   fileName,
   onAgain,
+  onCarryOn,
 }: {
   run: Extract<Run, { state: "done" | "stopped" }>;
   notes: ImportNote[];
   fileName: string;
   onAgain: () => void;
+  // Sends the rest of a stopped import, with the same file and columns.
+  onCarryOn: (() => void) | null;
 }) {
-  const count = (result: ImportOutcome["result"]) => run.outcomes.filter((outcome) => outcome.result === result).length;
-  const created = count("created");
-  const matched = count("matched");
-  const failed = count("failed");
-  const filled = run.outcomes.filter((outcome) => outcome.filled.length > 0).length;
+  // Focus moves to the result, which screen readers then read out.
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => heading.current?.focus(), [run.state]);
+  // By customer: one with many units can come back in parts.
+  const customers = new Map<string, { created: boolean; filled: boolean }>();
+  for (const outcome of run.outcomes) {
+    if (!outcome.customerId) continue;
+    const seen = customers.get(outcome.customerId) ?? { created: false, filled: false };
+    customers.set(outcome.customerId, {
+      created: seen.created || outcome.result === "created",
+      filled: seen.filled || outcome.filled.length > 0,
+    });
+  }
+  const all = [...customers.values()];
+  const created = all.filter((customer) => customer.created).length;
+  const matched = all.length - created;
+  const filled = all.filter((customer) => !customer.created && customer.filled).length;
+  const failed = run.outcomes.filter((outcome) => outcome.result === "failed").length;
   const vehiclesAdded = run.outcomes.reduce((sum, outcome) => sum + outcome.vehiclesAdded, 0);
   const vehiclesOnFile = run.outcomes.reduce((sum, outcome) => sum + outcome.vehiclesOnFile, 0);
   return (
     <section className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" data-import-finished={run.state}>
-      <h2 className="text-base font-semibold text-ink">{run.state === "done" ? "Import finished" : "Import stopped"}</h2>
+      <h2 ref={heading} tabIndex={-1} className="text-base font-semibold text-ink focus:outline-none">
+        {run.state === "done" ? "Import finished" : "Import stopped"}
+      </h2>
       {run.state === "stopped" && (
         <Notice tone="trail">
-          Stopped after {run.sent.toLocaleString("en-US")} of {plural(run.total, "customer", "customers")}: {run.error} Choose the file
-          again to carry on: customers already imported are recognised, and nothing is added twice.
+          Stopped after {run.sent.toLocaleString("en-US")} of {plural(run.total, "customer", "customers")}: {run.error}{" "}
+          {onCarryOn
+            ? "Carry on sends the rest, with the columns as you set them; nothing already saved is added twice."
+            : "Choose the file again to carry on: customers already imported are recognised, and nothing is added twice."}
         </Notice>
       )}
       <ul className="flex flex-wrap gap-2" data-import-result>
@@ -635,9 +774,15 @@ function Finished({
       </ul>
       <Notes notes={notes} fileName={fileName} />
       <div className="flex flex-wrap gap-3">
-        <Link href="/admin/customers" className={primaryLinkClass}>
-          View customers
-        </Link>
+        {onCarryOn ? (
+          <button type="button" onClick={onCarryOn} className={primaryLinkClass} data-import-carry-on>
+            Carry on
+          </button>
+        ) : (
+          <Link href="/admin/customers" className={primaryLinkClass}>
+            View customers
+          </Link>
+        )}
         <button type="button" onClick={onAgain} className={smallButtonClass}>
           Import another file
         </button>

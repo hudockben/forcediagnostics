@@ -19,16 +19,17 @@ import {
 } from "@/lib/customer-rules";
 import {
   MAX_IMPORT_BATCH_CUSTOMERS,
+  MAX_IMPORT_BATCH_VEHICLES,
   MAX_IMPORT_VEHICLES_PER_CUSTOMER,
   ambiguousNote,
   fillBlanks,
   matchCustomer,
-  nameKey,
   sameVehicle,
   type ImportOutcome,
 } from "@/lib/customer-import-rules";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid, type ConversationStatus } from "@/lib/diagnose-rules";
+import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
 
 // The shop's customers and their vehicles, for System Admin > Customers, and
@@ -480,7 +481,18 @@ export type ImportCustomerInput = {
   rows: unknown;
   customer: Record<keyof CustomerFields, unknown>;
   vehicles: unknown;
+  // Every phone number and email the file gives for them, for matching.
+  phones?: unknown;
+  emails?: unknown;
 };
+
+// A list of short texts from the browser, for matching only.
+const textList = (value: unknown) =>
+  (Array.isArray(value) ? value : []).filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => item.slice(0, 254));
+
+// Vehicles go in this many at a time: a statement can only carry so many
+// values.
+const VEHICLE_INSERT_CHUNK = 500;
 
 // The form checks take text, as forms send it.
 const asText = (value: unknown) => (typeof value === "string" ? value : typeof value === "number" ? String(value) : "");
@@ -510,22 +522,39 @@ export async function importCustomers(
   if (!isUuid(input.importId)) return { error: "That import couldn't be read. Choose the file again." };
   const list = Array.isArray(input.customers) ? (input.customers as ImportCustomerInput[]) : null;
   if (!list || list.length === 0) return { error: "There were no customers in that batch." };
-  if (list.length > MAX_IMPORT_BATCH_CUSTOMERS) return { error: "That batch is too big. Reload the page and try again." };
-  const fileName = asText(input.fileName).slice(0, 255);
+  const vehicleCount = list.reduce((sum, entry) => sum + (Array.isArray(entry?.vehicles) ? entry.vehicles.length : 0), 0);
+  if (list.length > MAX_IMPORT_BATCH_CUSTOMERS || vehicleCount > MAX_IMPORT_BATCH_VEHICLES) {
+    return { error: "That batch is too big. Reload the page and try again." };
+  }
+  // Kept in the audit log, which can't hold a NUL or half an emoji.
+  const fileName = cutText(asText(input.fileName).replace(/\u0000/g, ""), 255);
 
   // Checked before anything is read, the same way the forms check them.
   const checked = list.map((entry) => {
     const rows = rowNumbers(entry?.rows);
     const customer = checkCustomer(textFields(entry?.customer, CUSTOMER_FIELD_KEYS));
     const vehicles = (Array.isArray(entry?.vehicles) ? entry.vehicles : []).slice(0, MAX_IMPORT_VEHICLES_PER_CUSTOMER).map((vehicle: unknown) => checkVehicle(textFields(vehicle, VEHICLE_FIELD_KEYS)));
-    return { rows, customer, vehicles };
+    return { rows, customer, vehicles, phones: textList(entry?.phones), emails: textList(entry?.emails) };
   });
 
   return withShop(actor.shop.id, async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext('customer-import'), hashtext(${actor.shop.id}))`);
-    const names = [...new Set(checked.flatMap(({ customer }) => ("customer" in customer ? [nameKey(customer.customer.name)] : [])))];
+    // Customers on file by name, lower-cased by Postgres on both sides (it
+    // and JavaScript don't lower-case every letter alike: a Greek final
+    // sigma, a Turkish dotted I), then matched by nameKey below. Oldest
+    // first, so the same file always finds the same customer.
+    const names = [...new Set(checked.flatMap(({ customer }) => ("customer" in customer ? [customer.customer.name] : [])))];
     const onFile = names.length
-      ? await tx.select(customerColumns).from(customers).where(inArray(sql`lower(${customers.name})`, names))
+      ? await tx
+          .select(customerColumns)
+          .from(customers)
+          .where(
+            sql`lower(${customers.name}) in (select lower(n) from unnest(array[${sql.join(
+              names.map((name) => sql`${name}`),
+              sql`, `,
+            )}]::text[]) n)`,
+          )
+          .orderBy(asc(customers.createdAt), asc(customers.id))
       : [];
     const existingVehicles = onFile.length
       ? await tx
@@ -543,20 +572,25 @@ export async function importCustomers(
     const outcomes: ImportOutcome[] = [];
     const newCustomers: (typeof customers.$inferInsert)[] = [];
     const newVehicles: (typeof customerVehicles.$inferInsert)[] = [];
-    const filledCustomers = new Map<string, CustomerFields>();
+    // The blank details filled in, by customer.
+    const filledCustomers = new Map<string, Partial<CustomerFields>>();
     for (const entry of checked) {
       if ("error" in entry.customer) {
         outcomes.push({ rows: entry.rows, result: "failed", customerId: null, filled: [], vehiclesAdded: 0, vehiclesOnFile: 0, error: entry.customer.error, note: null });
         continue;
       }
       const incoming = entry.customer.customer;
-      const found = matchCustomer(known, incoming);
+      const found = matchCustomer(known, { ...incoming, phones: entry.phones, emails: entry.emails });
       let match = found.match ?? undefined;
       const note = found.ambiguous > 1 ? ambiguousNote(incoming.name, found.ambiguous, "on file") : null;
       let filled: (keyof CustomerFields)[] = [];
       if (match) {
         filled = fillBlanks(match, incoming);
-        if (filled.length > 0) filledCustomers.set(match.id, match);
+        if (filled.length > 0) {
+          const fields = filledCustomers.get(match.id) ?? {};
+          for (const key of filled) Object.assign(fields, { [key]: match[key] });
+          filledCustomers.set(match.id, fields);
+        }
       } else {
         match = { ...incoming, id: randomUUID() };
         known.push(match);
@@ -581,12 +615,21 @@ export async function importCustomers(
     }
 
     if (newCustomers.length > 0) await tx.insert(customers).values(newCustomers);
-    // Only the details that were blank change; what they had stays.
-    for (const [id, customer] of filledCustomers) {
-      const fields = Object.fromEntries(CUSTOMER_FIELD_KEYS.map((key) => [key, customer[key]])) as CustomerFields;
-      await tx.update(customers).set(fields).where(eq(customers.id, id));
+    // Only details that are still blank change, each only if it is blank as
+    // the update runs: an edit someone saved since this batch read the
+    // customer stays.
+    for (const [id, fields] of filledCustomers) {
+      const set = Object.fromEntries(
+        Object.entries(fields).map(([key, value]) => {
+          const column = customers[key as keyof CustomerFields];
+          return [key, sql`coalesce(nullif(${column}, ''), ${value})`];
+        }),
+      );
+      await tx.update(customers).set(set).where(eq(customers.id, id));
     }
-    if (newVehicles.length > 0) await tx.insert(customerVehicles).values(newVehicles);
+    for (let at = 0; at < newVehicles.length; at += VEHICLE_INSERT_CHUNK) {
+      await tx.insert(customerVehicles).values(newVehicles.slice(at, at + VEHICLE_INSERT_CHUNK));
+    }
     const count = (result: ImportOutcome["result"]) => outcomes.filter((outcome) => outcome.result === result).length;
     await audit(
       tx,

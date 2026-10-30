@@ -8,6 +8,7 @@
 
 import { CsvError, parseCsv } from "@/lib/csv";
 import {
+  CUSTOMER_LIMITS,
   RELATION_LABELS,
   checkCustomer,
   checkVehicle,
@@ -29,17 +30,34 @@ export type Sheet = { name: string; rows: string[][] };
 
 const OLD_EXCEL = "This is an old Excel file (.xls) or a password-protected workbook, which can't be read here. In Excel, use Save As > Excel Workbook (.xlsx) or CSV UTF-8, then choose it again.";
 
+// Bytes 0x80-0x9F between letters: in Mac Roman those are accented letters
+// (é is 0x8E, ñ 0x96), in Windows-1252 punctuation (Ž, –) that never sits
+// inside a word. Letters with accents are 0xC0-0xFF in Windows-1252.
+function looksMacRoman(bytes: Uint8Array) {
+  const isLetter = (byte: number | undefined) => byte !== undefined && ((byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a) || byte >= 0x80);
+  let mac = 0;
+  let windows = 0;
+  for (let i = 0; i < bytes.length && i < 256 * 1024; i++) {
+    const byte = bytes[i];
+    if (byte < 0x80 || !isLetter(bytes[i - 1]) || !isLetter(bytes[i + 1])) continue;
+    if (byte <= 0x9f) mac++;
+    else if (byte >= 0xc0) windows++;
+  }
+  return mac > windows;
+}
+
 // CSV text, as UTF-8 when it is (a byte order mark is fine), UTF-16 when a
-// byte order mark says so (Excel's "Unicode Text"), and otherwise Windows-1252,
-// what Excel writes for plain "CSV (Comma delimited)" on Windows: names
-// with accents come out right either way.
+// byte order mark says so (Excel's "Unicode Text"), and otherwise as Excel
+// writes plain "CSV": Windows-1252 on Windows, Mac Roman from Excel for Mac
+// (told apart by where the accented letters fall). Names with accents come
+// out right either way.
 export function decodeText(bytes: Uint8Array): string {
   if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(bytes);
   if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(bytes);
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    return new TextDecoder("windows-1252").decode(bytes);
+    return new TextDecoder(looksMacRoman(bytes) ? "macintosh" : "windows-1252").decode(bytes);
   }
 }
 
@@ -179,18 +197,19 @@ export const headingKey = (heading: string) =>
     .replace(/[^a-z0-9]+/g, "");
 
 // The headings each field goes by in exports from dealer systems and
-// spreadsheets people keep by hand, best first. Phone has several: a mobile
-// number comes before a home or work one.
+// spreadsheets people keep by hand, best first. A customer can have several
+// phone numbers: a mobile one is their first, then a plain "Phone", then
+// home and work.
 const HEADINGS: Record<ImportField, string[]> = {
-  name: ["name", "customername", "customer", "fullname", "client", "clientname", "contactname", "contact", "owner", "ownername"],
+  name: ["name", "customername", "fullname", "clientname", "contactname", "ownername", "customer", "client", "contact", "owner"],
   firstName: ["firstname", "first", "fname", "givenname", "customerfirstname"],
   lastName: ["lastname", "last", "lname", "surname", "familyname", "customerlastname"],
   phone: [
     "mobile", "mobilephone", "mobilenumber", "cell", "cellphone", "cellnumber",
     "phone", "phonenumber", "primaryphone", "telephone", "tel", "phone1", "daytimephone",
-    "homephone", "workphone", "businessphone",
+    "homephone", "home", "eveningphone", "workphone", "businessphone", "work", "otherphone",
   ],
-  email: ["email", "emailaddress", "mail", "primaryemail", "email1"],
+  email: ["email", "emailaddress", "mail", "primaryemail", "email1", "otheremail", "secondaryemail", "alternateemail"],
   addressLine1: ["address", "address1", "addressline1", "street", "streetaddress", "mailingaddress", "homeaddress"],
   addressLine2: ["address2", "addressline2", "apt", "apartment", "suite", "aptsuite"],
   city: ["city", "town", "citytown"],
@@ -203,10 +222,14 @@ const HEADINGS: Record<ImportField, string[]> = {
   make: ["make", "brand", "manufacturer", "mfr", "vehiclemake", "unitmake"],
   model: ["model", "vehiclemodel", "unitmodel", "modelname", "vehicle", "unit", "unitdescription", "vehicledescription"],
   modelNumber: ["modelnumber", "modelno", "modelcode", "modelnum", "unitmodelnumber"],
-  vin: ["vin", "vinnumber", "serial", "serialnumber", "vinserial", "serialvin"],
+  vin: ["vin", "vinnumber", "serial", "serialnumber", "vinserial", "serialvin", "vinserialnumber"],
   color: ["color", "colour", "paint", "vehiclecolor"],
   vehicleNotes: ["vehiclenotes", "unitnotes", "vehiclecomments"],
 };
+
+// A heading this loose ("Customer", "Contact") is the name only when there
+// are no first and last name columns.
+const LOOSE_NAMES = new Set(["customer", "client", "contact", "owner"]);
 
 const headingField = new Map<string, { field: ImportField; rank: number }>();
 for (const field of IMPORT_FIELDS) {
@@ -215,27 +238,45 @@ for (const field of IMPORT_FIELDS) {
   });
 }
 
-// Where a column goes: a field, and for a vehicle's fields which of the
-// row's units it's for. A customer can have several units, and some files
-// put them side by side in one row ("Unit 1 Model", "Unit 2 Model").
+// Where a column goes: a field, and a number. For a vehicle's fields it's
+// which of the row's units the column is for (some files put a customer's
+// units side by side: "Unit 1 Model", "Unit 2 Model"). For phone and email,
+// which choice the column is: a row's first choice that has a number is the
+// customer's phone, and the others go in their notes.
 export type ColumnTarget = { field: ImportField; unit: number };
 export const MAX_UNITS_PER_ROW = 10;
 
 export const isVehicleField = (field: ImportField) => VEHICLE_IMPORT_FIELDS.includes(field);
+export const isChoiceField = (field: ImportField) => field === "phone" || field === "email";
+// Whether a field's number means anything: other fields come from one column.
+export const isNumberedField = (field: ImportField) => isVehicleField(field) || isChoiceField(field);
 
 const ORDINALS = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth"];
 const UNIT_WORD = "(?:unit|vehicle|veh|machine)";
 const LEADING_NUMBER = new RegExp(`^${UNIT_WORD}?(\\d{1,2})(?:st|nd|rd|th)?${UNIT_WORD}?(.+)$`);
 const LEADING_ORDINAL = new RegExp(`^(${ORDINALS.join("|")})${UNIT_WORD}?(.+)$`);
+const LEADING_UNIT_WORD = new RegExp(`^${UNIT_WORD}(.+)$`);
 const TRAILING_NUMBER = /^(.+?)(\d{1,2})$/;
+
+// A heading by its own words, or with "Unit"/"Vehicle" in front ("Unit
+// VIN", "Vehicle Color") or "#"/"No." after ("Cell Phone #", "Serial No.").
+function lookUp(key: string): { field: ImportField; rank: number } | undefined {
+  const direct = headingField.get(key);
+  if (direct) return direct;
+  const unitWord = LEADING_UNIT_WORD.exec(key)?.[1];
+  const fromUnit = unitWord ? headingField.get(unitWord) : undefined;
+  if (fromUnit && isVehicleField(fromUnit.field)) return fromUnit;
+  const bare = key.replace(/(?:number|no)$/, "");
+  return bare !== key ? headingField.get(bare) : undefined;
+}
 
 // What a heading names: "Mobile" is the phone; "Unit 2 Model", "Vehicle 2
 // VIN", "2nd Unit Year", "Second Vehicle Make", "Model 2" and "VIN #2" are
-// the second unit's. A customer has one of each of their own details, so
-// "Phone 2" or "Email 2" names nothing.
+// the second unit's; "Phone 2" and "Email 2" another phone number or email.
+// "Address 2" stays the second address line.
 export function readHeading(heading: string): (ColumnTarget & { rank: number }) | null {
   const key = headingKey(heading);
-  const direct = headingField.get(key);
+  const direct = lookUp(key);
   if (direct) return { field: direct.field, unit: 1, rank: direct.rank };
   let unit = 0;
   let rest = "";
@@ -245,42 +286,58 @@ export function readHeading(heading: string): (ColumnTarget & { rank: number }) 
   if (leading) [unit, rest] = [Number(leading[1]), leading[2]];
   else if (ordinal) [unit, rest] = [ORDINALS.indexOf(ordinal[1]) + 1, ordinal[2]];
   else if (trailing) [unit, rest] = [Number(trailing[2]), trailing[1]];
-  const found = rest ? headingField.get(rest) : undefined;
+  const found = rest ? lookUp(rest) : undefined;
   if (!found || unit < 1 || unit > MAX_UNITS_PER_ROW) return null;
-  if (!isVehicleField(found.field) && unit !== 1) return null;
+  if (!isNumberedField(found.field) && unit !== 1) return null;
   return { field: found.field, unit, rank: found.rank };
 }
 
 export const fieldForHeading = (heading: string): ImportField | null => readHeading(heading)?.field ?? null;
 
-export const targetKey = (target: ColumnTarget) => `${target.field}:${isVehicleField(target.field) ? target.unit : 1}`;
+export const targetKey = (target: ColumnTarget) => `${target.field}:${isNumberedField(target.field) ? target.unit : 1}`;
 
 // Which field each column goes to, from its heading: each field (and each
 // unit's vehicle field) to one column at most, the best heading for it
-// winning (a "Mobile" column over a "Home Phone" one).
+// winning. Every phone and email column is kept, best first: a mobile
+// number before a home or work one.
 export function guessMapping(headings: string[]): (ColumnTarget | null)[] {
   const best = new Map<string, { column: number; rank: number; target: ColumnTarget }>();
+  const choices: { column: number; rank: number; unit: number; field: ImportField }[] = [];
   headings.forEach((heading, column) => {
     const found = readHeading(heading);
     if (!found) return;
+    if (isChoiceField(found.field)) {
+      choices.push({ column, rank: found.rank, unit: found.unit, field: found.field });
+      return;
+    }
     const target = { field: found.field, unit: found.unit };
     const taken = best.get(targetKey(target));
     if (!taken || found.rank < taken.rank) best.set(targetKey(target), { column, rank: found.rank, target });
   });
   const mapping: (ColumnTarget | null)[] = headings.map(() => null);
   for (const { column, target } of best.values()) mapping[column] = target;
-  // A Name column and First/Last ones: the Name column is the name.
-  if (best.has("name:1")) {
-    for (const key of ["firstName:1", "lastName:1"]) {
-      const column = best.get(key)?.column;
-      if (column !== undefined) mapping[column] = null;
-    }
+  for (const field of ["phone", "email"] as const) {
+    choices
+      .filter((choice) => choice.field === field)
+      .sort((a, b) => a.unit - b.unit || a.rank - b.rank || a.column - b.column)
+      .slice(0, MAX_UNITS_PER_ROW)
+      .forEach((choice, index) => (mapping[choice.column] = { field, unit: index + 1 }));
+  }
+  // A Name column and First/Last ones: the Name column is the name, unless
+  // its heading is a loose one like "Customer".
+  const name = best.get("name:1");
+  const parts = ["firstName:1", "lastName:1"].map((key) => best.get(key)?.column).filter((column) => column !== undefined);
+  if (name && parts.length > 0) {
+    if (LOOSE_NAMES.has(HEADINGS.name[name.rank])) mapping[name.column] = null;
+    else for (const column of parts) mapping[column] = null;
   }
   return mapping;
 }
 
 // The row with the headings: within the first few, the one whose headings
-// name the most fields; the first row with anything in it when none do.
+// name the most fields. When no row's do, the first row is the headings if
+// it reads like them (no digits or @ in it); otherwise there are none (-1),
+// as in a list kept by hand that starts with its first customer.
 export function findHeaderRow(rows: string[][]): number {
   let best = -1;
   let bestCount = 0;
@@ -293,28 +350,42 @@ export function findHeaderRow(rows: string[][]): number {
   }
   if (best >= 0) return best;
   const first = rows.findIndex((row) => row.some((cell) => cell.trim()));
-  return first >= 0 ? first : 0;
+  if (first < 0) return -1;
+  return rows[first].some((cell) => /[\d@]/.test(cell)) ? -1 : first;
 }
 
 // --- Values -----------------------------------------------------------------------
 
-// "6/24/2024", "06-24-24", "2024-06-24" (or "2024-06-24 13:05", as an Excel
-// date cell reads) -> "2024-06-24". Dates with slashes are month first, as
-// in the US. Null when it isn't a date.
+const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+// "Jun", "June" or "Jun." -> 6 ("Sept" is September too); 0 for anything else.
+const monthNumber = (name: string) => {
+  const key = name.toLowerCase().replace(/\.$/, "");
+  return MONTHS.findIndex((month) => month === key || month.slice(0, 3) === key || (month === "september" && key === "sept")) + 1;
+};
+const TIME = String.raw`(?:[ T]+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:[ap]\.?m\.?)?(?:\s*(?:z|[+-]\d{2}:?\d{2}))?)?`;
+const ISO_DATE = new RegExp(String.raw`^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})${TIME}$`, "i");
+const US_DATE = new RegExp(String.raw`^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})${TIME}$`, "i");
+const DAY_MONTH = new RegExp(String.raw`^(\d{1,2})[\s-]+([a-z]{3,9}\.?)[\s,-]+(\d{4}|\d{2})${TIME}$`, "i");
+const MONTH_DAY = new RegExp(String.raw`^([a-z]{3,9}\.?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4}|\d{2})${TIME}$`, "i");
+
+// "6/24/2024", "06-24-24", "2024-06-24", "24-Jun-24", "Jun 24, 2024", with
+// or without a time after it ("6/24/2024 12:00:00 AM", "2024-06-24
+// 00:00:00.000", as dealer systems export dates) -> "2024-06-24". Dates
+// with slashes are month first, as in the US. Null when it isn't a date.
 export function parseImportDate(text: string): string | null {
-  const value = text.trim();
-  let year: number, month: number, day: number;
-  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/.exec(value);
-  const us = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})$/.exec(value);
-  if (iso) {
-    [year, month, day] = iso.slice(1, 4).map(Number);
-  } else if (us) {
-    [month, day, year] = us.slice(1, 4).map(Number);
-    // Two-digit years: "24" is 2024, "98" is 1998.
-    if (us[3].length === 2) year += year < 50 ? 2000 : 1900;
-  } else {
-    return null;
-  }
+  const value = text.trim().replace(/\s+/g, " ");
+  let year = 0;
+  let month = 0;
+  let day = 0;
+  let match: RegExpExecArray | null;
+  if ((match = ISO_DATE.exec(value))) [year, month, day] = match.slice(1, 4).map(Number);
+  else if ((match = US_DATE.exec(value))) [month, day, year] = match.slice(1, 4).map(Number);
+  else if ((match = DAY_MONTH.exec(value))) [day, month, year] = [Number(match[1]), monthNumber(match[2]), Number(match[3])];
+  else if ((match = MONTH_DAY.exec(value))) [month, day, year] = [monthNumber(match[1]), Number(match[2]), Number(match[3])];
+  else return null;
+  // Two-digit years: "24" is 2024, "98" is 1998.
+  if (year < 100) year += year < 50 ? 2000 : 1900;
+  if (month < 1) return null;
   const date = new Date(Date.UTC(year, month - 1, day));
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
@@ -364,6 +435,11 @@ export function padZip(text: string) {
   return text;
 }
 
+// Lines a report printed to CSV puts between its customers: a page break's
+// "Page 1 of 2", totals and its end.
+const REPORT_LINE =
+  /^(?:page\s+\d+(?:\s+of\s+\d+)?|(?:grand\s+|sub)?totals?\b.*|.*\btotals?\s*:.*|end\s+of\s+(?:the\s+)?(?:report|list|file)\.?|(?:report\s+)?(?:printed|generated|run)\s+(?:on|at|by)\b.*|(?:record|row|customer)\s+count\b.*|\d+\s+(?:records?|rows?|customers?)(?:\s+(?:found|listed|printed))?\.?)$/i;
+
 // --- Planning -------------------------------------------------------------------------
 
 export type ImportCustomer = {
@@ -372,6 +448,11 @@ export type ImportCustomer = {
   rows: number[];
   customer: CustomerFields;
   vehicles: VehicleFields[];
+  // Every phone number and email their rows give, which say whether
+  // another record is them (see matchCustomer). The first of each is the
+  // customer's own.
+  phones: string[];
+  emails: string[];
 };
 
 // What a row's values became: left out entirely (no name), or a value left
@@ -387,7 +468,7 @@ export type ImportPlan = {
 };
 
 export type ImportOptions = {
-  // Index into rows of the headings; data starts after it.
+  // Index into rows of the headings, or -1 for none; data starts after it.
   headerRow: number;
   mapping: (ColumnTarget | null)[];
   // For vehicles whose row doesn't say.
@@ -426,20 +507,27 @@ const quoted = (text: string) => `“${text.length > 40 ? `${text.slice(0, 40)}�
 // first, if the whole won't do.
 const firstOf = (text: string) => text.split(/\s*(?:[/;,|]|\bor\b|\band\b)\s*/i)[0]?.trim() ?? "";
 
+// A phone number or email as the form would keep it, or null with why not.
+function checkContact(key: "phone" | "email", text: string): { value: string; first?: string } | { error: string } {
+  const whole = checkCustomer({ ...blankCustomer(), name: "x", [key]: text });
+  if ("customer" in whole) return { value: whole.customer[key]! };
+  const first = firstOf(text);
+  if (first && first !== text) {
+    const part = checkCustomer({ ...blankCustomer(), name: "x", [key]: first });
+    if ("customer" in part) return { value: part.customer[key]!, first };
+  }
+  return { error: whole.error };
+}
+
 // Checks one customer's values the way the form does, leaving out (with a
 // note) any value the form would refuse, so one bad cell doesn't lose the
-// whole customer. Null when there's no name to go by.
+// whole customer. Null when there's no name to go by. Most rows pass the
+// form's check as they are, so each value is only looked at on its own
+// when they don't.
 function checkImportCustomer(raw: Record<keyof CustomerFields, string>, note: (message: string) => void): CustomerFields | null {
+  const whole = checkCustomer(raw);
+  if ("customer" in whole) return whole.customer;
   const values = { ...raw };
-  for (const key of ["phone", "email"] as const) {
-    if (!values[key]) continue;
-    if (!("error" in checkCustomer({ ...blankCustomer(), name: "x", [key]: values[key] }))) continue;
-    const first = firstOf(values[key]);
-    if (first && first !== values[key] && !("error" in checkCustomer({ ...blankCustomer(), name: "x", [key]: first }))) {
-      note(`${FIELD_NAMES[key]} ${quoted(values[key])}: kept the first, ${quoted(first)}.`);
-      values[key] = first;
-    }
-  }
   for (const key of CUSTOMER_KEYS) {
     if (key === "name" || !values[key]) continue;
     const checked = checkCustomer({ ...blankCustomer(), name: "x", [key]: values[key] });
@@ -455,6 +543,8 @@ function checkImportCustomer(raw: Record<keyof CustomerFields, string>, note: (m
 // The same for a vehicle: values the form would refuse are left out, and
 // the vehicle too when nothing says what it is.
 function checkImportVehicle(raw: Record<keyof VehicleFields, string>, note: (message: string) => void): VehicleFields | null {
+  const whole = checkVehicle(raw);
+  if ("vehicle" in whole) return whole.vehicle;
   const values = { ...raw };
   for (const key of VEHICLE_KEYS) {
     if (key === "relation" || !values[key]) continue;
@@ -474,53 +564,70 @@ function checkImportVehicle(raw: Record<keyof VehicleFields, string>, note: (mes
 
 // Names are compared without case or extra spaces.
 export const nameKey = (name: string) => name.trim().replace(/\s+/g, " ").toLowerCase();
-const phoneKey = (phone: string | null) => (phone ? phone.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "") : "");
+export const phoneKey = (phone: string | null) => (phone ? phone.replace(/x.*$/i, "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "") : "");
 const emailKey = (email: string | null) => (email ? email.toLowerCase() : "");
 
-type Contact = Pick<CustomerFields, "name" | "phone" | "email">;
+// Someone as matching sees them: their name, and every phone number and
+// email they go by.
+export type Who = {
+  name: string;
+  phone: string | null;
+  email: string | null;
+  phones?: readonly string[];
+  emails?: readonly string[];
+};
 
-// Whether two records can be one customer: the same name, and nothing that
-// tells them apart. The same phone number or email says they're one; two
-// different phone numbers (or emails) say they're two; a number on only one
-// of them says nothing (a customer's later rows, one per unit, often leave
-// it out).
-export function sameCustomer(a: Contact, b: Contact) {
-  if (nameKey(a.name) !== nameKey(b.name)) return false;
-  const [phoneA, phoneB, emailA, emailB] = [phoneKey(a.phone), phoneKey(b.phone), emailKey(a.email), emailKey(b.email)];
-  if ((phoneA && phoneA === phoneB) || (emailA && emailA === emailB)) return true;
-  return !(phoneA && phoneB) && !(emailA && emailB);
+const phoneKeys = (who: Who) => new Set([who.phone, ...(who.phones ?? [])].map(phoneKey).filter(Boolean));
+const emailKeys = (who: Who) => new Set([who.email, ...(who.emails ?? [])].map(emailKey).filter(Boolean));
+const shares = (a: Set<string>, b: Set<string>) => [...a].some((key) => b.has(key));
+
+// How two records with the same name stand: "sure" when they share a phone
+// number or email; "bare" when neither has any; "could" when nothing tells
+// them apart (a number on only one of them, as a customer's later rows
+// often leave it out); "no" when their numbers (or emails) all differ,
+// which says they're two people.
+function relate(a: Who, b: Who): "sure" | "bare" | "could" | "no" {
+  if (nameKey(a.name) !== nameKey(b.name)) return "no";
+  const [phonesA, phonesB, emailsA, emailsB] = [phoneKeys(a), phoneKeys(b), emailKeys(a), emailKeys(b)];
+  if ((phonesA.size && phonesB.size && !shares(phonesA, phonesB)) || (emailsA.size && emailsB.size && !shares(emailsA, emailsB))) return "no";
+  if (shares(phonesA, phonesB) || shares(emailsA, emailsB)) return "sure";
+  return !phonesA.size && !phonesB.size && !emailsA.size && !emailsB.size ? "bare" : "could";
 }
 
-// Whether the two agree on how to reach them: the same phone number or
-// email, or neither has either.
-function sameContact(a: Contact, b: Contact) {
-  const [phoneA, phoneB, emailA, emailB] = [phoneKey(a.phone), phoneKey(b.phone), emailKey(a.email), emailKey(b.email)];
-  return Boolean((phoneA && phoneA === phoneB) || (emailA && emailA === emailB)) || (!phoneA && !phoneB && !emailA && !emailB);
-}
+// Whether two records can be one customer: the same name, and no phone
+// number or email that says they're two.
+export const sameCustomer = (a: Who, b: Who) => relate(a, b) !== "no";
 
-// Which of some customers a record is, if any: one that has the same phone
-// number or email first; else the only one it could be. When several of the
-// same name could be (it has no number to tell which), the one just above
-// it in the file if that's one of them, or else none: ambiguous, so it's
-// kept apart rather than added to the wrong customer.
-export function matchCustomer<T extends Contact>(candidates: readonly T[], record: Contact, nearest?: T | null): { match: T | null; ambiguous: number } {
-  const could = candidates.filter((candidate) => sameCustomer(candidate, record));
-  const sure = could.find((candidate) => sameContact(candidate, record));
+// Which of some customers a record is, if any: one that shares a phone
+// number or email with it; else the one just above it in the file, if it
+// could be that one; else one with no number either, when it has none;
+// else the only one it could be. When several could be, none: it's kept
+// apart (and said so) rather than added to the wrong customer. Candidates
+// are tried in the order given, so give them in a fixed order.
+export function matchCustomer<T extends Who>(candidates: readonly T[], record: Who, nearest?: T | null): { match: T | null; ambiguous: number } {
+  const relations = candidates.map((candidate) => relate(candidate, record));
+  const sure = candidates.find((_, index) => relations[index] === "sure");
   if (sure) return { match: sure, ambiguous: 0 };
-  if (could.length === 1) return { match: could[0], ambiguous: 0 };
+  const could = candidates.filter((_, index) => relations[index] !== "no");
   if (nearest && could.includes(nearest)) return { match: nearest, ambiguous: 0 };
+  const bare = candidates.find((_, index) => relations[index] === "bare");
+  if (bare) return { match: bare, ambiguous: 0 };
+  if (could.length === 1) return { match: could[0], ambiguous: 0 };
   return { match: null, ambiguous: could.length };
 }
 
 export const ambiguousNote = (name: string, count: number, where: string) =>
-  `${count} customers ${where} are called ${name}, and this has no phone number or email to tell which: added as another customer.`;
+  `${count} customers ${where} are called ${name}, and nothing here says which this is: added as another customer.`;
 
 // Whether two vehicles of one customer are one: the same VIN, or with no
-// VIN on either, the same year, make, model, model number and deal.
+// VIN on either, the same deal, year, make, model and model number, and no
+// date or color that differs (two of the same model bought on different
+// days are two).
 export function sameVehicle(a: VehicleFields, b: VehicleFields) {
   if (a.vin || b.vin) return a.vin === b.vin;
   const key = (v: VehicleFields) => [v.relation, v.year ?? "", v.make?.toLowerCase() ?? "", v.model?.toLowerCase() ?? "", v.modelNumber ?? ""].join("|");
-  return key(a) === key(b);
+  const differ = (x: string | null, y: string | null) => Boolean(x && y && x.toLowerCase() !== y.toLowerCase());
+  return key(a) === key(b) && !differ(a.relationDate, b.relationDate) && !differ(a.color, b.color);
 }
 
 // A customer's blank details filled in from another record of them; what
@@ -542,14 +649,21 @@ export function fillBlanks(into: CustomerFields, from: CustomerFields): (keyof C
 // phone number again; see matchCustomer), on rows with nothing about a
 // customer under theirs (another unit of the customer above, as some dealer
 // systems list them), or side by side in one row (Unit 1, Unit 2 columns).
+// A report's repeated headings and its page and total lines are left out.
 export function planImport(rows: string[][], options: ImportOptions): ImportPlan {
   const { headerRow, mapping, defaultRelation } = options;
+  const headings = headerRow >= 0 ? (rows[headerRow] ?? []) : [];
+  const headingKeys = headings.map(headingKey);
+  // The first column for each field (and unit or choice).
   const columns = new Map<string, number>();
   mapping.forEach((target, column) => {
     if (target && !columns.has(targetKey(target))) columns.set(targetKey(target), column);
   });
-  // The units a row can hold: 1, and any others with columns of their own.
-  const units = [...new Set(mapping.flatMap((target) => (target && isVehicleField(target.field) ? [target.unit] : [])))].sort((a, b) => a - b);
+  const numbersOf = (field: ImportField) =>
+    [...new Set(mapping.flatMap((target) => (target && target.field === field ? [target.unit] : [])))].sort((a, b) => a - b);
+  // The units a row can hold, and the phone and email columns in order.
+  const units = [...new Set(VEHICLE_IMPORT_FIELDS.flatMap(numbersOf))].sort((a, b) => a - b);
+  const choices = { phone: numbersOf("phone"), email: numbersOf("email") };
   const customers: ImportCustomer[] = [];
   const byName = new Map<string, ImportCustomer[]>();
   const notes: ImportNote[] = [];
@@ -560,29 +674,62 @@ export function planImport(rows: string[][], options: ImportOptions): ImportPlan
   for (let index = headerRow + 1; index < rows.length; index++) {
     const cells = rows[index];
     const value = (field: ImportField, unit = 1) => {
-      const column = columns.get(`${field}:${unit}`);
+      const column = columns.get(`${field}:${isNumberedField(field) ? unit : 1}`);
       return column === undefined ? "" : (cells[column] ?? "").replace(/\u0000/g, "").trim();
     };
-    if (!cells.some((cell) => cell.trim())) continue;
+    const filled = cells.filter((cell) => cell.trim());
+    if (filled.length === 0) continue;
     const row = index + 1;
+    const note = (message: string, skipped = false) => notes.push({ row, message, skipped });
+    // A report repeats its headings after each page break.
+    if (headingKeys.length > 0 && filled.length >= 2 && cells.every((cell, column) => !cell.trim() || headingKey(cell) === headingKeys[column])) {
+      note("The headings again (a report's page break): left out.", true);
+      previous = null;
+      continue;
+    }
+    if (filled.length === 1 && REPORT_LINE.test(filled[0].trim())) {
+      note(`${quoted(filled[0].trim())} looks like a line of the report, not a customer: left out.`, true);
+      previous = null;
+      continue;
+    }
     rowsRead++;
     if (rowsRead > MAX_IMPORT_ROWS) {
       notes.push({ row, message: `Only the first ${MAX_IMPORT_ROWS.toLocaleString("en-US")} rows are imported; split the file to import the rest.`, skipped: true });
       rowsSkipped += rows.length - index;
       break;
     }
-    const note = (message: string, skipped = false) => notes.push({ row, message, skipped });
 
     const raw = blankCustomer();
     raw.name = value("name") || [value("firstName"), value("lastName")].filter(Boolean).join(" ");
-    raw.phone = value("phone");
-    raw.email = value("email");
     raw.addressLine1 = value("addressLine1");
     raw.addressLine2 = value("addressLine2");
     raw.city = value("city");
     raw.state = value("state");
     raw.postalCode = padZip(value("postalCode"));
-    raw.notes = value("notes");
+    const extraNotes: string[] = [];
+    // Phone numbers and emails: the first choice with one is theirs; the
+    // others go in their notes, by their column's heading.
+    const contacts = { phone: [] as string[], email: [] as string[] };
+    for (const key of ["phone", "email"] as const) {
+      for (const choice of choices[key]) {
+        const text = value(key, choice);
+        if (!text) continue;
+        const checked = checkContact(key, text);
+        const heading = headings[columns.get(`${key}:${choice}`) ?? -1]?.trim() || FIELD_NAMES[key];
+        if ("error" in checked) {
+          note(`${heading} ${quoted(text)} left out: ${checked.error}`);
+          continue;
+        }
+        if (checked.first) note(`${heading} ${quoted(text)}: kept the first, ${quoted(checked.first)}.`);
+        const keyOf = key === "phone" ? phoneKey : emailKey;
+        if (contacts[key].some((other) => keyOf(other) === keyOf(checked.value))) continue;
+        if (contacts[key].length > 0) extraNotes.push(`${heading}: ${checked.value}`);
+        contacts[key].push(checked.value);
+      }
+    }
+    raw.phone = contacts.phone[0] ?? "";
+    raw.email = contacts.email[0] ?? "";
+    raw.notes = [value("notes"), ...extraNotes].filter(Boolean).join("\n");
 
     // Each unit in the row with anything said about it.
     const rowUnits = units.flatMap((unit) => {
@@ -618,20 +765,28 @@ export function planImport(rows: string[][], options: ImportOptions): ImportPlan
         previous = null;
         continue;
       }
+      // Matched by what this row itself says, not by details other rows
+      // filled in, so the order of the rows doesn't decide who is who.
+      const record: Who = { name: checked.name, phone: null, email: null, phones: contacts.phone, emails: contacts.email };
       const key = nameKey(checked.name);
-      const sameName = byName.get(key) ?? [];
-      const found: { match: CustomerFields | null; ambiguous: number } = matchCustomer(
-        sameName.map((other) => other.customer),
-        checked,
-        previous?.customer,
-      );
-      customer = found.match ? (sameName.find((other) => other.customer === found.match) ?? null) : null;
+      const sameName = (byName.get(key) ?? []).map((entry) => ({ name: entry.customer.name, phone: null, email: null, phones: entry.phones, emails: entry.emails, entry }));
+      const found = matchCustomer(sameName, record, sameName.find((candidate) => candidate.entry === previous));
+      customer = found.match?.entry ?? null;
       if (found.ambiguous > 1) note(ambiguousNote(checked.name, found.ambiguous, "in this file"));
       if (customer) {
+        const notesBefore = customer.customer.notes;
         fillBlanks(customer.customer, checked);
+        // Each row's notes are kept, once.
+        if (notesBefore && checked.notes && !notesBefore.includes(checked.notes)) {
+          const together = `${notesBefore}\n${checked.notes}`;
+          if (together.length <= CUSTOMER_LIMITS.notes) customer.customer.notes = together;
+          else note(`Notes ${quoted(checked.notes)} left out: the customer's notes are full.`);
+        }
+        for (const phone of contacts.phone) if (!customer.phones.some((other) => phoneKey(other) === phoneKey(phone))) customer.phones.push(phone);
+        for (const email of contacts.email) if (!customer.emails.some((other) => emailKey(other) === emailKey(email))) customer.emails.push(email);
         customer.rows.push(row);
       } else {
-        customer = { rows: [row], customer: checked, vehicles: [] };
+        customer = { rows: [row], customer: checked, vehicles: [], phones: [...contacts.phone], emails: [...contacts.email] };
         customers.push(customer);
         byName.set(key, [...(byName.get(key) ?? []), customer]);
       }
@@ -671,24 +826,41 @@ export function planImport(rows: string[][], options: ImportOptions): ImportPlan
 // --- Sending --------------------------------------------------------------------------
 
 // Customers go to the server in batches, well under the 1 MB Server Action
-// limit, one batch at a time.
+// limit, one batch at a time. A customer with more units than one batch
+// takes is sent in parts, each matched to the same customer.
 export const IMPORT_BATCH_BYTES = 256 * 1024;
 export const MAX_IMPORT_BATCH_CUSTOMERS = 250;
 export const MAX_IMPORT_VEHICLES_PER_CUSTOMER = 100;
+export const MAX_IMPORT_BATCH_VEHICLES = 1000;
 
 export function importBatches(customers: ImportCustomer[]): ImportCustomer[][] {
+  const parts = customers.flatMap((customer) => {
+    if (customer.vehicles.length <= MAX_IMPORT_VEHICLES_PER_CUSTOMER) return [customer];
+    const pieces: ImportCustomer[] = [];
+    for (let at = 0; at < customer.vehicles.length; at += MAX_IMPORT_VEHICLES_PER_CUSTOMER) {
+      pieces.push({ ...customer, vehicles: customer.vehicles.slice(at, at + MAX_IMPORT_VEHICLES_PER_CUSTOMER) });
+    }
+    return pieces;
+  });
   const batches: ImportCustomer[][] = [];
   let batch: ImportCustomer[] = [];
   let bytes = 0;
-  for (const customer of customers) {
+  let vehicles = 0;
+  for (const customer of parts) {
     const size = JSON.stringify(customer).length * 2;
-    if (batch.length > 0 && (bytes + size > IMPORT_BATCH_BYTES || batch.length >= MAX_IMPORT_BATCH_CUSTOMERS)) {
+    const full =
+      bytes + size > IMPORT_BATCH_BYTES ||
+      batch.length >= MAX_IMPORT_BATCH_CUSTOMERS ||
+      vehicles + customer.vehicles.length > MAX_IMPORT_BATCH_VEHICLES;
+    if (batch.length > 0 && full) {
       batches.push(batch);
       batch = [];
       bytes = 0;
+      vehicles = 0;
     }
     batch.push(customer);
     bytes += size;
+    vehicles += customer.vehicles.length;
   }
   if (batch.length > 0) batches.push(batch);
   return batches;
@@ -711,11 +883,12 @@ export type ImportOutcome = {
 };
 
 // The import's report as CSV, for the rows that need a look: what happened
-// to each, by row.
+// to each, by row. It starts with a byte order mark so Excel reads it as
+// UTF-8 (names with accents, the quotes in the notes).
 export function reportCsv(notes: ImportNote[]): string {
   const field = (text: string) => (/[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text);
   const lines = ["Row,What happened", ...[...notes].sort((a, b) => a.row - b.row).map((note) => `${note.row},${field(note.message)}`)];
-  return `${lines.join("\r\n")}\r\n`;
+  return `﻿${lines.join("\r\n")}\r\n`;
 }
 
 // A file to start from, with the headings the import knows best.
