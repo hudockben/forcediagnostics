@@ -47,6 +47,10 @@ const line = (value: unknown) =>
 // Supplier IDs are matched without case: "v100" and "V100" are one supplier.
 export const supplierKey = (supplierId: string) => line(supplierId).toLowerCase();
 
+// A Supplier ID that's all digits, as a number: a spreadsheet opening the
+// list reads "0042" as 42, so an import matches it to the one on file.
+export const numericSupplierId = (supplierId: string) => (/^[0-9]{1,15}$/.test(supplierId) ? Number(supplierId) : null);
+
 // What the form (or a row of an import) gives, checked: a Supplier ID and a
 // Supplier Name are needed; the codes and the category are optional.
 export function checkSupplier(input: Partial<Record<SupplierField, unknown>>): { supplier: SupplierFields } | { error: string } {
@@ -121,6 +125,12 @@ export function findSupplierHeader(rows: string[][]): number {
   return best;
 }
 
+// The apostrophe Download CSV puts before a cell starting with = + - or @
+// (so a spreadsheet keeps it as text) comes off again, so the list imports
+// back as it was.
+const FORMULA_START = /^[=+\-@\t\r]/;
+const unguard = (cell: string) => (cell.startsWith("'") && FORMULA_START.test(cell.slice(1)) ? cell.slice(1) : cell);
+
 export type SupplierImportRow = SupplierFields & { row: number };
 export type SupplierImportNote = { row: number; message: string };
 export type SupplierImportPlan = { suppliers: SupplierImportRow[]; notes: SupplierImportNote[]; rowsRead: number };
@@ -147,7 +157,7 @@ export function planSupplierImport(rows: string[][], headerRow: number, mapping:
       notes.push({ row, message: `Only the first ${MAX_SUPPLIER_ROWS.toLocaleString("en-US")} rows are imported; split the file to import the rest.` });
       break;
     }
-    const input = Object.fromEntries(SUPPLIER_FIELDS.map((field) => [field, cells[columns.get(field) ?? -1] ?? ""]));
+    const input = Object.fromEntries(SUPPLIER_FIELDS.map((field) => [field, unguard(cells[columns.get(field) ?? -1] ?? "")]));
     const checked = checkSupplier(input);
     if ("error" in checked) {
       notes.push({ row, message: `${checked.error.replace(/\.$/, "")}: row left out.` });
@@ -178,7 +188,7 @@ export type SupplierImportOutcome = {
 export function suppliersCsv(suppliers: SupplierFields[]): string {
   const cell = (value: string | null) => {
     const raw = value ?? "";
-    const text = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+    const text = FORMULA_START.test(raw) ? `'${raw}` : raw;
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   const lines = [

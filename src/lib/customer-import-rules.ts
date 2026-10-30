@@ -61,28 +61,40 @@ export function decodeText(bytes: Uint8Array): string {
   }
 }
 
-// Commas, or semicolons or tabs when a line has more of those (outside
-// quotes): the most of each in any of the first ten lines, so a title line
-// above the headings ("Supplier list") doesn't decide it.
-export function detectDelimiter(text: string): "," | ";" | "\t" {
-  const most = { ",": 0, ";": 0, "\t": 0 };
-  let counts = { ",": 0, ";": 0, "\t": 0 };
-  let lines = 0;
+// Commas, semicolons or tabs: whichever splits the most of the first ten
+// lines (outside quotes) into the same number of cells, as Python's CSV
+// sniffer judges it. So a title line above the headings ("Supplier list"),
+// a name with a comma in rows pasted from a spreadsheet (tab-separated), or
+// a cell listing brands with semicolons doesn't decide it. A tie goes to
+// more cells, then commas, then tabs.
+const DELIMITERS = [",", "\t", ";"] as const;
+type Delimiter = (typeof DELIMITERS)[number];
+
+export function detectDelimiter(text: string): Delimiter {
+  const lines: Record<Delimiter, number>[] = [];
+  const none = () => ({ ",": 0, "\t": 0, ";": 0 });
+  let counts = none();
   let quoted = false;
-  for (let i = 0; i <= text.length && i < 64 * 1024 && lines < 10; i++) {
+  for (let i = 0; i <= text.length && i < 64 * 1024 && lines.length < 10; i++) {
     const c = text[i];
     if (c === '"') quoted = !quoted;
     else if (!quoted && (c === "," || c === ";" || c === "\t")) counts[c]++;
     else if (!quoted && (c === "\n" || c === "\r" || c === undefined)) {
-      for (const key of [",", ";", "\t"] as const) most[key] = Math.max(most[key], counts[key]);
-      counts = { ",": 0, ";": 0, "\t": 0 };
-      if (c === "\n" || c === undefined) lines++;
+      if (DELIMITERS.some((key) => counts[key] > 0)) lines.push(counts);
+      counts = none();
     }
   }
-  for (const key of [",", ";", "\t"] as const) most[key] = Math.max(most[key], counts[key]);
-  if (most["\t"] > most[","] && most["\t"] >= most[";"]) return "\t";
-  if (most[";"] > most[","]) return ";";
-  return ",";
+  // One very long line, cut off.
+  if (lines.length === 0) lines.push(counts);
+  let best: { delimiter: Delimiter; lines: number; cells: number } = { delimiter: ",", lines: 0, cells: 0 };
+  for (const delimiter of DELIMITERS) {
+    const often = new Map<number, number>();
+    for (const line of lines) if (line[delimiter] > 0) often.set(line[delimiter], (often.get(line[delimiter]) ?? 0) + 1);
+    for (const [cells, times] of often) {
+      if (times > best.lines || (times === best.lines && cells > best.cells)) best = { delimiter, lines: times, cells };
+    }
+  }
+  return best.delimiter;
 }
 
 const isOldExcel = (bytes: Uint8Array) => bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;

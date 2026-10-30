@@ -1,11 +1,11 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useRef, useState, type ComponentProps } from "react";
+import { createContext, use, useEffect, useId, useRef, useState, useTransition, type ComponentProps, type ReactNode, type TransitionStartFunction } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputBaseClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
-import { listHref } from "@/lib/diagnose-list-rules";
+import { cleanListQuery, listHref } from "@/lib/diagnose-list-rules";
 import { SUPPLIER_FIELD_LABELS, SUPPLIER_LIMITS, type SupplierField, type SupplierFields } from "@/lib/supplier-rules";
 import { useFormAction } from "@/lib/use-form-action";
 
@@ -55,9 +55,7 @@ function Field({ name, optional = false, hint, ...props }: { name: SupplierField
   );
 }
 
-// Adds a supplier, or edits one. A Category Code the shop already uses
-// fills in its Category ID (when that's still empty), so a category keeps
-// one ID across the list.
+// Adds a supplier, or edits one.
 export function SupplierForm({
   supplier,
   suggestedId,
@@ -68,9 +66,9 @@ export function SupplierForm({
   categories: Category[];
 }) {
   const { state, pending, formProps } = useFormAction<FormState>(supplier ? saveSupplierAction : addSupplierAction, {});
-  const [categoryId, setCategoryId] = useState(supplier?.categoryId ?? "");
-  const listId = useId();
   const saved = (field: keyof SupplierFields) => supplier?.[field] ?? "";
+  // Each field is keyed on its saved value: Next.js keeps visited pages
+  // alive, so a change saved elsewhere reloads it.
   return (
     <form {...formProps} className="space-y-4">
       {supplier && <input type="hidden" name="id" value={supplier.id} />}
@@ -78,8 +76,6 @@ export function SupplierForm({
         <Field
           name="supplierId"
           required
-          // Keyed on the saved value: Next.js keeps visited pages alive, so
-          // a change saved elsewhere reloads the field.
           key={`id-${saved("supplierId")}`}
           defaultValue={saved("supplierId") || suggestedId || ""}
           hint={!supplier && suggestedId ? "The next number after the highest Supplier ID. Change it to match your system if needed." : undefined}
@@ -88,16 +84,42 @@ export function SupplierForm({
         <Field name="supplierCode" optional key={`code-${saved("supplierCode")}`} defaultValue={saved("supplierCode")} className={`${inputClass} font-mono`} />
       </div>
       <Field name="supplierName" required key={`name-${saved("supplierName")}`} defaultValue={saved("supplierName")} />
+      <CategoryFields
+        key={`cat-${saved("categoryCode")}\u0000${saved("categoryId")}`}
+        categories={categories}
+        savedCode={saved("categoryCode")}
+        savedId={saved("categoryId")}
+      />
+      <Feedback state={state} />
+      <button type="submit" disabled={pending} className={supplier ? secondaryButtonClass : primaryButtonClass}>
+        {supplier ? (pending ? "Saving…" : "Save changes") : pending ? "Adding…" : "Add supplier"}
+      </button>
+    </form>
+  );
+}
+
+// A Category Code the shop already uses fills in its usual Category ID, so
+// a category keeps one ID across the list: while the ID is empty, or still
+// the one filled in (typing "10" goes past "1" and ends on 10's ID). An ID
+// typed, or already saved, stays.
+function CategoryFields({ categories, savedCode, savedId }: { categories: Category[]; savedCode: string; savedId: string }) {
+  const [categoryId, setCategoryId] = useState(savedId);
+  const [filledFrom, setFilledFrom] = useState<string | null>(null);
+  const listId = useId();
+  return (
+    <>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
           name="categoryCode"
           optional
-          key={`cat-${saved("categoryCode")}`}
-          defaultValue={saved("categoryCode")}
+          defaultValue={savedCode}
           list={listId}
           onChange={(event) => {
-            const known = categories.find((category) => category.code.toLowerCase() === event.target.value.trim().toLowerCase());
-            if (known?.id && !categoryId) setCategoryId(known.id);
+            if (categoryId && filledFrom === null) return;
+            const code = event.target.value.trim().toLowerCase();
+            const known = categories.find((category) => category.id && category.code.toLowerCase() === code);
+            setCategoryId(known?.id ?? "");
+            setFilledFrom(known?.code ?? null);
           }}
           className={`${inputClass} font-mono`}
         />
@@ -105,7 +127,11 @@ export function SupplierForm({
           name="categoryId"
           optional
           value={categoryId}
-          onChange={(event) => setCategoryId(event.target.value)}
+          hint={filledFrom ? `Filled in: the Category ID of the shop's other ${filledFrom} suppliers.` : undefined}
+          onChange={(event) => {
+            setCategoryId(event.target.value);
+            setFilledFrom(null);
+          }}
           className={`${inputClass} font-mono`}
         />
       </div>
@@ -116,11 +142,7 @@ export function SupplierForm({
           </option>
         ))}
       </datalist>
-      <Feedback state={state} />
-      <button type="submit" disabled={pending} className={supplier ? secondaryButtonClass : primaryButtonClass}>
-        {supplier ? (pending ? "Saving…" : "Save changes") : pending ? "Adding…" : "Add supplier"}
-      </button>
-    </form>
+    </>
   );
 }
 
@@ -130,7 +152,7 @@ const removeButtonClass =
 export function RemoveSupplierForm({ supplier }: { supplier: { id: string; supplierName: string } }) {
   const { state, pending, formProps } = useFormAction<FormState>(removeSupplierAction, {});
   const [confirming, setConfirming] = useState(false);
-  // Cancel puts focus back on the button that asked.
+  // Cancel (or Escape) puts focus back on the button that asked.
   const opener = useRef<HTMLButtonElement>(null);
   const cancelled = useRef(false);
   useEffect(() => {
@@ -144,7 +166,15 @@ export function RemoveSupplierForm({ supplier }: { supplier: { id: string; suppl
       <input type="hidden" name="id" value={supplier.id} />
       <Feedback state={state} />
       {confirming ? (
-        <div className="space-y-3">
+        <div
+          className="space-y-3"
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !pending) {
+              cancelled.current = true;
+              setConfirming(false);
+            }
+          }}
+        >
           <p id="remove-question" className="text-sm text-ink">
             Remove {supplier.supplierName} from the supplier list? The audit log keeps a record that it was removed.
           </p>
@@ -174,9 +204,31 @@ export function RemoveSupplierForm({ supplier }: { supplier: { id: string; suppl
   );
 }
 
-// Narrows the list to one Category Code; the search stays.
-export function CategoryFilter({ categories, category, query }: { categories: Category[]; category: string | null; query: string }) {
+// The Category Code select and the list share one transition, so the list
+// dims while a category loads, as it does for a search.
+const ListTransition = createContext<[boolean, TransitionStartFunction]>([false, (callback) => void callback()]);
+
+export function CategoryTransition({ children }: { children: ReactNode }) {
+  const transition = useTransition();
+  return <ListTransition value={transition}>{children}</ListTransition>;
+}
+
+export function CategoryPending({ children }: { children: ReactNode }) {
+  const [pending] = use(ListTransition);
+  return (
+    <div aria-busy={pending || undefined} className={`transition-opacity ${pending ? "opacity-60" : ""}`}>
+      {children}
+    </div>
+  );
+}
+
+// Narrows the list to one Category Code. The search stays: what's in the
+// search box, also a search still on its way.
+export function CategoryFilter({ categories, category }: { categories: Category[]; category: string | null }) {
   const router = useRouter();
+  const [pending, startTransition] = use(ListTransition);
+  // The category picked shows while it loads.
+  const [picked, setPicked] = useState("");
   return (
     <div className="relative min-w-48">
       <label htmlFor="supplier-category" className="sr-only">
@@ -184,10 +236,13 @@ export function CategoryFilter({ categories, category, query }: { categories: Ca
       </label>
       <select
         id="supplier-category"
-        value={category ?? ""}
+        value={pending ? picked : (category ?? "")}
         onChange={(event) => {
           const value = event.target.value;
-          router.push(listHref(query, 1, value ? `/admin/suppliers?category=${encodeURIComponent(value)}` : "/admin/suppliers"));
+          const box = document.querySelector<HTMLInputElement>("[data-list-search]");
+          const query = cleanListQuery(box?.value ?? "");
+          setPicked(value);
+          startTransition(() => router.push(listHref(query, 1, value ? `/admin/suppliers?category=${encodeURIComponent(value)}` : "/admin/suppliers")));
         }}
         className={`${inputBaseClass} h-11 appearance-none pr-9 text-sm`}
       >

@@ -1,5 +1,7 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import { DrizzleQueryError, and, asc, eq, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
@@ -14,7 +16,7 @@ import {
   SUPPLIER_PAGE_SIZE,
   checkSupplier,
   nextSupplierId,
-  supplierKey,
+  numericSupplierId,
   type SupplierFields,
   type SupplierImportOutcome,
 } from "@/lib/supplier-rules";
@@ -202,17 +204,30 @@ export async function removeSupplier(actor: CurrentUser, id: string): Promise<{ 
   });
 }
 
+const textArray = (values: string[]) =>
+  sql`array[${sql.join(
+    values.map((value) => sql`${value}`),
+    sql`, `,
+  )}]::text[]`;
+
 // Saves one batch of an imported supplier list. Each supplier is checked as
-// the form checks it and found by Supplier ID (without case): one on file
-// takes the file's values, except that a blank cell leaves what's on file;
-// one not on file is added. Importing the same list again changes nothing.
-// One import at a time per shop (a lock to the end of the batch). The
-// batch is recorded in audit_log as suppliers.imported, with its counts.
+// the form checks it and found by Supplier ID (without case, lower-cased by
+// Postgres as the unique index does: it and JavaScript don't lower-case
+// every letter alike). An all-digit ID with no exact match takes the one
+// on file with the same number, when there's only one: a spreadsheet opening
+// the list reads "0042" as 42. One on file takes the file's values, except
+// that a blank cell leaves what's on file; one not on file is added.
+// Importing the same list again changes nothing. One import at a time per
+// shop (a lock to the end of the batch), and the suppliers it matched are
+// locked too, so one removed or renumbered meanwhile is added rather than
+// lost. The batch is recorded in audit_log as suppliers.imported, with its
+// counts and the suppliers it added.
 export async function importSuppliers(
   actor: CurrentUser,
   input: { importId: unknown; fileName: unknown; suppliers: unknown },
 ): Promise<{ outcomes: SupplierImportOutcome[] } | { error: string }> {
   if (!isUuid(input.importId)) return { error: "That import couldn't be read. Choose the file again." };
+  const importId = input.importId;
   const list = Array.isArray(input.suppliers) ? (input.suppliers as Record<string, unknown>[]) : null;
   if (!list || list.length === 0) return { error: "There were no suppliers in that batch." };
   if (list.length > MAX_SUPPLIER_BATCH) return { error: "That batch is too big. Reload the page and try again." };
@@ -224,58 +239,136 @@ export async function importSuppliers(
 
   return withShop(actor.shop.id, async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext('supplier-import'), hashtext(${actor.shop.id}))`);
-    const keys = [...new Set(checked.flatMap(({ supplier }) => ("supplier" in supplier ? [supplier.supplier.supplierId] : [])))];
-    const onFile = keys.length
-      ? await tx
-          .select(columns)
-          .from(suppliers)
-          .where(
-            sql`lower(${suppliers.supplierId}) in (select lower(k) from unnest(array[${sql.join(
-              keys.map((key) => sql`${key}`),
-              sql`, `,
-            )}]::text[]) k)`,
-          )
-      : [];
-    const byKey = new Map(onFile.map((supplier) => [supplierKey(supplier.supplierId), supplier]));
-    const outcomes: SupplierImportOutcome[] = [];
-    const added: (typeof suppliers.$inferInsert)[] = [];
-    let updated = 0;
-    for (const entry of checked) {
+    const ids = [...new Set(checked.flatMap(({ supplier }) => ("supplier" in supplier ? [supplier.supplier.supplierId] : [])))];
+    const numbers = [...new Set(ids.map(numericSupplierId).filter((value) => value !== null))];
+    const keyOf = new Map<string, string>();
+    let onFile: (Supplier & { key: string })[] = [];
+    if (ids.length > 0) {
+      const keys = await tx.execute<{ id: string; key: string }>(sql`select k as id, lower(k) as key from unnest(${textArray(ids)}) k`);
+      for (const { id, key } of keys.rows) keyOf.set(id, key);
+      const asNumber = sql`case when ${suppliers.supplierId} ~ '^[0-9]{1,15}$' then ${suppliers.supplierId}::bigint end`;
+      onFile = await tx
+        .select({ ...columns, key: sql<string>`lower(${suppliers.supplierId})` })
+        .from(suppliers)
+        .where(
+          sql`lower(${suppliers.supplierId}) in (select lower(k) from unnest(${textArray(ids)}) k)${
+            numbers.length > 0 ? sql` or ${asNumber} = any(array[${sql.join(numbers.map((value) => sql`${value}`), sql`, `)}]::bigint[])` : sql``
+          }`,
+        )
+        .for("update");
+    }
+    const byKey = new Map(onFile.map((supplier) => [supplier.key, supplier]));
+    const batchKeys = new Set(keyOf.values());
+    const byNumber = new Map<number, (Supplier & { key: string })[]>();
+    for (const supplier of onFile) {
+      const value = numericSupplierId(supplier.supplierId);
+      // One the batch names exactly is that row's, not a stand-in.
+      if (value === null || batchKeys.has(supplier.key)) continue;
+      byNumber.set(value, [...(byNumber.get(value) ?? []), supplier]);
+    }
+
+    // Each row's supplier: the one on file it matches, or a new one by its
+    // key. Two rows for one supplier: the later is the one used, as the
+    // browser's plan has it.
+    const outcomes: (SupplierImportOutcome | null)[] = checked.map(() => null);
+    const targets = checked.map((entry, index) => {
       if ("error" in entry.supplier) {
-        outcomes.push({ row: entry.row, result: "failed", error: entry.supplier.error });
-        continue;
+        outcomes[index] = { row: entry.row, result: "failed", error: entry.supplier.error };
+        return null;
       }
       const incoming = entry.supplier.supplier;
-      const existing = byKey.get(supplierKey(incoming.supplierId));
-      if (!existing) {
-        added.push({ ...incoming, shopId: actor.shop.id, createdByUserId: actor.id });
-        // The same ID twice in one batch is one supplier.
-        byKey.set(supplierKey(incoming.supplierId), { ...incoming, id: "", updatedAt: new Date() });
-        outcomes.push({ row: entry.row, result: "created", error: null });
+      const key = keyOf.get(incoming.supplierId) ?? incoming.supplierId;
+      const value = numericSupplierId(incoming.supplierId);
+      const sameNumber = value === null ? [] : (byNumber.get(value) ?? []);
+      const existing = byKey.get(key) ?? (sameNumber.length === 1 ? sameNumber[0] : undefined);
+      return { incoming, existing, target: existing ? `on file ${existing.id}` : `new ${key}` };
+    });
+    const lastFor = new Map<string, number>();
+    targets.forEach((target, index) => target && lastFor.set(target.target, index));
+
+    // Suppliers an earlier try of this import added, when Carry on sends a
+    // batch again whose answer was lost: they were added, not already there.
+    const addedBefore = new Set(
+      (
+        await tx
+          .select({ id: sql<string>`jsonb_array_elements_text(${auditLog.details} -> 'createdIds')` })
+          .from(auditLog)
+          .where(
+            and(
+              eq(auditLog.action, "suppliers.imported"),
+              eq(auditLog.targetId, importId),
+              eq(auditLog.actorUserId, actor.id),
+              sql`${auditLog.createdAt} > now() - interval '1 day'`,
+            ),
+          )
+      ).map((row) => row.id),
+    );
+
+    const added: { index: number; values: typeof suppliers.$inferInsert }[] = [];
+    let updated = 0;
+    for (const [index, target] of targets.entries()) {
+      if (!target) continue;
+      const entry = checked[index];
+      const later = lastFor.get(target.target)!;
+      if (later !== index) {
+        outcomes[index] = { row: entry.row, result: "failed", error: `Supplier ID ${target.incoming.supplierId} is the same supplier as row ${checked[later].row}, which is the one used.` };
         continue;
       }
-      // A blank cell leaves what's on file.
+      const { incoming, existing } = target;
+      if (!existing) {
+        const id = randomUUID();
+        added.push({ index, values: { ...incoming, id, shopId: actor.shop.id, createdByUserId: actor.id } });
+        outcomes[index] = { row: entry.row, result: "created", error: null };
+        continue;
+      }
+      // A blank cell leaves what's on file, and so does the ID a number
+      // matched ("0042" stays as it is).
       const changes = Object.fromEntries(
-        SUPPLIER_FIELDS.filter((field) => incoming[field] !== null && incoming[field] !== existing[field]).map((field) => [field, incoming[field]]),
+        SUPPLIER_FIELDS.filter((field) => incoming[field] !== null && incoming[field] !== existing[field] && !(field === "supplierId" && existing.key !== keyOf.get(incoming.supplierId))).map(
+          (field) => [field, incoming[field]],
+        ),
       ) as Partial<SupplierFields>;
-      if (Object.keys(changes).length === 0 || !existing.id) {
-        outcomes.push({ row: entry.row, result: existing.id ? "unchanged" : "created", error: null });
+      if (Object.keys(changes).length === 0) {
+        outcomes[index] = { row: entry.row, result: addedBefore.has(existing.id) ? "created" : "unchanged", error: null };
         continue;
       }
       await tx.update(suppliers).set(changes).where(eq(suppliers.id, existing.id));
-      Object.assign(existing, changes);
       updated++;
-      outcomes.push({ row: entry.row, result: "updated", error: null });
+      outcomes[index] = { row: entry.row, result: "updated", error: null };
     }
-    for (let at = 0; at < added.length; at += 500) await tx.insert(suppliers).values(added.slice(at, at + 500));
-    const count = (result: SupplierImportOutcome["result"]) => outcomes.filter((outcome) => outcome.result === result).length;
-    await audit(tx, actor, "suppliers.imported", String(input.importId), {
+
+    // One added by someone else since this batch looked is left out with a
+    // note, rather than failing the batch.
+    const inserted = added.length
+      ? new Set(
+          (
+            await tx
+              .insert(suppliers)
+              .values(added.map(({ values }) => values))
+              .onConflictDoNothing()
+              .returning({ id: suppliers.id })
+          ).map((row) => row.id),
+        )
+      : new Set<string>();
+    for (const { index, values } of added) {
+      if (inserted.has(values.id!)) continue;
+      outcomes[index] = {
+        row: checked[index].row,
+        result: "failed",
+        error: `Supplier ID ${values.supplierId} was added by someone else during the import. Import the list again to bring in this row.`,
+      };
+    }
+
+    const done = outcomes as SupplierImportOutcome[];
+    const count = (result: SupplierImportOutcome["result"]) => done.filter((outcome) => outcome.result === result).length;
+    await audit(tx, actor, "suppliers.imported", importId, {
       fileName,
-      created: added.length,
+      created: inserted.size,
       updated,
       unchanged: count("unchanged"),
       failed: count("failed"),
+      createdIds: [...inserted],
     });
-    return { outcomes };
+    return { outcomes: done };
   });
 }

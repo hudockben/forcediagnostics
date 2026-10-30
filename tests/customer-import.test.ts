@@ -69,7 +69,7 @@ describe("reading the file", () => {
     assert.equal(decodeText(new Uint8Array([0xff, 0xfe, 0x41, 0x00, 0x42, 0x00])), "AB");
   });
 
-  test("the delimiter is commas unless the first line has more semicolons or tabs", () => {
+  test("the delimiter is the one that splits the most lines into the same number of cells", () => {
     assert.equal(detectDelimiter("Name,Phone\nA,1"), ",");
     assert.equal(detectDelimiter("Name;Phone;Email\nA;1;x"), ";");
     assert.equal(detectDelimiter("Name\tPhone\nA\t1"), "\t");
@@ -77,6 +77,18 @@ describe("reading the file", () => {
     // A title line above the headings doesn't decide it.
     assert.equal(detectDelimiter("Supplier list\nSupplier ID\tSupplier Name\n1\tPolaris"), "\t");
     assert.equal(detectDelimiter("Customer list, printed 10/30/2026\nName;Phone;Email\nJo;1;x"), ";");
+    // Rows pasted from a spreadsheet are tab-separated, whatever commas are in a cell.
+    assert.equal(detectDelimiter("Supplier ID\tSupplier Name\n1\tPolaris\n2\tAmerican Honda Motor Co., Inc.\n3\tKlim"), "\t");
+    assert.equal(detectDelimiter("Supplier ID\tSupplier Name\tCategory Code\n1\tSmith, Jones & Co, Inc.\tDIST"), "\t");
+    assert.equal(detectDelimiter("Name\tPhone\tAddress\nJo\t555\t12 Main St, Apt 4, Springfield\nAl\t556\t9 Elm Rd"), "\t");
+    assert.equal(
+      detectDelimiter(
+        "Demo Powersports, Inc., 123 Main St, Springfield, IL, 62701\nSupplier ID\tSupplier Code\tSupplier Name\tCategory Code\tCategory ID\n1\tPOL\tPolaris\tOEM\t10\n2\tKLM\tKlim\tGEAR\t20",
+      ),
+      "\t",
+    );
+    // A cell listing several things with semicolons doesn't make a comma CSV semicolon-separated.
+    assert.equal(detectDelimiter("Supplier ID,Supplier Name,Brands\n1,Polaris,Polaris;Indian;Slingshot;Timbersled;Klim\n2,Klim,Klim"), ",");
   });
 
   test("CSV, semicolon CSV and tab-separated text all read", async () => {

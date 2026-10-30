@@ -69,6 +69,9 @@ export function SupplierImport() {
   const job = useRef<{ importId: string; name: string; batches: SupplierImportRow[][]; next: number; sent: number; outcomes: SupplierImportOutcome[] } | null>(null);
   const fileId = useId();
   const finished = useRef<HTMLHeadingElement>(null);
+  const firstStep = useRef<HTMLHeadingElement>(null);
+  const startingOver = useRef(false);
+  const done = useRef(false);
 
   const rows = useMemo(() => loaded?.sheets[sheetIndex]?.rows ?? [], [loaded, sheetIndex]);
   const plannedMapping = useDeferredValue(mapping);
@@ -85,8 +88,29 @@ export function SupplierImport() {
     return () => window.removeEventListener("beforeunload", warn);
   }, [running]);
   useEffect(() => {
+    done.current = run?.state === "done";
     if (run && run.state !== "running") finished.current?.focus();
+    else if (!run && startingOver.current) {
+      startingOver.current = false;
+      firstStep.current?.focus();
+    }
   }, [run]);
+  // Next keeps a visited page alive: coming back after an import finished
+  // starts a new one. A stopped one stays, to carry on.
+  useEffect(
+    () => () => {
+      if (done.current) startOver();
+    },
+    [],
+  );
+
+  function startOver() {
+    job.current = null;
+    setRun(null);
+    setLoaded(null);
+    setPasted("");
+    setReadError(null);
+  }
 
   function show(next: Loaded, index: number) {
     const sheetRows = next.sheets[index]?.rows ?? [];
@@ -125,6 +149,8 @@ export function SupplierImport() {
     try {
       show({ name: "pasted rows", sheets: [{ name: "Pasted", rows: parseCsv(text, detectDelimiter(text)) }] }, 0);
     } catch {
+      setLoaded(null);
+      setRun(null);
       setReadError("Those rows couldn't be read. Copy them from the spreadsheet again, headings and all.");
     }
   }
@@ -228,10 +254,8 @@ export function SupplierImport() {
           <button
             type="button"
             onClick={() => {
-              job.current = null;
-              setRun(null);
-              setLoaded(null);
-              setPasted("");
+              startingOver.current = true;
+              startOver();
             }}
             className="inline-flex min-h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
           >
@@ -245,7 +269,9 @@ export function SupplierImport() {
   return (
     <div className="space-y-6">
       <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6">
-        <h2 className="text-base font-semibold text-ink">1. The list</h2>
+        <h2 ref={firstStep} tabIndex={-1} className="text-base font-semibold text-ink focus:outline-none">
+          1. The list
+        </h2>
         <div className="mt-4 grid gap-4 lg:grid-cols-2">
           <label
             htmlFor={fileId}

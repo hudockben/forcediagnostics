@@ -12,7 +12,7 @@ import { getSupplier, listCategories, listSuppliers, type SupplierList } from "@
 
 import { ListSearch } from "../../diagnose/list-search";
 import { Pagination } from "../../diagnose/pagination";
-import { CategoryFilter } from "./forms";
+import { CategoryFilter, CategoryPending, CategoryTransition } from "./forms";
 
 export const metadata: Metadata = { title: "Supplier" };
 
@@ -80,9 +80,9 @@ async function Suppliers({ searchParams }: { searchParams: PageProps<"/admin/sup
             from a CSV or Excel file.
           </p>
         ) : (
-          <>
+          <CategoryTransition>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              {categories.length > 0 ? <CategoryFilter categories={categories} category={category} query={query} /> : <span />}
+              {categories.length > 0 ? <CategoryFilter categories={categories} category={category} /> : <span />}
               {list.total > 0 && (
                 <a href={`${PATH}/export${exportQuery ? `?${exportQuery}` : ""}`} className={`${buttonClass} h-11 px-4 text-sm`} data-supplier-export>
                   Download CSV
@@ -90,9 +90,11 @@ async function Suppliers({ searchParams }: { searchParams: PageProps<"/admin/sup
               )}
             </div>
             <ListSearch query={query} path={pathFor(category)} label="Search suppliers" placeholder="Supplier ID, code, name or category">
-              <Results list={list} query={query} category={category} searching={searching} />
+              <CategoryPending>
+                <Results list={list} query={query} category={category} searching={searching} />
+              </CategoryPending>
             </ListSearch>
-          </>
+          </CategoryTransition>
         )}
       </Card>
     </div>
