@@ -74,6 +74,9 @@ describe("reading the file", () => {
     assert.equal(detectDelimiter("Name;Phone;Email\nA;1;x"), ";");
     assert.equal(detectDelimiter("Name\tPhone\nA\t1"), "\t");
     assert.equal(detectDelimiter('"Smith; Jo",Phone\n'), ",");
+    // A title line above the headings doesn't decide it.
+    assert.equal(detectDelimiter("Supplier list\nSupplier ID\tSupplier Name\n1\tPolaris"), "\t");
+    assert.equal(detectDelimiter("Customer list, printed 10/30/2026\nName;Phone;Email\nJo;1;x"), ";");
   });
 
   test("CSV, semicolon CSV and tab-separated text all read", async () => {

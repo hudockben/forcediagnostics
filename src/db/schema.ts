@@ -19,6 +19,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -867,6 +868,42 @@ export const stickerPlateLog = pgTable(
     // Which columns can change is set by the grant in
     // drizzle/0031_sticker_plate_log_grants.sql.
     pgPolicy("sticker_plate_log_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// System Admin > Supplier: the shop's suppliers as its dealer or accounting
+// system lists them (src/lib/suppliers.ts). Supplier ID is the shop's own
+// key, matched without case, which is how an import finds a supplier to
+// update.
+export const suppliers = pgTable(
+  "suppliers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    supplierId: text("supplier_id").notNull(),
+    supplierCode: text("supplier_code"),
+    supplierName: text("supplier_name").notNull(),
+    categoryCode: text("category_code"),
+    categoryId: text("category_id"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("suppliers_shop_supplier_id").on(t.shopId, sql`lower(${t.supplierId})`),
+    index("suppliers_shop_name").on(t.shopId, sql`lower(${t.supplierName})`),
+    check("suppliers_supplier_id", sql`length(${t.supplierId}) between 1 and 40`),
+    check("suppliers_supplier_name", sql`length(${t.supplierName}) between 1 and 120`),
+    // Which columns can change is set by the grant in
+    // drizzle/0033_suppliers_grants.sql.
+    pgPolicy("suppliers_own_shop", {
       for: "all",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
