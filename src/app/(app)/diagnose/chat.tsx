@@ -35,6 +35,7 @@ import { Chevron, vehicleOptions } from "../library/search-form";
 import { loadConversationAction, previewVinAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
 import { CustomerLine, CustomerName, CustomerVehiclePicker } from "./customer-picker";
+import { DeleteDiagnosis } from "./delete-diagnosis";
 import {
   CausesIcon,
   ChatIcon,
@@ -967,7 +968,15 @@ function VinMatch({ preview, vehiclePicked }: { preview: VinPreview | null | und
 // only changes ?from=, which keeps bfcacheId, so the carried one is in the key.
 // Start a diagnosis on a customer's vehicle only changes ?vehicle=, so the
 // vehicle is in the key too.
-export function NewDiagnosisChat({ starter, customerLinks }: { starter: StarterOptions; customerLinks: boolean }) {
+export function NewDiagnosisChat({
+  starter,
+  customerLinks,
+  canDelete,
+}: {
+  starter: StarterOptions;
+  customerLinks: boolean;
+  canDelete: boolean;
+}) {
   const { bfcacheId } = useRouter();
   return (
     <DiagnoseChat
@@ -975,6 +984,7 @@ export function NewDiagnosisChat({ starter, customerLinks }: { starter: StarterO
       initial={null}
       starter={starter}
       customerLinks={customerLinks}
+      canDelete={canDelete}
     />
   );
 }
@@ -983,12 +993,16 @@ export function DiagnoseChat({
   initial,
   starter,
   customerLinks,
+  canDelete,
 }: {
   initial: Detail | null;
   starter: StarterOptions | null;
   // Whether the viewer can open customers' records (System Admin >
   // Customers), so the customer's name links to theirs.
   customerLinks: boolean;
+  // Whether the viewer can delete a diagnosis (managers and admins, signed
+  // in with a password).
+  canDelete: boolean;
 }) {
   const [conversation, setConversation] = useState<ConversationView | null>(initial?.conversation ?? null);
   const [turns, setTurns] = useState<TurnView[]>(initial?.turns ?? []);
@@ -1271,13 +1285,15 @@ export function DiagnoseChat({
   // Wide: the conversation's heading and thread on the left, the diagnosis
   // beside them from the top (from 1280 px, itself two columns: the causes
   // and checks, and the unit with the manual pictures), using the screen's
-  // whole width (data-wide-page; see the app layout). Narrow: the heading,
-  // the tabs, then one tab.
+  // whole width (data-wide-page; see the app layout). Delete diagnosis, for
+  // those who can, sits right under the thread: the last row takes what
+  // height the diagnosis needs past it. Narrow: the heading, the tabs, then
+  // one tab, then Delete diagnosis.
   return (
     <div
       ref={widePage}
       data-wide-page
-      className="max-lg:space-y-4 lg:grid lg:grid-cols-[minmax(0,1fr)_30rem] lg:grid-rows-[auto_1fr] lg:gap-x-6 lg:gap-y-4 xl:grid-cols-[minmax(19rem,0.78fr)_minmax(0,2fr)]"
+      className="max-lg:space-y-4 lg:grid lg:grid-cols-[minmax(0,1fr)_30rem] lg:grid-rows-[auto_auto_1fr] lg:gap-x-6 lg:gap-y-4 xl:grid-cols-[minmax(19rem,0.78fr)_minmax(0,2fr)]"
     >
       <header className="flex flex-wrap items-end justify-between gap-x-3 gap-y-1 lg:col-start-1 lg:row-start-1">
         <div className="flex w-full items-center justify-between gap-3 lg:contents">
@@ -1384,7 +1400,7 @@ export function DiagnoseChat({
       <aside
         id="diagnosis-pane"
         aria-label="Diagnosis"
-        className={`min-w-0 scroll-mt-20 space-y-4 lg:sticky lg:top-4 lg:col-start-2 lg:row-span-2 lg:row-start-1 lg:max-h-[calc(100dvh-2rem)] lg:self-start lg:overflow-y-auto lg:overscroll-contain lg:pr-1 lg:[scrollbar-width:thin] ${tab === "diagnosis" ? "" : "max-lg:hidden"}`}
+        className={`min-w-0 scroll-mt-20 space-y-4 lg:sticky lg:top-4 lg:col-start-2 lg:row-span-3 lg:row-start-1 lg:max-h-[calc(100dvh-2rem)] lg:self-start lg:overflow-y-auto lg:overscroll-contain lg:pr-1 lg:[scrollbar-width:thin] ${tab === "diagnosis" ? "" : "max-lg:hidden"}`}
       >
         {/* On a tablet the chat is behind its tab: what happened there,
             and that this conversation is full, show here too. */}
@@ -1439,6 +1455,12 @@ export function DiagnoseChat({
           onAsk={conversation.full ? undefined : ask}
         />
       </aside>
+
+      {canDelete && (
+        <div className="lg:col-start-1 lg:row-start-3 lg:self-start">
+          <DeleteDiagnosis conversation={{ id: conversation.id, title: conversation.title }} busy={busy} />
+        </div>
+      )}
     </div>
   );
 }

@@ -21,6 +21,8 @@ export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number];
 export const DIAGNOSE_LIMITS = {
   // What a tech can type in one message.
   techText: 4000,
+  // Why a manager deleted a diagnosis, kept in the Activity log.
+  deleteReason: 200,
   // Per conversation: after this many messages, or once Claude's prompt has
   // grown past this many tokens, the tech starts a new diagnosis.
   techMessages: 40,

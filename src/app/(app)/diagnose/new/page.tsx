@@ -50,6 +50,7 @@ async function NewDiagnosis({ searchParams }: { searchParams: PageProps<"/diagno
     <NewDiagnosisChat
       starter={{ vehicles: options.vehicles, brands: options.brands, years: options.years, carry, customer }}
       customerLinks={allows(user, "repair_orders.intake")}
+      canDelete={allows(user, "diagnostics.delete")}
     />
   );
 }

@@ -35,6 +35,7 @@ async function Diagnosis({ params }: { params: PageProps<"/diagnose/[id]">["para
         initial={detail}
         starter={null}
         customerLinks={allows(user, "repair_orders.intake")}
+        canDelete={allows(user, "diagnostics.delete")}
       />
     </div>
   );

@@ -1534,11 +1534,13 @@ describe("Diagnose and shops", () => {
     );
   });
 
-  test("app_user can't delete, or change who sent what", async () => {
+  // A whole conversation can be deleted, by a manager or admin with the
+  // Activity log keeping it (tests/activity-log.test.ts); a message can't be
+  // on its own.
+  test("app_user can't delete a message, or change who sent what", async () => {
     const run = await startTurn(techA, { start: { message: "Keep me" } }, [() => message([submit({})], "tool_use")]);
     for (const statement of [
       sql`delete from diagnosis_turns where id = ${run.turn.id}`,
-      sql`delete from diagnosis_conversations where id = ${run.conversation.id}`,
       sql`update diagnosis_turns set tech_text = 'changed' where id = ${run.turn.id}`,
       sql`update diagnosis_turns set user_id = ${techA2.id} where id = ${run.turn.id}`,
       sql`update diagnosis_conversations set shop_id = ${techB.shop.id} where id = ${run.conversation.id}`,

@@ -1,0 +1,1 @@
+CREATE POLICY "diagnosis_conversations_remove_own_shop" ON "diagnosis_conversations" AS PERMISSIVE FOR DELETE TO "app_user" USING ("diagnosis_conversations"."shop_id" = nullif(current_setting('app.shop_id', true), '')::uuid);
