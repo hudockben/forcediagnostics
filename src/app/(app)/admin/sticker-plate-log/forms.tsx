@@ -33,15 +33,17 @@ function Feedback({ state }: { state: FormState }) {
 
 // The customer the sticker went to: found by name or phone number as it's
 // typed (arrow keys and Enter, or a tap), or added as a new customer by the
-// name typed.
-function CustomerBox({ picked, onPick }: { picked: Picked; onPick: (picked: Picked) => void }) {
-  const id = useId();
+// name typed. labelId names it (the form's "Customer name" label), and a
+// polite announcement says who's picked, as the box turns into their name.
+function CustomerBox({ picked, onPick, inputId, labelId }: { picked: Picked; onPick: (picked: Picked) => void; inputId: string; labelId: string }) {
+  const id = inputId;
   const listId = `${id}-list`;
   const [text, setText] = useState("");
   const [found, setFound] = useState<{ query: string; items: CustomerChoice[] }>({ query: "", items: [] });
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const input = useRef<HTMLInputElement>(null);
+  const change = useRef<HTMLButtonElement>(null);
   const query = text.trim();
 
   useEffect(() => {
@@ -66,120 +68,145 @@ function CustomerBox({ picked, onPick }: { picked: Picked; onPick: (picked: Pick
   const options: Picked[] =
     query.length >= 2 && !looking ? [...items.map((customer) => ({ kind: "existing" as const, customer })), { kind: "new", name: query }] : [];
   const showing = open && options.length > 0;
+
+  // The option the arrow keys are on stays in sight in the scrolling list.
+  useEffect(() => {
+    if (showing) document.getElementById(`${id}-option-${active}`)?.scrollIntoView({ block: "nearest" });
+  }, [showing, active, id]);
+
   const choose = (option: Picked) => {
     onPick(option);
     setText("");
     setOpen(false);
+    // The box becomes the customer's name: focus goes to its Change button.
+    requestAnimationFrame(() => change.current?.focus());
   };
-
-  if (picked) {
-    return (
-      <div className="mt-1.5 flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-glow/40 bg-glow/5 px-3.5 py-2" data-sticker-customer>
-        <span className="min-w-0 text-sm break-words">
-          {picked.kind === "existing" ? (
-            <>
-              <span className="font-medium text-ink">{picked.customer.name}</span>
-              {picked.customer.detail && <span className="text-ink-muted"> · {picked.customer.detail}</span>}
-            </>
-          ) : (
-            <>
-              <span className="font-medium text-ink">{picked.name}</span>
-              <span className="text-ink-muted"> · a new customer</span>
-            </>
-          )}
-        </span>
-        <button
-          type="button"
-          onClick={() => {
-            onPick(null);
-            requestAnimationFrame(() => input.current?.focus());
-          }}
-          className="min-h-11 rounded-lg px-2 text-sm font-medium text-glow/90 hover:text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
-        >
-          Change
-        </button>
-      </div>
-    );
-  }
+  const pickedName = picked?.kind === "existing" ? picked.customer.name : picked?.kind === "new" ? picked.name : "";
 
   return (
-    <div className="relative">
-      <input
-        ref={input}
-        id={id}
-        type="text"
-        role="combobox"
-        aria-expanded={showing}
-        aria-controls={listId}
-        aria-autocomplete="list"
-        aria-activedescendant={showing ? `${id}-option-${active}` : undefined}
-        aria-describedby={`${id}-hint`}
-        value={text}
-        onChange={(event) => {
-          setText(event.target.value);
-          setActive(0);
-          setOpen(true);
-        }}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-        onKeyDown={(event) => {
-          // Enter while still looking waits for the results, not the form.
-          if (event.key === "Enter" && looking) {
-            event.preventDefault();
-            return;
-          }
-          if (!showing) return;
-          if (event.key === "ArrowDown") setActive((at) => Math.min(at + 1, options.length - 1));
-          else if (event.key === "ArrowUp") setActive((at) => Math.max(at - 1, 0));
-          else if (event.key === "Enter") choose(options[Math.min(active, options.length - 1)]);
-          else if (event.key === "Escape") setOpen(false);
-          else return;
-          event.preventDefault();
-        }}
-        placeholder="Customer's name or phone"
-        autoComplete="off"
-        spellCheck={false}
-        maxLength={120}
-        className={inputClass}
-        data-sticker-customer-search
-      />
-      <p id={`${id}-hint`} className={hintClass} aria-live="polite">
-        {open && looking ? "Looking…" : "Pick them from your customers, or add them as a new one."}
+    <div>
+      <p className="sr-only" aria-live="polite">
+        {picked ? `Customer: ${pickedName}${picked.kind === "new" ? ", a new customer" : ""}.` : ""}
       </p>
-      {showing && (
-        <ul
-          id={listId}
-          role="listbox"
-          aria-label="Customers"
-          className="absolute z-30 mt-1 max-h-80 w-full overflow-y-auto rounded-lg border border-white/10 bg-charcoal-900 shadow-xl shadow-black/50"
-          // Keeps focus in the box while an option is tapped.
-          onMouseDown={(event) => event.preventDefault()}
+      {picked ? (
+        <div
+          role="group"
+          aria-labelledby={labelId}
+          className="mt-1.5 flex min-h-12 flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border border-glow/40 bg-glow/5 px-3.5 py-2"
+          data-sticker-customer
         >
-          {options.map((option, index) => (
-            <li
-              key={option?.kind === "existing" ? option.customer.id : "new"}
-              id={`${id}-option-${index}`}
-              role="option"
-              aria-selected={index === active}
-              onClick={() => choose(option)}
-              onMouseEnter={() => setActive(index)}
-              className={`flex min-h-12 cursor-pointer flex-col justify-center px-3.5 py-2 text-sm ${index === active ? "bg-white/5" : ""} ${
-                option?.kind === "new" ? "border-t border-white/10" : ""
-              }`}
+          <span className="min-w-0 text-sm break-words">
+            {picked.kind === "existing" ? (
+              <>
+                <span className="font-medium text-ink">{picked.customer.name}</span>
+                {picked.customer.detail && <span className="text-ink-muted"> · {picked.customer.detail}</span>}
+              </>
+            ) : (
+              <>
+                <span className="font-medium text-ink">{picked.name}</span>
+                <span className="text-ink-muted"> · a new customer</span>
+              </>
+            )}
+          </span>
+          <button
+            ref={change}
+            type="button"
+            aria-label={`Change the customer (now ${pickedName})`}
+            onClick={() => {
+              onPick(null);
+              requestAnimationFrame(() => input.current?.focus());
+            }}
+            className="min-h-11 rounded-lg px-2 text-sm font-medium text-glow/90 hover:text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+          >
+            Change
+          </button>
+        </div>
+      ) : (
+        <div className="relative">
+          <input
+            ref={input}
+            id={id}
+            type="text"
+            role="combobox"
+            aria-labelledby={labelId}
+            aria-expanded={showing}
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={showing ? `${id}-option-${active}` : undefined}
+            aria-describedby={`${id}-hint`}
+            value={text}
+            onChange={(event) => {
+              setText(event.target.value);
+              setActive(0);
+              setOpen(true);
+            }}
+            onFocus={() => setOpen(true)}
+            onBlur={() => setOpen(false)}
+            onKeyDown={(event) => {
+              // Enter while still looking waits for the results, not the form.
+              if (event.key === "Enter" && looking) {
+                event.preventDefault();
+                return;
+              }
+              // Down opens the list again after Escape closed it.
+              if (!showing) {
+                if (event.key === "ArrowDown" && options.length > 0) {
+                  setOpen(true);
+                  event.preventDefault();
+                }
+                return;
+              }
+              if (event.key === "ArrowDown") setActive((at) => Math.min(at + 1, options.length - 1));
+              else if (event.key === "ArrowUp") setActive((at) => Math.max(at - 1, 0));
+              else if (event.key === "Enter") choose(options[Math.min(active, options.length - 1)]);
+              else if (event.key === "Escape") setOpen(false);
+              else return;
+              event.preventDefault();
+            }}
+            placeholder="Their name or phone number"
+            autoComplete="off"
+            spellCheck={false}
+            maxLength={120}
+            className={inputClass}
+            data-sticker-customer-search
+          />
+          <p id={`${id}-hint`} className={hintClass} aria-live="polite">
+            {open && looking ? "Looking…" : "Pick them from your customers, or add them as a new one."}
+          </p>
+          {showing && (
+            <ul
+              id={listId}
+              role="listbox"
+              aria-label="Customers"
+              className="absolute z-30 mt-1 max-h-80 w-full overflow-y-auto rounded-lg border border-white/10 bg-charcoal-900 shadow-xl shadow-black/50"
+              // Keeps focus in the box while an option is tapped.
+              onMouseDown={(event) => event.preventDefault()}
             >
-              {option?.kind === "existing" ? (
-                <>
-                  <span className="text-ink">{option.customer.name}</span>
-                  {option.customer.detail && <span className="text-xs text-ink-muted">{option.customer.detail}</span>}
-                </>
-              ) : option?.kind === "new" ? (
-                <span className="text-glow">
-                  Add “{option.name}” as a new customer
-                </span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+              {options.map((option, index) => (
+                <li
+                  key={option?.kind === "existing" ? option.customer.id : "new"}
+                  id={`${id}-option-${index}`}
+                  role="option"
+                  aria-selected={index === active}
+                  onClick={() => choose(option)}
+                  onMouseEnter={() => setActive(index)}
+                  className={`flex min-h-12 cursor-pointer flex-col justify-center px-3.5 py-2 text-sm ${index === active ? "bg-white/5" : ""} ${
+                    option?.kind === "new" ? "border-t border-white/10" : ""
+                  }`}
+                >
+                  {option?.kind === "existing" ? (
+                    <>
+                      <span className="text-ink">{option.customer.name}</span>
+                      {option.customer.detail && <span className="text-xs text-ink-muted">{option.customer.detail}</span>}
+                    </>
+                  ) : option?.kind === "new" ? (
+                    <span className="text-glow">Add “{option.name}” as a new customer</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
     </div>
   );
@@ -217,8 +244,11 @@ function ClassChoice({ value, onChange }: { value: PlateClass | null; onChange: 
 type SavedEntry = { id: string; stickerNumber: string; plateClass: PlateClass; customer: CustomerChoice };
 
 // Logs a sticker, or corrects one. After logging, the form is ready for
-// the next sticker: the number and customer are cleared and the class
-// stays, as a run of stickers is often all one class.
+// the next sticker: the number and customer are cleared (also when the form
+// was opened from a customer's record) and the class stays, as a run of
+// stickers is often all one class. After a correction is saved, the
+// customer shown is the one saved, so saving again can't add a new
+// customer twice.
 export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; initialCustomer?: CustomerChoice | null }) {
   const { state, pending, formProps } = useFormAction<FormState>(entry ? saveStickerAction : logStickerAction, {});
   const [sticker, setSticker] = useState(entry?.stickerNumber ?? "");
@@ -231,6 +261,8 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
   const [sent, setSent] = useState("");
   const [message, setMessage] = useState<FormState>({});
   const stickerId = useId();
+  const customerId = useId();
+  const customerLabelId = useId();
 
   // What came back: after logging one, say what was logged and get ready
   // for the next.
@@ -240,10 +272,17 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
     if (state.logged) {
       setMessage({ success: `Logged ${sent}.` });
       setSticker("");
-      setPicked(initialCustomer ? { kind: "existing", customer: initialCustomer } : null);
+      setPicked(null);
     } else {
       setMessage(state);
     }
+  }
+  // A correction saved: the entry comes back with its customer (a new one
+  // has an id now), which the form then shows.
+  const [savedCustomer, setSavedCustomer] = useState(entry?.customer.id);
+  if (entry && entry.customer.id !== savedCustomer) {
+    setSavedCustomer(entry.customer.id);
+    setPicked({ kind: "existing", customer: entry.customer });
   }
   useEffect(() => {
     if (state.logged) stickerInput.current?.focus();
@@ -289,8 +328,10 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
           />
         </div>
         <div>
-          <span className={labelClass}>Customer name</span>
-          <CustomerBox picked={picked} onPick={setPicked} />
+          <label id={customerLabelId} htmlFor={customerId} className={labelClass}>
+            Customer name
+          </label>
+          <CustomerBox picked={picked} onPick={setPicked} inputId={customerId} labelId={customerLabelId} />
         </div>
       </div>
       <div className="max-w-sm">
@@ -311,6 +352,15 @@ const removeButtonClass =
 export function RemoveStickerForm({ entry }: { entry: { id: string; stickerNumber: string } }) {
   const { state, pending, formProps } = useFormAction<FormState>(removeStickerAction, {});
   const [confirming, setConfirming] = useState(false);
+  // Cancel puts focus back on the button that asked.
+  const opener = useRef<HTMLButtonElement>(null);
+  const cancelled = useRef(false);
+  useEffect(() => {
+    if (!confirming && cancelled.current) {
+      cancelled.current = false;
+      opener.current?.focus();
+    }
+  }, [confirming]);
   return (
     <form {...formProps} className="space-y-4">
       <input type="hidden" name="id" value={entry.id} />
@@ -327,7 +377,10 @@ export function RemoveStickerForm({ entry }: { entry: { id: string; stickerNumbe
             <button
               type="button"
               disabled={pending}
-              onClick={() => setConfirming(false)}
+              onClick={() => {
+                cancelled.current = true;
+                setConfirming(false);
+              }}
               className="h-12 rounded-lg px-4 text-sm text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
             >
               Cancel
@@ -335,7 +388,7 @@ export function RemoveStickerForm({ entry }: { entry: { id: string; stickerNumbe
           </div>
         </div>
       ) : (
-        <button type="button" onClick={() => setConfirming(true)} className={`${removeButtonClass} w-full`}>
+        <button ref={opener} type="button" onClick={() => setConfirming(true)} className={`${removeButtonClass} w-full`}>
           Remove from the log
         </button>
       )}

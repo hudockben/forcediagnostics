@@ -192,7 +192,7 @@ function Stickers({ customerId, stickers }: { customerId: string; stickers: Stic
                 href={`/admin/sticker-plate-log/${entry.id}`}
                 className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset"
               >
-                <span className="font-mono text-sm font-medium tracking-wide text-ink">{entry.stickerNumber}</span>
+                <span className="min-w-0 font-mono text-sm font-medium tracking-wide break-all text-ink">{entry.stickerNumber}</span>
                 <span className="flex items-center gap-3 text-xs text-ink-muted">
                   <LocalTime value={entry.createdAt.toISOString()} />
                   <Badge tone={entry.plateClass === 1 ? "glow" : "neutral"}>Class {entry.plateClass}</Badge>

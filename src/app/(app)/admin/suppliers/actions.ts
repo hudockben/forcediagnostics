@@ -40,7 +40,7 @@ export async function addSupplierAction(_previous: FormState, form: FormData): P
     const user = await requireCapability("parts.manage");
     const result = await createSupplier(user, supplierFields(form));
     if ("error" in result) return { error: result.error };
-    redirect(`/admin/suppliers?added=${encodeURIComponent(field(form, "supplierName").trim())}`);
+    redirect(`/admin/suppliers?added=${result.id}`);
   }, NOT_SAVED);
 }
 
@@ -59,7 +59,7 @@ export async function removeSupplierAction(_previous: FormState, form: FormData)
     const user = await requireCapability("parts.manage");
     const result = await removeSupplier(user, field(form, "id"));
     if ("error" in result) return { error: result.error };
-    redirect(`/admin/suppliers?removed=${encodeURIComponent(result.supplierName)}`);
+    redirect("/admin/suppliers?removed=1");
   }, NOT_SAVED);
 }
 

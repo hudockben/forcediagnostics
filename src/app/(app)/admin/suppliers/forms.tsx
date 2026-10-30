@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useId, useState, type ComponentProps } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputBaseClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
@@ -130,6 +130,15 @@ const removeButtonClass =
 export function RemoveSupplierForm({ supplier }: { supplier: { id: string; supplierName: string } }) {
   const { state, pending, formProps } = useFormAction<FormState>(removeSupplierAction, {});
   const [confirming, setConfirming] = useState(false);
+  // Cancel puts focus back on the button that asked.
+  const opener = useRef<HTMLButtonElement>(null);
+  const cancelled = useRef(false);
+  useEffect(() => {
+    if (!confirming && cancelled.current) {
+      cancelled.current = false;
+      opener.current?.focus();
+    }
+  }, [confirming]);
   return (
     <form {...formProps} className="space-y-4">
       <input type="hidden" name="id" value={supplier.id} />
@@ -146,7 +155,10 @@ export function RemoveSupplierForm({ supplier }: { supplier: { id: string; suppl
             <button
               type="button"
               disabled={pending}
-              onClick={() => setConfirming(false)}
+              onClick={() => {
+                cancelled.current = true;
+                setConfirming(false);
+              }}
               className="h-12 rounded-lg px-4 text-sm text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
             >
               Cancel
@@ -154,7 +166,7 @@ export function RemoveSupplierForm({ supplier }: { supplier: { id: string; suppl
           </div>
         </div>
       ) : (
-        <button type="button" onClick={() => setConfirming(true)} className={`${removeButtonClass} w-full`}>
+        <button ref={opener} type="button" onClick={() => setConfirming(true)} className={`${removeButtonClass} w-full`}>
           Remove supplier
         </button>
       )}

@@ -11,6 +11,7 @@ import type { CurrentUser } from "@/lib/session";
 import {
   STICKER_LOG_PAGE_SIZE,
   checkStickerEntry,
+  stickerKey,
   type PlateClass,
   type StickerLogRow,
 } from "@/lib/sticker-log-rules";
@@ -50,20 +51,34 @@ async function audit(tx: ShopTransaction, actor: CurrentUser, action: string, ta
   await tx.insert(auditLog).values({ shopId: actor.shop.id, actorUserId: actor.id, action, targetType: "sticker", targetId, details });
 }
 
-const unique = (error: unknown) => ((error instanceof DrizzleQueryError ? error.cause : error) as { code?: string } | undefined)?.code === "23505";
+const codeOf = (error: unknown) => ((error instanceof DrizzleQueryError ? error.cause : error) as { code?: string } | undefined)?.code;
+// Logged by someone else a moment ago (the unique key), or the customer
+// removed a moment ago (the foreign key).
+const unique = (error: unknown) => codeOf(error) === "23505";
+const customerGone = (error: unknown) => codeOf(error) === "23503";
+const GONE = { error: "That customer was removed a moment ago. Pick the customer again." };
+
+// A sticker number as the database keys it (see stickerKey).
+const keyOf = sql`regexp_replace(${stickerPlateLog.stickerNumber}, '[^A-Z0-9]', '', 'g')`;
 
 // What a search of the log looks through: the sticker number and the
 // customer's name and phone number (also as bare digits). Every word has
-// to be somewhere, any order and any case, as on the other lists.
+// to be somewhere, any order and any case, as on the other lists. A search
+// that reads as a sticker number also finds it however it was spaced or
+// dashed ("No. 77001", "A12345" for "A 12-345").
 function logSearch(query: string): SQL | undefined {
   const words = listSearchWords(query);
   if (words.length === 0) return undefined;
   const text = sql`concat_ws(' ', ${stickerPlateLog.stickerNumber}, ${customers.name}, ${customers.phone},
     regexp_replace(coalesce(${customers.phone}, ''), '[^0-9]', '', 'g'))`;
-  return sql`${text} ilike all (array[${sql.join(
+  const byWords = sql`${text} ilike all (array[${sql.join(
     words.map((word) => sql`${containsPattern(word)}`),
     sql`, `,
   )}]::text[])`;
+  const sticker = checkStickerEntry({ stickerNumber: query, plateClass: 1 });
+  const key = "entry" in sticker ? stickerKey(sticker.entry.stickerNumber) : "";
+  // The key is only letters and digits, so nothing in it needs escaping.
+  return key ? sql`(${byWords} or ${keyOf} like ${`%${key}%`})` : byWords;
 }
 
 const filters = (query: string, plateClass: PlateClass | null) =>
@@ -221,14 +236,22 @@ async function customerFor(
   return { error: "Pick the customer the sticker went to, or add them." };
 }
 
-// Another entry with this sticker number, said by whom it went to.
+// Another entry with this sticker number (however it's spaced or dashed),
+// said by whom it went to.
 async function alreadyLogged(tx: ShopTransaction, stickerNumber: string, except?: string) {
   const [other] = await tx
-    .select({ id: stickerPlateLog.id, customerName: customers.name })
+    .select({ id: stickerPlateLog.id, stickerNumber: stickerPlateLog.stickerNumber, customerName: customers.name })
     .from(stickerPlateLog)
     .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
-    .where(eq(stickerPlateLog.stickerNumber, stickerNumber));
-  return other && other.id !== except ? { error: `Sticker ${stickerNumber} is already in the log, for ${other.customerName}.` } : null;
+    .where(sql`${keyOf} = ${stickerKey(stickerNumber)}`);
+  if (!other || other.id === except) return null;
+  const as = other.stickerNumber === stickerNumber ? "" : ` (as ${other.stickerNumber})`;
+  return { error: `Sticker ${stickerNumber} is already in the log${as}, for ${other.customerName}.` };
+}
+
+// The same message after a race lost on the unique key: who has it now.
+async function takenNow(shopId: string, stickerNumber: string) {
+  return (await withShop(shopId, (tx) => alreadyLogged(tx, stickerNumber))) ?? { error: `Sticker ${stickerNumber} is already in the log.` };
 }
 
 export type StickerInput = { stickerNumber: unknown; plateClass: unknown; customerId?: unknown; newCustomerName?: unknown };
@@ -251,8 +274,8 @@ export async function logSticker(actor: CurrentUser, input: StickerInput): Promi
       return { id: row.id, customerId: customer.id };
     });
   } catch (error) {
-    // Logged by someone else a moment ago.
-    if (unique(error)) return { error: `Sticker ${stickerNumber} is already in the log.` };
+    if (unique(error)) return takenNow(actor.shop.id, stickerNumber);
+    if (customerGone(error)) return GONE;
     throw error;
   }
 }
@@ -283,9 +306,33 @@ export async function updateSticker(actor: CurrentUser, id: string, input: Stick
       return { ok: true as const };
     });
   } catch (error) {
-    if (unique(error)) return { error: `Sticker ${stickerNumber} is already in the log.` };
+    if (unique(error)) return takenNow(actor.shop.id, stickerNumber);
+    if (customerGone(error)) return GONE;
     throw error;
   }
+}
+
+// The sticker this user removed from the log in the last few minutes, by
+// the number the address names: the notice after a removal says only what
+// the audit log shows they removed, never other words a link might carry.
+export async function recentlyRemoved(user: CurrentUser, stickerNumber: string): Promise<string | null> {
+  const checked = checkStickerEntry({ stickerNumber, plateClass: 1 });
+  if ("error" in checked) return null;
+  const [row] = await withShop(user.shop.id, (tx) =>
+    tx
+      .select({ stickerNumber: sql<string>`${auditLog.details} ->> 'stickerNumber'` })
+      .from(auditLog)
+      .where(
+        and(
+          eq(auditLog.action, "sticker.removed"),
+          eq(auditLog.actorUserId, user.id),
+          sql`${auditLog.details} ->> 'stickerNumber' = ${checked.entry.stickerNumber}`,
+          sql`${auditLog.createdAt} > now() - interval '10 minutes'`,
+        ),
+      )
+      .limit(1),
+  );
+  return row?.stickerNumber ?? null;
 }
 
 // Removes an entry logged by mistake; the audit log keeps what it was.

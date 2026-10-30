@@ -13,15 +13,23 @@ export const STICKER_LOG_PAGE_SIZE = 25;
 export const isPlateClass = (value: unknown): value is PlateClass => PLATE_CLASSES.includes(Number(value) as PlateClass) && String(value).trim() !== "";
 
 // " #a 12-345 " -> "A 12-345": upper-cased, spaces evened out, without a
-// "#" or "No." in front, so the same sticker typed two ways is one.
+// "#" in front, or "No." or "No" and a space before a digit ("No. 77001",
+// "No 77001"). Letters that are part of the number stay: "NOR-1234" is
+// NOR-1234.
 export function normalizeSticker(text: unknown) {
   return String(typeof text === "string" ? text : "")
     .replace(/\u0000/g, "")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/^(?:#|no\.?\s*)\s*/i, "")
+    .replace(/^(?:#\s*|no\.\s*|no\s+(?=\d))/i, "")
     .toUpperCase();
 }
+
+// A sticker number without its spaces, dashes, dots and slashes: "A 12-345",
+// "A12345" and "A-12345" are one sticker typed three ways. The log keeps
+// each number once by this (a unique index on the same expression,
+// drizzle/0034_sticker_number_key.sql), and search finds by it.
+export const stickerKey = (stickerNumber: string) => normalizeSticker(stickerNumber).replace(/[^A-Z0-9]/g, "");
 
 export type StickerEntryFields = { stickerNumber: string; plateClass: PlateClass };
 

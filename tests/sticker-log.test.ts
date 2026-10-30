@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { eq, sql } from "drizzle-orm";
 
@@ -22,12 +23,13 @@ import {
   getStickerEntry,
   listStickerLog,
   logSticker,
+  recentlyRemoved,
   removeSticker,
   searchCustomersForLog,
   stickersForCustomer,
   updateSticker,
 } from "../src/lib/sticker-log";
-import { checkStickerEntry, normalizeSticker, parseClassFilter, stickerLogCsv } from "../src/lib/sticker-log-rules";
+import { checkStickerEntry, normalizeSticker, parseClassFilter, stickerKey, stickerLogCsv } from "../src/lib/sticker-log-rules";
 
 describe("the rules for a sticker", () => {
   test("sticker numbers are tidied, so one typed two ways is one", () => {
@@ -35,6 +37,21 @@ describe("the rules for a sticker", () => {
     assert.equal(normalizeSticker("No. 778812"), "778812");
     assert.equal(normalizeSticker("pa\t 00412"), "PA 00412");
     assert.equal(normalizeSticker(undefined), "");
+    // "No" before a number is a label only with its dot, or a space and a
+    // digit after it; letters that are part of the number stay.
+    assert.equal(normalizeSticker("No 77001"), "77001");
+    assert.equal(normalizeSticker("NOR-1234"), "NOR-1234");
+    assert.equal(normalizeSticker("nov-1001"), "NOV-1001");
+    assert.equal(normalizeSticker("NO-2024-1"), "NO-2024-1");
+    assert.equal(normalizeSticker("NO1234"), "NO1234");
+    assert.ok("entry" in checkStickerEntry({ stickerNumber: "NO-2024-1", plateClass: "1" }));
+  });
+
+  test("a sticker typed with other spaces or dashes is the same sticker", () => {
+    assert.equal(stickerKey("A 12-345"), "A12345");
+    assert.equal(stickerKey("a-12.345"), "A12345");
+    assert.equal(stickerKey("#A12345"), "A12345");
+    assert.notEqual(stickerKey("NOR-77"), stickerKey("R-77"));
   });
 
   test("a sticker number and a class of 1 or 2 are needed", () => {
@@ -192,12 +209,59 @@ describe("the log", () => {
     assert.deepEqual(await updateSticker(writer, logged.id, { stickerNumber: "3002", plateClass: "2", customerId: rhett }), { ok: true });
     assert.deepEqual(await removeSticker(writer, logged.id), { ok: true, stickerNumber: "3002" });
     assert.equal(await getStickerEntry(writer.shop.id, logged.id), null);
+    // The notice after it names only what the audit log shows was removed,
+    // by this user.
+    assert.equal(await recentlyRemoved(writer, "3002"), "3002");
+    assert.equal(await recentlyRemoved(writer, "#3002"), "3002");
+    assert.equal(await recentlyRemoved(writer, "3002 and call 555"), null);
+    assert.equal(await recentlyRemoved(writer, "2001"), null, "never removed");
+    assert.equal(await recentlyRemoved(other, "3002"), null, "another shop");
     const history = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, logged.id)).orderBy(auditLog.createdAt);
     assert.deepEqual(
       history.map((row) => row.action),
       ["sticker.logged", "sticker.updated", "sticker.removed"],
     );
     assert.deepEqual(history[1].details, { stickerNumber: "3002", fields: ["stickerNumber", "plateClass", "customerId"], was: "3001" });
+  });
+
+  test("one sticker once, however it's spaced or dashed, and found the same way", async () => {
+    assert.ok("id" in (await logSticker(writer, { stickerNumber: "B 12-345", plateClass: "1", customerId: dana })));
+    assert.deepEqual(await logSticker(writer, { stickerNumber: "b12345", plateClass: "2", customerId: rhett }), {
+      error: "Sticker B12345 is already in the log (as B 12-345), for Dana Whitfield.",
+    });
+    assert.ok("id" in (await logSticker(writer, { stickerNumber: "NOR-77", plateClass: "1", customerId: rhett })));
+    assert.ok("id" in (await logSticker(writer, { stickerNumber: "R-77", plateClass: "1", customerId: rhett })), "NOR-77 and R-77 are two stickers");
+    assert.ok("id" in (await logSticker(writer, { stickerNumber: "77001", plateClass: "1", customerId: dana })));
+    const found = async (query: string) => (await listStickerLog(writer.shop.id, { query, perPage: 100 })).items.map((entry) => entry.stickerNumber).sort();
+    assert.deepEqual(await found("No. 77001"), ["77001"]);
+    assert.deepEqual(await found("B12345"), ["B 12-345"]);
+    assert.deepEqual(await found("nor-77"), ["NOR-77"]);
+    // The database holds to it too, whatever the code does.
+    await assert.rejects(
+      withShop(writer.shop.id, (tx) => tx.insert(stickerPlateLog).values({ shopId: writer.shop.id, customerId: dana, stickerNumber: "B-12345", plateClass: 1 })),
+    );
+  });
+
+  test("two clerks logging one sticker at once: the second hears who has it", async () => {
+    const results = await Promise.all([
+      logSticker(writer, { stickerNumber: "RACE-1", plateClass: "1", customerId: dana }),
+      logSticker(writer, { stickerNumber: "RACE-1", plateClass: "2", customerId: rhett }),
+    ]);
+    const refused = results.filter((result) => "error" in result);
+    assert.equal(refused.length, 1);
+    assert.match((refused[0] as { error: string }).error, /^Sticker RACE-1 is already in the log, for (Dana Whitfield|Rhett Carver)\.$/);
+  });
+
+  test("a sticker for a customer removed a moment ago says so", async () => {
+    const goner = await customer(writer, "Gone Soon");
+    const client = await systemDb.$client.connect();
+    await client.query("begin");
+    await client.query("delete from customers where id = $1", [goner]);
+    const logging = logSticker(writer, { stickerNumber: "GONE-1", plateClass: "1", customerId: goner });
+    await sleep(300);
+    await client.query("commit");
+    client.release();
+    assert.deepEqual(await logging, { error: "That customer was removed a moment ago. Pick the customer again." });
   });
 
   test("a customer with stickers logged stays on file", async () => {

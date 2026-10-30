@@ -2,12 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 
+import { ClearParams } from "@/components/app/clear-params";
 import { Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { primaryLinkClass } from "@/components/hud";
 import { MAX_LIST_WORDS, cleanListQuery, listSearchIsCut, listSearchWords, parsePage } from "@/lib/diagnose-list-rules";
 import { requireCapability } from "@/lib/session";
 import { SUPPLIER_FIELDS, SUPPLIER_FIELD_LABELS } from "@/lib/supplier-rules";
-import { listCategories, listSuppliers, type SupplierList } from "@/lib/suppliers";
+import { getSupplier, listCategories, listSuppliers, type SupplierList } from "@/lib/suppliers";
 
 import { ListSearch } from "../../diagnose/list-search";
 import { Pagination } from "../../diagnose/pagination";
@@ -35,9 +36,12 @@ async function Suppliers({ searchParams }: { searchParams: PageProps<"/admin/sup
   const params = await searchParams;
   const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
   const category = typeof params.category === "string" && params.category.trim() ? params.category.trim().slice(0, 40) : null;
-  const [list, categories] = await Promise.all([
+  const [list, categories, added] = await Promise.all([
     listSuppliers(user.shop.id, { query, category, page: parsePage(params.page) }),
     listCategories(user.shop.id),
+    // The supplier just added, by its id: the notice names it from the
+    // list, never from words in the address.
+    typeof params.added === "string" ? getSupplier(user.shop.id, params.added) : Promise.resolve(null),
   ]);
   const searching = listSearchWords(query).length > 0 || category !== null;
   const exportParams = new URLSearchParams();
@@ -62,8 +66,9 @@ async function Suppliers({ searchParams }: { searchParams: PageProps<"/admin/sup
         }
       />
 
-      {typeof params.added === "string" && <Notice>Added {params.added}.</Notice>}
-      {typeof params.removed === "string" && <Notice>Removed {params.removed}.</Notice>}
+      {added && <Notice>Added {added.supplierName}.</Notice>}
+      {params.removed === "1" && <Notice>Supplier removed.</Notice>}
+      <ClearParams names={["added", "removed"]} />
 
       <Card>
         {list.total === 0 && !searching ? (

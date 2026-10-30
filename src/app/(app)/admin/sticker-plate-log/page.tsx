@@ -2,11 +2,12 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 
+import { ClearParams } from "@/components/app/clear-params";
 import { LocalTime } from "@/components/app/local-time";
 import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { MAX_LIST_WORDS, cleanListQuery, listHref, listSearchIsCut, listSearchWords, parsePage } from "@/lib/diagnose-list-rules";
 import { requireCapability } from "@/lib/session";
-import { getCustomerChoice, listStickerLog, type StickerLog } from "@/lib/sticker-log";
+import { getCustomerChoice, listStickerLog, recentlyRemoved, type StickerLog } from "@/lib/sticker-log";
 import { PLATE_CLASSES, PLATE_CLASS_LABELS, parseClassFilter, type PlateClass } from "@/lib/sticker-log-rules";
 
 import { ListSearch } from "../../diagnose/list-search";
@@ -35,10 +36,13 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/ad
   const params = await searchParams;
   const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
   const plateClass = parseClassFilter(params.class);
-  const [log, customer] = await Promise.all([
+  const [log, customer, removed] = await Promise.all([
     listStickerLog(user.shop.id, { query, plateClass, page: parsePage(params.page) }),
     // "Log a sticker" from a customer's record.
     typeof params.customer === "string" ? getCustomerChoice(user.shop.id, params.customer) : Promise.resolve(null),
+    // The sticker just removed: only one the audit log shows this user
+    // removed, never other words a link might carry.
+    typeof params.removed === "string" ? recentlyRemoved(user, params.removed) : Promise.resolve(null),
   ]);
   const searching = listSearchWords(query).length > 0 || plateClass !== null;
 
@@ -49,7 +53,8 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/ad
         description="Every registration sticker the shop hands out: its number, the customer it went to, and the plate's classification."
       />
 
-      {typeof params.removed === "string" && <Notice>Sticker {params.removed} removed from the log.</Notice>}
+      {removed && <Notice>Sticker {removed} removed from the log.</Notice>}
+      <ClearParams names={["removed"]} />
 
       <Card title="Log a sticker">
         <StickerForm initialCustomer={customer} />

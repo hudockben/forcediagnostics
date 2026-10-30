@@ -34,7 +34,7 @@ async function Sticker({ params }: { params: PageProps<"/admin/sticker-plate-log
         ‹ Sticker &amp; Plate log
       </Link>
       <PageHeading
-        title={<span className="font-mono tracking-wide">Sticker {entry.stickerNumber}</span>}
+        title={<span className="font-mono tracking-wide break-all">Sticker {entry.stickerNumber}</span>}
         description={
           <>
             Logged <LocalTime value={entry.createdAt.toISOString()} />

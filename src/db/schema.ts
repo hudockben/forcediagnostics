@@ -854,7 +854,9 @@ export const stickerPlateLog = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    unique("sticker_plate_log_shop_sticker").on(t.shopId, t.stickerNumber),
+    // One sticker once, however it's spaced or dashed (stickerKey in
+    // src/lib/sticker-log-rules.ts).
+    uniqueIndex("sticker_plate_log_shop_sticker_key").on(t.shopId, sql`regexp_replace(${t.stickerNumber}, '[^A-Z0-9]', '', 'g')`),
     // An entry can only ever be for a customer in its own shop.
     foreignKey({
       name: "sticker_plate_log_customer_shop_fk",
