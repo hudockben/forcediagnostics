@@ -121,6 +121,7 @@ export function allows(user: { role: Role; bay: object | null }, capability: Cap
 // user may use.
 export const ADMIN_SECTIONS: { href: string; label: string; capability: Capability }[] = [
   { href: "/admin/customers", label: "Customers", capability: "repair_orders.intake" },
+  { href: "/admin/sticker-plate-log", label: "Sticker & Plate log", capability: "repair_orders.intake" },
   { href: "/admin/accounts", label: "Accounts", capability: "accounts.manage" },
   { href: "/admin/bay-tablets", label: "Bay tablets", capability: "bay_tablets.manage" },
   { href: "/admin/manuals", label: "Manuals", capability: "settings.manage" },
