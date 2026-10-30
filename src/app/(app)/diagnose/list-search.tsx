@@ -27,10 +27,15 @@ export function ListSearch({
 }: {
   query: string;
   children: ReactNode;
+  // Can carry a filter of the list's own (?class=1), kept with each search.
   path?: string;
   label?: string;
   placeholder?: string;
 }) {
+  // A form sent without JavaScript drops its action's own query, so a
+  // filter in the path goes along as hidden fields.
+  const [formAction, filterQuery] = path.split("?");
+  const kept = [...new URLSearchParams(filterQuery ?? "")];
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [text, setText] = useState(query);
@@ -92,7 +97,7 @@ export function ListSearch({
   return (
     <div>
       <form
-        action={path}
+        action={formAction}
         role="search"
         className="relative"
         onSubmit={(event) => {
@@ -100,6 +105,9 @@ export function ListSearch({
           search(text);
         }}
       >
+        {kept.map(([name, value]) => (
+          <input key={name} type="hidden" name={name} value={value} />
+        ))}
         <label htmlFor="list-q" className="sr-only">
           {label}
         </label>

@@ -36,6 +36,7 @@ import {
   type TurnUsage,
 } from "../lib/diagnose-rules";
 import { PAGE_FACTS_STATUSES, type PageFacts, type PageFactsStatus } from "../lib/manual-facts-rules";
+import { PLATE_CLASSES, type PlateClass } from "../lib/sticker-log-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
 
@@ -822,6 +823,50 @@ export const customerVehicles = pgTable(
     // 17 letters and digits, never I, O or Q.
     check("customer_vehicles_vin", sql`${t.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'`),
     pgPolicy("customer_vehicles_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// System Admin > Sticker & Plate log: each registration sticker the shop
+// hands out, the customer it went to and the plate's classification (1 or
+// 2); see src/lib/sticker-log.ts. A sticker number is logged once per shop,
+// and a customer with stickers logged can't be removed: the log is the
+// shop's record of them.
+export const stickerPlateLog = pgTable(
+  "sticker_plate_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    customerId: uuid("customer_id").notNull(),
+    // Upper-cased, with spaces tidied (see normalizeSticker in
+    // src/lib/sticker-log-rules.ts).
+    stickerNumber: text("sticker_number").notNull(),
+    plateClass: integer("plate_class").notNull().$type<PlateClass>(),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("sticker_plate_log_shop_sticker").on(t.shopId, t.stickerNumber),
+    // An entry can only ever be for a customer in its own shop.
+    foreignKey({
+      name: "sticker_plate_log_customer_shop_fk",
+      columns: [t.customerId, t.shopId],
+      foreignColumns: [customers.id, customers.shopId],
+    }),
+    index("sticker_plate_log_customer").on(t.customerId),
+    index("sticker_plate_log_shop_created").on(t.shopId, t.createdAt),
+    check("sticker_plate_log_plate_class", sql`${t.plateClass} in (${sql.raw(PLATE_CLASSES.join(", "))})`),
+    check("sticker_plate_log_sticker_number", sql`length(${t.stickerNumber}) between 1 and 40`),
+    // Which columns can change is set by the grant in
+    // drizzle/0031_sticker_plate_log_grants.sql.
+    pgPolicy("sticker_plate_log_own_shop", {
       for: "all",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,

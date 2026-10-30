@@ -3,10 +3,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
-import { Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
+import { LocalTime } from "@/components/app/local-time";
+import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { addressLines } from "@/lib/customer-rules";
 import { getCustomer, type VehicleRecord } from "@/lib/customers";
 import { allows, requireCapability } from "@/lib/session";
+import { stickersForCustomer, type StickerEntry } from "@/lib/sticker-log";
 
 import { CustomerForm, RemoveCustomerForm } from "../forms";
 import { DiagnosisHistory, RelationBadge } from "../history";
@@ -40,7 +42,7 @@ async function Customer({
   const user = await requireCapability("repair_orders.intake");
   const [{ id }, query] = await Promise.all([params, searchParams]);
   // Only finds customers in the user's own shop.
-  const detail = await getCustomer(user.shop.id, id);
+  const [detail, stickers] = await Promise.all([getCustomer(user.shop.id, id), stickersForCustomer(user.shop.id, id)]);
   if (!detail) notFound();
   const { customer, vehicles } = detail;
   const canDiagnose = allows(user, "diagnostics.work");
@@ -105,6 +107,8 @@ async function Customer({
         )}
       </section>
 
+      <Stickers customerId={customer.id} stickers={stickers} />
+
       <Card title="Details">
         <CustomerForm customer={customer} />
       </Card>
@@ -163,5 +167,41 @@ function VehicleBlock({ customerId, vehicle, canDiagnose }: { customerId: string
       </div>
       <DiagnosisHistory diagnoses={vehicle.diagnoses} canOpen={canDiagnose} />
     </li>
+  );
+}
+
+// Their stickers from the Sticker & Plate log, the newest first.
+function Stickers({ customerId, stickers }: { customerId: string; stickers: StickerEntry[] }) {
+  return (
+    <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" aria-labelledby="stickers-heading" data-customer-stickers>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="stickers-heading" className="text-base font-semibold text-ink">
+          Stickers &amp; plates{stickers.length > 0 && <span className="ml-2 font-mono text-sm font-normal text-ink-muted">{stickers.length}</span>}
+        </h2>
+        <Link href={`/admin/sticker-plate-log?customer=${customerId}`} className={smallLinkClass}>
+          Log a sticker
+        </Link>
+      </div>
+      {stickers.length === 0 ? (
+        <p className="mt-3 text-sm text-ink-muted">None logged.</p>
+      ) : (
+        <ul className="mt-4 divide-y divide-white/10 rounded-lg border border-white/10">
+          {stickers.map((entry) => (
+            <li key={entry.id}>
+              <Link
+                href={`/admin/sticker-plate-log/${entry.id}`}
+                className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset"
+              >
+                <span className="font-mono text-sm font-medium tracking-wide text-ink">{entry.stickerNumber}</span>
+                <span className="flex items-center gap-3 text-xs text-ink-muted">
+                  <LocalTime value={entry.createdAt.toISOString()} />
+                  <Badge tone={entry.plateClass === 1 ? "glow" : "neutral"}>Class {entry.plateClass}</Badge>
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

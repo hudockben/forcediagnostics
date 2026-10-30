@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { DrizzleQueryError, and, asc, desc, eq, inArray, ne, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { auditLog, customerVehicles, customers, diagnosisConversations, users } from "@/db/schema";
+import { auditLog, customerVehicles, customers, diagnosisConversations, stickerPlateLog, users } from "@/db/schema";
 import {
   checkCustomer,
   checkVehicle,
@@ -354,7 +354,8 @@ export async function updateCustomer(
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 // Removes a customer and their vehicles, unless a diagnosis is tied to one
-// of the vehicles: diagnoses are the shop's records, and they keep theirs.
+// of the vehicles or a sticker is logged for them: diagnoses and the
+// sticker log are the shop's records, and they keep theirs.
 export async function removeCustomer(actor: CurrentUser, id: string): Promise<Result & { name?: string }> {
   if (!isUuid(id)) return NOT_HERE;
   try {
@@ -374,13 +375,23 @@ export async function removeCustomer(actor: CurrentUser, id: string): Promise<Re
           error: `${plural(diagnoses, "diagnosis is", "diagnoses are")} tied to ${customer.name}'s vehicles, so the record stays. Unlink ${diagnoses === 1 ? "it" : "them"} on the diagnosis first if this customer was added by mistake.`,
         };
       }
+      const [{ stickers }] = await tx
+        .select({ stickers: sql<number>`count(*)::int` })
+        .from(stickerPlateLog)
+        .where(eq(stickerPlateLog.customerId, id));
+      if (stickers > 0) {
+        return {
+          error: `${plural(stickers, "sticker is", "stickers are")} logged for ${customer.name}, so the record stays. Move ${stickers === 1 ? "it" : "them"} to the right customer in the Sticker & Plate log first if this customer was added by mistake.`,
+        };
+      }
       await tx.delete(customers).where(eq(customers.id, id));
       await audit(tx, actor, "customer.removed", { type: "customer", id }, { name: customer.name, vehicles });
       return { ok: true as const, name: customer.name };
     });
   } catch (error) {
-    // A diagnosis linked to one of the vehicles a moment ago.
-    if (isForeignKeyViolation(error)) return { error: "A diagnosis is tied to one of their vehicles now, so the record stays." };
+    // A diagnosis linked to one of the vehicles, or a sticker logged for
+    // them, a moment ago.
+    if (isForeignKeyViolation(error)) return { error: "A diagnosis or a logged sticker is tied to them now, so the record stays." };
     throw error;
   }
 }
