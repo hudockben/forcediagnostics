@@ -6,7 +6,7 @@ import { LoadingLine, Notice } from "@/components/app/ui";
 import { isClaudeConfigured } from "@/lib/claude";
 import { getConversation } from "@/lib/diagnose";
 import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
-import { requireCapability } from "@/lib/session";
+import { allows, requireCapability } from "@/lib/session";
 
 import { DiagnoseChat } from "../chat";
 
@@ -30,7 +30,12 @@ async function Diagnosis({ params }: { params: PageProps<"/diagnose/[id]">["para
   return (
     <div className="space-y-4">
       {!isClaudeConfigured && <Notice tone="trail">{SETUP_MESSAGE}</Notice>}
-      <DiagnoseChat key={detail.conversation.id} initial={detail} starter={null} />
+      <DiagnoseChat
+        key={detail.conversation.id}
+        initial={detail}
+        starter={null}
+        customerLinks={allows(user, "repair_orders.intake")}
+      />
     </div>
   );
 }

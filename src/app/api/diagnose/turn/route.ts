@@ -37,6 +37,7 @@ function readRequest(body: unknown): TurnRequest {
           checked: text(start.checked),
           message: text(start.message),
           from: text(start.from),
+          customerVehicle: text(start.customerVehicle),
         }
       : undefined,
   };

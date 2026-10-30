@@ -4,8 +4,10 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { diagnosisConversations, diagnosisTurns, users } from "@/db/schema";
+import { customerVehicles, customers, diagnosisConversations, diagnosisTurns, users } from "@/db/schema";
 import { giveBackAttempt, takeAttempt } from "@/lib/attempts";
+import { conversationCustomer, type ConversationCustomer } from "@/lib/customer-rules";
+import { customerOf, findChoice } from "@/lib/customers";
 import { runDiagnosisLoop, type ClaudeStream, type LoopResult, type ToolHandler } from "@/lib/diagnose-loop";
 import { TOOL_NAMES, webSearchEnabled } from "@/lib/diagnose-prompt";
 import {
@@ -125,9 +127,16 @@ async function unitOf(shopId: string, conversation: ConversationRow) {
   return { scope, ...machine };
 }
 
+// What the screen shows of a conversation: its unit, and whose it is.
+async function viewOf(shopId: string, conversation: ConversationRow) {
+  const [unit, customer] = await Promise.all([unitOf(shopId, conversation), customerOf(shopId, conversation.customerVehicleId)]);
+  return toConversationView(conversation, unit, customer);
+}
+
 function toConversationView(
   conversation: ConversationRow,
   { scope, vehicle, model }: { scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null },
+  customer: ConversationCustomer | null,
 ): ConversationView {
   return {
     id: conversation.id,
@@ -136,6 +145,7 @@ function toConversationView(
     unit: conversation.unitLabel,
     vin: conversation.unitVin,
     modelNumber: conversation.unitModelNumber,
+    customer,
     vehicle,
     model,
     scope,
@@ -178,6 +188,8 @@ export type ConversationSummary = {
   unit: string | null;
   status: ConversationView["status"];
   startedBy: string;
+  // The customer whose vehicle it is, if one is linked.
+  customer: string | null;
   techMessages: number;
   updatedAt: string;
   lastTurn: TurnView["status"] | null;
@@ -189,6 +201,7 @@ const summaryColumns = {
   unit: diagnosisConversations.unitLabel,
   status: diagnosisConversations.status,
   startedBy: users.name,
+  customer: customers.name,
   techMessages: diagnosisConversations.techMessages,
   updatedAt: diagnosisConversations.updatedAt,
   lastTurn: sql<TurnView["status"] | null>`(
@@ -203,14 +216,22 @@ const toSummary = (row: Omit<ConversationSummary, "updatedAt"> & { updatedAt: Da
 });
 
 // What a search of the list looks through: the title (which holds the
-// complaint), the unit, its model number and VIN, and who started it.
+// complaint), the unit, its model number and VIN, who started it, and the
+// customer whose vehicle it is.
 const SEARCHED = [
   diagnosisConversations.title,
   diagnosisConversations.unitLabel,
   diagnosisConversations.unitModelNumber,
   diagnosisConversations.unitVin,
   users.name,
+  customers.name,
 ];
+
+// Whose vehicle each conversation is for (left joins: most have none).
+const customerJoin = {
+  vehicle: eq(customerVehicles.id, diagnosisConversations.customerVehicleId),
+  customer: eq(customers.id, customerVehicles.customerId),
+};
 
 export type ConversationList = ListPage & {
   items: ConversationSummary[];
@@ -232,6 +253,8 @@ export async function listConversations(
       .select({ total: sql<number>`count(*)::int` })
       .from(diagnosisConversations)
       .innerJoin(users, eq(users.id, diagnosisConversations.userId))
+      .leftJoin(customerVehicles, customerJoin.vehicle)
+      .leftJoin(customers, customerJoin.customer)
       .where(where);
     const at = listPage(total, page, perPage);
     const rows =
@@ -241,6 +264,8 @@ export async function listConversations(
             .select(summaryColumns)
             .from(diagnosisConversations)
             .innerJoin(users, eq(users.id, diagnosisConversations.userId))
+            .leftJoin(customerVehicles, customerJoin.vehicle)
+            .leftJoin(customers, customerJoin.customer)
             .where(where)
             // The id keeps rows used at the same moment in one order, so
             // none shows on two pages or on none.
@@ -261,6 +286,8 @@ export async function listOwnOpenConversations(user: CurrentUser, limit = 4): Pr
       .select(summaryColumns)
       .from(diagnosisConversations)
       .innerJoin(users, eq(users.id, diagnosisConversations.userId))
+      .leftJoin(customerVehicles, customerJoin.vehicle)
+      .leftJoin(customers, customerJoin.customer)
       .where(
         and(
           eq(diagnosisConversations.status, "open"),
@@ -317,7 +344,7 @@ export async function getConversation(user: CurrentUser, id: string): Promise<Co
   });
   if (!found) return null;
   return {
-    conversation: toConversationView(found.conversation, await unitOf(user.shop.id, found.conversation)),
+    conversation: await viewOf(user.shop.id, found.conversation),
     turns: found.turns.map((turn) => toTurnView(turn, found.names.get(turn.userId) ?? "")),
   };
 }
@@ -394,6 +421,9 @@ export type StartInput = {
   message?: string;
   // Carry the unit and manuals over from a conversation that's full.
   from?: string;
+  // The customer's vehicle it's for: its id, or "" for none. Left out, a
+  // conversation carried over keeps the earlier one's.
+  customerVehicle?: string;
 };
 
 export type TurnRequest = { conversationId?: string; start?: StartInput; text?: string; retryTurnId?: string };
@@ -537,10 +567,19 @@ async function planStart(user: CurrentUser, start: StartInput) {
   const line = filters.brand ? brandLabel(filters.brand) : filters.vehicle ? VEHICLE_NAMES[filters.vehicle] : "";
   const filtersLabel = [filters.year, filters.model ?? line].filter(Boolean).join(" ") || line;
 
+  // The customer's vehicle, if one was picked: only ever one of the shop's.
+  let customerVehicleId: string | null = null;
+  if (start.customerVehicle) {
+    const choice = isUuid(start.customerVehicle) ? await withShop(shopId, (tx) => findChoice(tx, start.customerVehicle!)) : null;
+    if (!choice) return { error: "That customer's vehicle isn't in this shop.", status: 404 } as Problem;
+    customerVehicleId = choice.vehicleId;
+  }
+
   if (start.from && isUuid(start.from)) {
     const [earlier] = await withShop(shopId, (tx) =>
       tx.select().from(diagnosisConversations).where(eq(diagnosisConversations.id, start.from!)),
     );
+    if (start.customerVehicle === undefined) customerVehicleId = earlier?.customerVehicleId ?? null;
     if (earlier?.unitLabel) {
       unit = { modelNumber: earlier.unitModelNumber, year: earlier.unitYear, label: earlier.unitLabel };
       manualIds = earlier.scopeManualIds;
@@ -635,7 +674,7 @@ async function planStart(user: CurrentUser, start: StartInput) {
   });
   const subject = complaint || message.split("\n")[0] || codes.join(", ");
   const title = cutText([unit?.label.split(" — ")[0], subject].filter(Boolean).join(" — "), 120);
-  return { unit, vin: vin?.vin ?? null, manualIds, notes: opening, techText, title };
+  return { unit, vin: vin?.vin ?? null, manualIds, notes: opening, techText, title, customerVehicleId };
 }
 
 // The messages a turn adds before Claude's reply: the tech's text, then the
@@ -755,6 +794,7 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
           unitYear: plan.unit?.year ?? null,
           unitLabel: plan.unit?.label ?? null,
           unitVin: plan.vin,
+          customerVehicleId: plan.customerVehicleId,
           scopeManualIds: plan.manualIds,
           webSearch: webSearchEnabled(),
           pendingNotes: plan.notes,
@@ -825,7 +865,7 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
   }
   return {
     ...saved,
-    conversationView: toConversationView(saved.conversation, await unitOf(shopId, saved.conversation)),
+    conversationView: await viewOf(shopId, saved.conversation),
     turnView: toTurnView(saved.turn, user.name),
   };
 }
@@ -1072,7 +1112,7 @@ async function saveOutcome(
     return { turn: savedTurn, conversation: updated };
   });
   const turnView = toTurnView(saved.turn, user.name);
-  const conversationView = toConversationView(saved.conversation, await unitOf(user.shop.id, saved.conversation));
+  const conversationView = await viewOf(user.shop.id, saved.conversation);
   extra.emit({ type: "end", conversation: conversationView, turn: turnView });
   return { turn: turnView, conversation: conversationView };
 }
@@ -1322,6 +1362,28 @@ export async function changeUnit(
   return { scope, unit: updated.unitLabel, vin: updated.unitVin, modelNumber: updated.unitModelNumber, vehicle, model };
 }
 
+// Ties a conversation to a customer's vehicle, or to none (vehicleId
+// null), for the shop's records: the customer's record lists it with its
+// fix. It changes nothing Claude is told, and the unit stays as it is.
+export async function linkCustomerVehicle(
+  user: CurrentUser,
+  input: { conversationId: string; vehicleId: string | null },
+): Promise<{ customer: ConversationCustomer | null } | { error: string }> {
+  if (!isUuid(input.conversationId)) return { error: "That diagnosis isn't in this shop." };
+  if (input.vehicleId !== null && !isUuid(input.vehicleId)) return { error: "That customer's vehicle isn't in this shop." };
+  return withShop(user.shop.id, async (tx) => {
+    const choice = input.vehicleId ? await findChoice(tx, input.vehicleId) : null;
+    if (input.vehicleId && !choice) return { error: "That customer's vehicle isn't in this shop." };
+    const [row] = await tx
+      .update(diagnosisConversations)
+      .set({ customerVehicleId: choice?.vehicleId ?? null })
+      .where(eq(diagnosisConversations.id, input.conversationId))
+      .returning({ id: diagnosisConversations.id });
+    if (!row) return { error: "That diagnosis isn't in this shop." };
+    return { customer: choice && conversationCustomer(choice) };
+  });
+}
+
 // What a new diagnosis starts with when it carries on from a full one: the
 // unit and a summary of where things stood, with the checks the tech has
 // ticked off and what they found.
@@ -1347,5 +1409,5 @@ export async function carryOver(user: CurrentUser, id: string) {
     };
     lines.push("Checks that were next:", ...reply.nextChecks.map((check) => `- ${check.action}${said(check)}`));
   }
-  return { id: detail.conversation.id, unit: detail.conversation.unit, text: lines.join("\n") };
+  return { id: detail.conversation.id, unit: detail.conversation.unit, customer: detail.conversation.customer, text: lines.join("\n") };
 }

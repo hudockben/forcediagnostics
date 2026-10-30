@@ -8,7 +8,8 @@ const plural = (count: number, one: string, many: string) =>
   `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 
 // One diagnosis in a list (the Diagnose tab's, Home's own open ones): its
-// title, unit, who started it, how many messages, when, and where it's at.
+// title, unit, whose it is (the customer, when one is linked), who started
+// it, how many messages, when, and where it's at.
 // Home leaves out who started it and the Open badge (a list of the viewer's
 // open ones).
 export function ConversationRow({
@@ -29,7 +30,12 @@ export function ConversationRow({
         <span className="min-w-0">
           <span className="block font-medium break-words text-ink">{conversation.title}</span>
           <span className="block text-xs text-ink-muted">
-            {[conversation.unit, startedBy && conversation.startedBy, plural(conversation.techMessages, "message", "messages")]
+            {[
+              conversation.unit,
+              conversation.customer && `for ${conversation.customer}`,
+              startedBy && conversation.startedBy,
+              plural(conversation.techMessages, "message", "messages"),
+            ]
               .filter(Boolean)
               .join(" · ")}{" "}
             · <LocalTime value={conversation.updatedAt} />

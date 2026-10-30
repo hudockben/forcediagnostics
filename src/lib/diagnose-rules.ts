@@ -4,6 +4,7 @@
 // limits, and the cost estimate. Kept free of database imports so browser
 // code can use it.
 
+import type { ConversationCustomer } from "@/lib/customer-rules";
 import { inferSystem, listedSystem, type CauseSystem, type UnitVehicle } from "@/lib/diagnose-zones";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 
@@ -725,6 +726,9 @@ export type ConversationView = {
   // known (so the screen can say when the two don't agree).
   vin: string | null;
   modelNumber: string | null;
+  // The customer's vehicle it's for, if one is linked: their name and the
+  // vehicle, never how to reach them.
+  customer: ConversationCustomer | null;
   // Which drawing the unit gets, if any.
   vehicle: UnitVehicle | null;
   // Which machine the 3D unit shows (line, seats, size, paint), if known.

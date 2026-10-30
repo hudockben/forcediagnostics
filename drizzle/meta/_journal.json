@@ -197,6 +197,20 @@
       "when": 1793049322100,
       "tag": "0027_manual_page_facts_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1793368275795,
+      "tag": "0028_customers",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1793368284317,
+      "tag": "0029_customers_grants",
+      "breakpoints": true
     }
   ]
 }
