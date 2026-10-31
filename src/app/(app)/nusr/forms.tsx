@@ -458,8 +458,10 @@ function Field({
 
 // An amount box: what's typed can be a sum ("1250+89.99"), as the
 // spreadsheet's cells were, and says what it comes to.
-// The whole keyboard, not a phone's decimal pad, which has no + or - for
-// a sum or a chargeback.
+// Amounts that do go below zero (a rebate taken back, a chargeback) get a
+// phone's whole keyboard: its decimal pad, quicker for the rest, has no -.
+const SIGNED: readonly MoneyField[] = ["rebate", "bonusAdjustment"];
+
 function MoneyField({ name, values, set }: { name: MoneyField; values: SaleValues; set: (name: keyof SaleValues, value: string) => void }) {
   const parsed = parseMoney(values[name]);
   const isSum = !("error" in parsed) && parsed.cents !== null && /\d\s*[+-]/.test(values[name]);
@@ -468,6 +470,7 @@ function MoneyField({ name, values, set }: { name: MoneyField; values: SaleValue
       name={name}
       values={values}
       set={set}
+      inputMode={SIGNED.includes(name) ? "text" : "decimal"}
       spellCheck={false}
       autoCapitalize="off"
       className={`${inputClass} text-right tabular-nums`}
@@ -669,11 +672,13 @@ export function SaleForm({
     // The search box goes: the focus goes to the Change button that's there now.
     requestAnimationFrame(() => changeButton.current?.focus());
     const details: SaleCustomer | null = await customerForSaleAction(choice.id).catch(() => null);
+    // Their details as they're on file, blank where they have none; what
+    // was typed stays only if they couldn't be loaded.
     setValues((old) => ({
       ...old,
       customerName: details?.name ?? choice.name,
-      customerPhone: details?.phone ?? old.customerPhone,
-      customerAddress: details?.address ?? old.customerAddress,
+      customerPhone: details ? (details.phone ?? "") : old.customerPhone,
+      customerAddress: details ? (details.address ?? "") : old.customerAddress,
     }));
   }
 
