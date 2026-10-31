@@ -5,6 +5,7 @@
 // the printout do.
 
 import { normalizePhone } from "@/lib/customer-rules";
+import { cutText } from "@/lib/manual-rules";
 
 // Amounts are whole cents; rates are basis points (400 is 4%).
 export type Cents = number;
@@ -241,38 +242,41 @@ export const parseCondition = (value: unknown): UnitCondition | null => {
   return null;
 };
 
+// What's wrong with a sale as sent, and the box it's about.
+export type SaleProblem = { error: string; field?: keyof SaleFields };
+
 // What the form sends, checked; amounts and rates may be typed as the
 // spreadsheet had them (parseMoney, parseRate).
-export function checkSale(input: Record<keyof SaleFields, unknown>): { sale: SaleFields } | { error: string } {
+export function checkSale(input: Record<keyof SaleFields, unknown>): { sale: SaleFields } | SaleProblem {
   const soldOn = parseIsoDate(input.soldOn);
-  if (!soldOn) return { error: "Enter the date it was sold." };
+  if (!soldOn) return { error: "Enter the date it was sold.", field: "soldOn" };
   const customerName = line(input.customerName);
-  if (!customerName) return { error: "Enter the customer's name." };
+  if (!customerName) return { error: "Enter the customer's name.", field: "customerName" };
   const condition = parseCondition(input.condition);
-  if (!condition) return { error: "Pick New or Used." };
-  if (!isUnitType(input.unitType)) return { error: "Pick the type of deal: a new whole good, a trade, a trailer, a contest unit or a free one." };
+  if (!condition) return { error: "Pick New or Used.", field: "condition" };
+  if (!isUnitType(input.unitType)) return { error: "Pick the type of deal: a new whole good, a trade, a trailer, a contest unit or a free one.", field: "unitType" };
   const vin = cleanVin(input.vin);
-  if ("error" in vin) return vin;
+  if ("error" in vin) return { error: vin.error, field: "vin" };
   const yearText = line(input.unitYear);
   const unitYear = yearText === "" ? null : Number(yearText);
   if (unitYear !== null && (!Number.isInteger(unitYear) || unitYear < MIN_UNIT_YEAR || unitYear > MAX_UNIT_YEAR)) {
-    return { error: `The year is a model year, ${MIN_UNIT_YEAR} to ${MAX_UNIT_YEAR}.` };
+    return { error: `The year is a model year, ${MIN_UNIT_YEAR} to ${MAX_UNIT_YEAR}.`, field: "unitYear" };
   }
   const amounts = {} as SaleAmounts;
   for (const field of MONEY_FIELDS) {
     const parsed = parseMoney(input[field]);
-    if ("error" in parsed) return { error: `${SALE_LABELS[field]} ${parsed.error}.` };
+    if ("error" in parsed) return { error: `${SALE_LABELS[field]} ${parsed.error}.`, field };
     amounts[field] = parsed.cents;
   }
   const holdback = parseRate(input.holdbackRateBp);
-  if ("error" in holdback) return { error: `The holdback rate ${holdback.error}.` };
+  if ("error" in holdback) return { error: `The holdback rate ${holdback.error}.`, field: "holdbackRateBp" };
   const bonus = parseRate(input.bonusRateBp);
-  if ("error" in bonus) return { error: `The bonus rate ${bonus.error}.` };
+  if ("error" in bonus) return { error: `The bonus rate ${bonus.error}.`, field: "bonusRateBp" };
   const dates: Record<"fundingReceivedOn" | "paidOn", string | null> = { fundingReceivedOn: null, paidOn: null };
   for (const field of ["fundingReceivedOn", "paidOn"] as const) {
     if (line(input[field]) === "") continue;
     const date = parseIsoDate(input[field]);
-    if (!date) return { error: `${SALE_LABELS[field]} isn't a date.` };
+    if (!date) return { error: `${SALE_LABELS[field]} isn't a date.`, field };
     dates[field] = date;
   }
   const notes = text(input.notes).replace(/\r\n?/g, "\n").trim();
@@ -303,7 +307,7 @@ export function checkSale(input: Record<keyof SaleFields, unknown>): { sale: Sal
   };
   for (const field of Object.keys(SALE_LIMITS) as (keyof typeof SALE_LIMITS)[]) {
     const value = sale[field];
-    if (typeof value === "string" && value.length > SALE_LIMITS[field]) return { error: `${SALE_LABELS[field]} is too long.` };
+    if (typeof value === "string" && value.length > SALE_LIMITS[field]) return { error: `${SALE_LABELS[field]} is too long.`, field };
   }
   return { sale };
 }
@@ -386,7 +390,10 @@ const MONEY = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
 // "$38,500.25", "-$96.25"; blank for none.
 export const formatMoney = (cents: Cents | null) => (cents === null ? "" : MONEY.format(cents / 100));
 // "6.97%"; a dash when there's nothing to divide by.
-export const formatPct = (fraction: number | null) => (fraction === null ? "—" : `${(fraction * 100).toFixed(2)}%`);
+const PCT = new Intl.NumberFormat("en-US", { style: "percent", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Rounded as the decimal reads, half away from zero, as Excel shows it
+// (6.985% is 6.99%, where toFixed on the binary number gives 6.98%).
+export const formatPct = (fraction: number | null) => (fraction === null ? "—" : PCT.format(fraction));
 // "4%", "4.5%".
 export const formatRate = (bp: number) => `${Number((bp / 100).toFixed(2))}%`;
 // What a form's box shows for an amount or a rate, as it would be typed.
@@ -457,7 +464,9 @@ export function saleTotals(sales: readonly FiguredSale[]): SaleTotals {
 }
 
 // Per unit: a total over the units, to the cent.
-export const perUnit = (cents: Cents, units: number) => (units === 0 ? null : Math.round(cents / units));
+// Rounded to the cent half away from zero, as every amount a rate makes is
+// (Math.round would send -$0.505 to -$0.50 and $0.505 to $0.51).
+export const perUnit = (cents: Cents, units: number) => (units === 0 ? null : Math.sign(cents) * Math.round(Math.abs(cents) / units));
 
 // Totals for each salesman, category or month, the most units first (by
 // month, in the year's order).
@@ -533,11 +542,24 @@ export function parseSaleFilters(params: Params, thisYear: number): SaleFilters 
     month: year !== null && /^(?:[1-9]|1[0-2])$/.test(monthText) ? Number(monthText) : null,
     condition: parseCondition(param(params, "condition")),
     unitType: isUnitType(param(params, "type")) ? (param(params, "type") as UnitType) : null,
-    category: param(params, "category").slice(0, SALE_LIMITS.category) || null,
-    salesperson: param(params, "salesperson").slice(0, SALE_LIMITS.salesperson) || null,
+    // Cut without splitting an emoji, so the download's file name stays text.
+    category: cutText(param(params, "category"), SALE_LIMITS.category) || null,
+    salesperson: cutText(param(params, "salesperson"), SALE_LIMITS.salesperson) || null,
     status: (SALE_STATUSES as readonly string[]).includes(status) ? (status as SaleStatus) : null,
-    query: param(params, "q").replace(/\s+/g, " ").slice(0, 100),
+    query: cutText(param(params, "q").replace(/\s+/g, " "), 100),
   };
+}
+
+// The log's own search as it was ("?year=2025&page=2…"), from a link's
+// ?back=, rebuilt from what the log's address can hold so nothing else
+// gets through; "" for the log as it opens.
+export function logSearch(text: unknown, thisYear: number): string {
+  const params = new URLSearchParams(typeof text === "string" ? text.slice(0, 2000) : "");
+  const page = params.get("page") ?? "";
+  return filtersSearch(parseSaleFilters(Object.fromEntries(params), thisYear), thisYear, {
+    columns: params.get("columns") === "all" ? "all" : null,
+    page: /^[1-9]\d{0,4}$/.test(page) && page !== "1" ? page : null,
+  });
 }
 
 // The filters as an address's search, leaving out what's as it is by
@@ -561,15 +583,23 @@ export function filtersSearch(filters: SaleFilters, thisYear: number, extra: Rec
 // "2026", "October 2026", "All years", with what else narrows it.
 export function filtersTitle(filters: SaleFilters) {
   const when = filters.year === null ? "All years" : filters.month === null ? String(filters.year) : `${MONTH_NAMES[filters.month - 1]} ${filters.year}`;
-  const narrowed = [
+  const narrowed = filtersNarrowing(filters);
+  return narrowed ? `${when} · ${narrowed}` : when;
+}
+
+// What narrows the log apart from the year and month ("Used · Sam Ortega"),
+// or "" when nothing does.
+export function filtersNarrowing(filters: SaleFilters) {
+  return [
     filters.condition === "new" ? "New" : filters.condition === "used" ? "Used" : null,
     filters.unitType ? UNIT_TYPE_LABELS[filters.unitType] : null,
     filters.category,
     filters.salesperson,
     filters.status ? SALE_STATUS_LABELS[filters.status] : null,
     filters.query ? `“${filters.query}”` : null,
-  ].filter(Boolean);
-  return narrowed.length ? `${when} · ${narrowed.join(" · ")}` : when;
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 // --- The form ------------------------------------------------------------------
@@ -631,3 +661,6 @@ export function readSaleValues(values: SaleValues): { sale: SaleAmounts & SaleRa
 export const SHOP_TIME_ZONE = "America/New_York";
 export const shopToday = (now = new Date()) =>
   new Intl.DateTimeFormat("en-CA", { timeZone: SHOP_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+// The shop's year, which the log shows to start with: on New Year's Eve
+// evening it's still the old one, though it's the new one in UTC.
+export const shopYear = (now = new Date()) => Number(shopToday(now).slice(0, 4));

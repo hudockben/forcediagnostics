@@ -4,7 +4,7 @@ import { Suspense } from "react";
 
 import { LoadingLine } from "@/components/app/ui";
 import { findSales, unitsByMonth } from "@/lib/nusr";
-import { filtersSearch, filtersTitle, parseSaleFilters, saleTotals, shopToday, formatDay } from "@/lib/nusr-rules";
+import { filtersNarrowing, filtersSearch, filtersTitle, formatDay, parseSaleFilters, saleTotals, shopToday, shopYear } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
 
 import { PrintButton, WidePage } from "../forms";
@@ -28,10 +28,10 @@ export default function PrintPage(props: PageProps<"/nusr/print">) {
 async function Printout({ searchParams }: { searchParams: PageProps<"/nusr/print">["searchParams"] }) {
   const user = await requireCapability("sales.log");
   const params = await searchParams;
-  const thisYear = new Date().getUTCFullYear();
+  const thisYear = shopYear();
   const filters = parseSaleFilters(params, thisYear);
   const summaryOnly = params.summary === "only";
-  const [sales, comparison] = await Promise.all([findSales(user.shop.id, filters, "oldest"), unitsByMonth(user.shop.id)]);
+  const [sales, comparison] = await Promise.all([findSales(user.shop.id, filters, "oldest"), unitsByMonth(user.shop.id, filters)]);
   const title = filtersTitle(filters);
   return (
     <WidePage className="space-y-4">
@@ -59,9 +59,15 @@ async function Printout({ searchParams }: { searchParams: PageProps<"/nusr/print
           <p className="text-[10pt]">No sales in {title}.</p>
         ) : (
           <>
-            {!summaryOnly && <SalesTable sales={sales} totals={saleTotals(sales)} columns={params.columns === "all" ? "all" : "key"} variant="print" />}
-            <div className={summaryOnly ? "" : "mt-6 break-before-page"}>
-              <SummaryTables sales={sales} comparison={comparison} variant="print" />
+            {/* On screen a wide table scrolls inside the page; on paper it's
+                laid out to fit. */}
+            {!summaryOnly && (
+              <div className="overflow-x-auto print:overflow-visible">
+                <SalesTable sales={sales} totals={saleTotals(sales)} columns={params.columns === "all" ? "all" : "key"} variant="print" />
+              </div>
+            )}
+            <div className={`overflow-x-auto print:overflow-visible ${summaryOnly ? "" : "mt-6 break-before-page"}`}>
+              <SummaryTables sales={sales} comparison={comparison} narrowing={filtersNarrowing(filters)} today={shopToday()} variant="print" />
             </div>
           </>
         )}

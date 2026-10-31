@@ -755,6 +755,8 @@ describe("the NUSR tab's own Download Excel", () => {
       { ...blank, soldOn: "2026-03-09", customerName: "Robin Achterberg", unitModel: "General XP 1000", category: "UTV", msrp: 2799900, salesPrice: 2500000, dealerCost: 2582000, bonusAdjustment: -5000 },
       // No model, no category, no salesman: still a sale.
       { ...blank, soldOn: "2026-03-10", customerName: "Lee Brandvold", salesPrice: 100000, dealerCost: 90000 },
+      // Rates of 100%, which Excel keeps as 1.
+      { ...blank, soldOn: "2026-03-11", customerName: "Pat Rowan", unitModel: "Spmn 570", category: "ATV", msrp: 100000, salesPrice: 95000, dealerCost: 90000, holdbackRateBp: 10000, bonusRateBp: 10000 },
     ];
     const file = writeXlsx(nusrWorkbook(sales.map(withFigures), { title: "2026", comparison: monthlyComparison([]), generatedAt: new Date("2026-03-20T12:00:00Z") }));
     const read = await readSpreadsheet("NUSR 2026.xlsx", file);

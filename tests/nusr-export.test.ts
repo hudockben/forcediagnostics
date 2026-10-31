@@ -476,5 +476,10 @@ describe("the download's name", () => {
       attachmentHeader("NUSR October 2026 · Zoë’s 🏍️ 2026-10-31.xlsx"),
       `attachment; filename="NUSR October 2026 - Zoe's __ 2026-10-31.xlsx"; filename*=UTF-8''NUSR%20October%202026%20%C2%B7%20Zo%C3%AB%E2%80%99s%20%F0%9F%8F%8D%EF%B8%8F%202026-10-31.xlsx`,
     );
+    // A title cut in the middle of an emoji: half an emoji can't be
+    // encoded, so it's left out of the name or shown as U+FFFD.
+    const long = `${"a".repeat(119)}🏍️`;
+    assert.equal(nusrFileName(long, "2026-10-31"), `NUSR ${"a".repeat(119)} 2026-10-31.xlsx`);
+    assert.match(attachmentHeader("NUSR a\ud83d.xlsx"), /filename\*=UTF-8''NUSR%20a%EF%BF%BD\.xlsx$/);
   });
 });

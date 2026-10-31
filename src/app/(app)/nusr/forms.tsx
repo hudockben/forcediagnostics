@@ -1,11 +1,25 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type InputHTMLAttributes, type ReactNode, type RefObject } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+  type InputHTMLAttributes,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputBaseClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
-import type { SaleCustomer, VinDecode } from "@/lib/nusr";
+import type { BuyerChoice, SaleCustomer, VinDecode } from "@/lib/nusr";
 import {
   CATEGORIES,
   SALE_LABELS,
@@ -14,10 +28,12 @@ import {
   UNIT_TYPE_LABELS,
   blankSaleValues,
   cleanVin,
+  formatDay,
   formatMoney,
   formatPct,
   guessCategory,
   guessUnitType,
+  moneyInput,
   parseCondition,
   parseMoney,
   readSaleValues,
@@ -73,6 +89,20 @@ export function WidePage({ children, className = "" }: { children: ReactNode; cl
   );
 }
 
+// "Saved.", after a sale's changes are saved: the page comes back fresh, so
+// it takes the focus the Save button had.
+export function SavedNotice() {
+  const element = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    element.current?.focus();
+  }, []);
+  return (
+    <div ref={element} tabIndex={-1} className="outline-none" data-nusr-saved>
+      <Notice>Saved.</Notice>
+    </div>
+  );
+}
+
 // Opens the browser's print dialog, where Save as PDF is one of the printers.
 export function PrintButton() {
   return (
@@ -117,6 +147,15 @@ type FilterOption = { value: string; label: string };
 export function LogFilter({ name, label, value, options, search }: { name: string; label: string; value: string; options: FilterOption[]; search: string }) {
   const router = useRouter();
   const id = useId();
+  // What was picked shows at once, while the log loads it; the page's own
+  // value takes over when it comes.
+  const [shown, setShown] = useState(value);
+  const [seen, setSeen] = useState(value);
+  if (seen !== value) {
+    setSeen(value);
+    setShown(value);
+  }
+  const [loading, startLoading] = useTransition();
   return (
     <div className="relative min-w-36 flex-1 sm:flex-none">
       <label htmlFor={id} className="sr-only">
@@ -124,7 +163,8 @@ export function LogFilter({ name, label, value, options, search }: { name: strin
       </label>
       <select
         id={id}
-        value={value}
+        value={shown}
+        aria-busy={loading}
         onChange={(event) => {
           const params = new URLSearchParams(search);
           if (event.target.value) params.set(name, event.target.value);
@@ -133,9 +173,10 @@ export function LogFilter({ name, label, value, options, search }: { name: strin
           if (name === "year") params.delete("month");
           params.delete("page");
           const next = params.toString();
-          router.push(`/nusr${next ? `?${next}` : ""}`);
+          setShown(event.target.value);
+          startLoading(() => router.push(`/nusr${next ? `?${next}` : ""}`));
         }}
-        className={`${inputBaseClass} h-11 appearance-none pr-9 text-sm`}
+        className={`${inputBaseClass} h-11 appearance-none pr-9 text-sm transition-opacity ${loading ? "opacity-60" : ""}`}
         data-nusr-filter={name}
       >
         {options.map((option) => (
@@ -160,14 +201,15 @@ export function LogFilter({ name, label, value, options, search }: { name: strin
 
 // --- Picking the customer -----------------------------------------------------------
 
-// A customer on file, found by name or phone number as it's typed (arrow
-// keys and Enter, or a tap). Someone who isn't on file is simply typed into
+// A customer on file, or someone the NUSR has sold to before who isn't
+// (an import brings years of them), found by name or phone number as it's
+// typed (arrow keys and Enter, or a tap). Someone new is simply typed into
 // the boxes below.
-function CustomerSearch({ onPick, inputRef }: { onPick: (choice: CustomerChoice) => void; inputRef: RefObject<HTMLInputElement | null> }) {
+function CustomerSearch({ onPick, inputRef }: { onPick: (choice: BuyerChoice) => void; inputRef: RefObject<HTMLInputElement | null> }) {
   const id = useId();
   const listId = `${id}-list`;
   const [text, setText] = useState("");
-  const [found, setFound] = useState<{ query: string; items: CustomerChoice[] }>({ query: "", items: [] });
+  const [found, setFound] = useState<{ query: string; items: BuyerChoice[] }>({ query: "", items: [] });
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const query = text.trim();
@@ -188,7 +230,7 @@ function CustomerSearch({ onPick, inputRef }: { onPick: (choice: CustomerChoice)
   const looking = query.length >= 2 && found.query !== query;
   const items = found.query === query ? found.items : [];
   const showing = open && items.length > 0;
-  const choose = (choice: CustomerChoice) => {
+  const choose = (choice: BuyerChoice) => {
     onPick(choice);
     setText("");
     setOpen(false);
@@ -197,7 +239,7 @@ function CustomerSearch({ onPick, inputRef }: { onPick: (choice: CustomerChoice)
   return (
     <div className="relative">
       <label htmlFor={id} className={labelClass}>
-        Find a customer on file
+        Find a customer
       </label>
       <input
         ref={inputRef}
@@ -238,8 +280,8 @@ function CustomerSearch({ onPick, inputRef }: { onPick: (choice: CustomerChoice)
         {open && looking
           ? "Looking…"
           : open && query.length >= 2 && items.length === 0
-            ? "Not on file: type their details below."
-            : "Picking one fills in their name, phone and address."}
+            ? "Not on file or in the NUSR: type their details below."
+            : "On file or bought from us before: picking one fills in their name, phone and address."}
       </p>
       {showing && (
         <ul
@@ -261,7 +303,7 @@ function CustomerSearch({ onPick, inputRef }: { onPick: (choice: CustomerChoice)
               className={`flex min-h-12 cursor-pointer flex-col justify-center px-3.5 py-2 text-sm ${index === active ? "bg-white/5" : ""}`}
             >
               <span className="text-ink">{choice.name}</span>
-              {choice.detail && <span className="text-xs text-ink-muted">{choice.detail}</span>}
+              <span className="text-xs text-ink-muted">{[choice.kind === "customer" ? "On file" : "In the NUSR", choice.detail].filter(Boolean).join(" · ")}</span>
             </li>
           ))}
         </ul>
@@ -271,6 +313,14 @@ function CustomerSearch({ onPick, inputRef }: { onPick: (choice: CustomerChoice)
 }
 
 // --- The sale ----------------------------------------------------------------------------
+
+// What's wrong in each box, as the form reads it or as the server said:
+// shown under the box, and tied to it for screen readers.
+const ProblemsContext = createContext<Partial<Record<keyof SaleValues, string>>>({});
+
+// The days between two days ("2026-10-01"), whichever comes first; NaN for
+// a day that isn't one.
+const daysBetween = (from: string, to: string) => Math.abs(Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
 
 function Field({
   name,
@@ -291,6 +341,8 @@ function Field({
   wide?: boolean;
 } & Omit<InputHTMLAttributes<HTMLInputElement>, "name" | "value" | "onChange" | "list">) {
   const id = `sale-${name}`;
+  const problem = useContext(ProblemsContext)[name];
+  const shownHint = problem ? <span className="text-trail">{problem}</span> : hint;
   return (
     <div className={wide ? "sm:col-span-2" : undefined}>
       <label htmlFor={id} className={labelClass}>
@@ -304,12 +356,13 @@ function Field({
         list={list}
         autoComplete="off"
         className={inputClass}
-        aria-describedby={hint ? `${id}-hint` : undefined}
+        aria-describedby={shownHint ? `${id}-hint` : undefined}
+        aria-invalid={problem ? true : undefined}
         {...props}
       />
-      {hint && (
+      {shownHint && (
         <p id={`${id}-hint`} className={hintClass}>
-          {hint}
+          {shownHint}
         </p>
       )}
     </div>
@@ -318,7 +371,9 @@ function Field({
 
 // An amount box: what's typed can be a sum ("1250+89.99"), as the
 // spreadsheet's cells were, and says what it comes to.
-function MoneyField({ name, values, set, problem }: { name: MoneyField; values: SaleValues; set: (name: keyof SaleValues, value: string) => void; problem?: string }) {
+// The whole keyboard, not a phone's decimal pad, which has no + or - for
+// a sum or a chargeback.
+function MoneyField({ name, values, set }: { name: MoneyField; values: SaleValues; set: (name: keyof SaleValues, value: string) => void }) {
   const parsed = parseMoney(values[name]);
   const isSum = !("error" in parsed) && parsed.cents !== null && /\d\s*[+-]/.test(values[name]);
   return (
@@ -326,11 +381,10 @@ function MoneyField({ name, values, set, problem }: { name: MoneyField; values: 
       name={name}
       values={values}
       set={set}
-      inputMode="decimal"
       spellCheck={false}
+      autoCapitalize="off"
       className={`${inputClass} text-right tabular-nums`}
-      aria-invalid={Boolean(problem)}
-      hint={problem ? <span className="text-trail">{problem}</span> : isSum && "cents" in parsed ? `= ${formatMoney(parsed.cents)}` : undefined}
+      hint={isSum && "cents" in parsed ? `= ${formatMoney(parsed.cents)}` : undefined}
       data-nusr-money={name}
     />
   );
@@ -362,7 +416,8 @@ export type SaleSuggestionLists = {
   financeCompanies: string[];
   categories: string[];
   models: string[];
-  lastComs: string | null;
+  // The COMS #s entered last, the newest first.
+  comsNumbers: string[];
 };
 
 export type SaleFormSale = { id: string; values: SaleValues; customer: CustomerChoice | null };
@@ -380,8 +435,11 @@ export function SaleForm({
   initialCustomer = null,
   defaults,
   suggestions,
+  back = "",
 }: {
   sale: SaleFormSale | null;
+  // The log as it was before the sale was opened ("?year=2025…").
+  back?: string;
   // Opened from a customer's record: them, filled in.
   initialCustomer?: { choice: CustomerChoice; details: SaleCustomer } | null;
   defaults: { soldOn: string; holdbackRateBp: number; bonusRateBp: number };
@@ -402,18 +460,31 @@ export function SaleForm({
         : fresh()),
   );
   const [customer, setCustomer] = useState<CustomerChoice | null>(sale?.customer ?? initialCustomer?.choice ?? null);
-  const [addCustomer, setAddCustomer] = useState(true);
-  const [addVehicle, setAddVehicle] = useState(true);
+  // A new buyer and the unit are added to Customers when a sale's logged;
+  // a correction adds nothing unless it's ticked.
+  const [addCustomer, setAddCustomer] = useState(!sale);
+  const [addVehicle, setAddVehicle] = useState(!sale);
   // Boxes the person has set themselves, which the form then leaves alone.
   const [touched, setTouched] = useState<Set<keyof SaleValues>>(() => new Set(sale ? (Object.keys(sale.values) as (keyof SaleValues)[]) : []));
   const [decode, setDecode] = useState<VinDecode | null>(null);
+  // The boxes set by hand as they are now, for what comes back after a wait.
+  const touchedNow = useRef(touched);
+  useEffect(() => {
+    touchedNow.current = touched;
+  }, [touched]);
   const [message, setMessage] = useState<SaleFormState>({});
   const customerInput = useRef<HTMLInputElement>(null);
+  const changeButton = useRef<HTMLButtonElement>(null);
   const nextInput = useRef<HTMLInputElement>(null);
+  // A save on its way: a second click or Enter doesn't send it again.
+  const sending = useRef(false);
+  // The box the server said was wrong, until it's changed.
+  const [serverProblem, setServerProblem] = useState<{ field: string; error: string } | null>(null);
 
   const set = (name: keyof SaleValues, value: string) => {
     setValues((old) => ({ ...old, [name]: value }));
     setTouched((old) => (old.has(name) ? old : new Set(old).add(name)));
+    setServerProblem((old) => (old?.field === name ? null : old));
   };
 
   // What came back: after logging one with "Log and start another", say so
@@ -422,6 +493,7 @@ export function SaleForm({
   if (seen !== state) {
     setSeen(state);
     setMessage(state);
+    setServerProblem(state.error && state.field ? { field: state.field, error: state.error } : null);
     if (state.another) {
       setValues((old) => ({ ...fresh(), soldOn: old.soldOn, salesperson: old.salesperson, bonusRateBp: old.bonusRateBp }));
       setCustomer(null);
@@ -432,7 +504,9 @@ export function SaleForm({
     }
   }
   useEffect(() => {
+    sending.current = false;
     if (state.another) customerInput.current?.focus();
+    else if (state.error && state.field) focusBox(state.field);
   }, [state]);
 
   // The VIN, once it's a whole one: what it says about the unit.
@@ -442,23 +516,39 @@ export function SaleForm({
     if (!wholeVin) return;
     let cancelled = false;
     const timer = setTimeout(async () => {
-      const found = await decodeVinAction(wholeVin).catch(() => null);
+      const found = await decodeVinAction(wholeVin, sale?.id ?? "").catch(() => null);
       if (cancelled || !found) return;
       setDecode(found);
-      // Filled in only where nothing's been typed.
-      setValues((old) => ({
-        ...old,
-        unitYear: old.unitYear || String(found.year ?? found.onFile?.year ?? ""),
-        unitModel: old.unitModel || found.model || found.onFile?.model || "",
-        category: old.category || found.category || "",
-      }));
+      // Filled in only where nothing's been typed: from this unit's own
+      // earlier sale, the shop's last of its model, the model list, or a
+      // customer's record of it. Sold before, it's back as a trade.
+      setValues((old) => {
+        const before = found.sold !== null && old.soldOn !== "" && found.sold.soldOn < old.soldOn;
+        return {
+          ...old,
+          unitYear: old.unitYear || String(found.year ?? found.sold?.year ?? found.onFile?.year ?? ""),
+          unitModel: old.unitModel || found.sold?.model || found.sameModel?.model || found.model || found.onFile?.model || "",
+          category: old.category || found.sold?.category || found.sameModel?.category || found.category || "",
+          condition: before && !touchedNow.current.has("condition") ? "used" : old.condition,
+        };
+      });
     }, 300);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [wholeVin]);
+  }, [wholeVin, sale?.id]);
   const shownDecode = decode && decode.vin === wholeVin ? decode : null;
+  const soldBefore = shownDecode?.sold ?? null;
+  // The prices of the last of this model sold, to use with a click where
+  // nothing's typed: they change, so they're offered, not filled in. A
+  // rebate only from a sale of the month before (rebates run that long).
+  const lastModel = shownDecode?.sameModel ?? null;
+  const lastPrices: [MoneyField, number][] = [];
+  if (lastModel?.msrp != null) lastPrices.push(["msrp", lastModel.msrp]);
+  if (lastModel?.dealerCost != null) lastPrices.push(["dealerCost", lastModel.dealerCost]);
+  if (lastModel?.rebate != null && values.soldOn && daysBetween(lastModel.soldOn, values.soldOn) <= 31) lastPrices.push(["rebate", lastModel.rebate]);
+  const pricesToUse = lastPrices.filter(([name]) => values[name].trim() === "");
 
   // What the form works out until the person sets it: the category from the
   // model, the kind of deal from New/Used and the category, and the
@@ -472,11 +562,25 @@ export function SaleForm({
   const shown: SaleValues = { ...values, category, unitType, holdbackRateBp: holdbackRate, condition };
 
   const { sale: amounts, problems } = readSaleValues(shown);
+  const boxProblems: Partial<Record<keyof SaleValues, string>> = {
+    ...problems,
+    ...("error" in vin ? { vin: vin.error } : {}),
+    ...(serverProblem ? { [serverProblem.field]: serverProblem.error } : {}),
+  };
   const figures = saleFigures(amounts);
   const flags = saleFlags({ ...amounts, condition, fundingReceivedOn: values.fundingReceivedOn || null, paidOn: values.paidOn || null });
 
-  async function pickCustomer(choice: CustomerChoice) {
-    setCustomer(choice);
+  async function pickCustomer(choice: BuyerChoice) {
+    if (choice.kind === "buyer") {
+      // Someone the NUSR has sold to before: their latest details, and
+      // they're added to Customers unless that's unticked.
+      setCustomer(null);
+      setValues((old) => ({ ...old, customerName: choice.name, customerPhone: choice.phone ?? "", customerAddress: choice.address ?? "" }));
+      return;
+    }
+    setCustomer({ id: choice.id, name: choice.name, detail: choice.detail });
+    // The search box goes: the focus goes to the Change button that's there now.
+    requestAnimationFrame(() => changeButton.current?.focus());
     const details: SaleCustomer | null = await customerForSaleAction(choice.id).catch(() => null);
     setValues((old) => ({
       ...old,
@@ -489,20 +593,27 @@ export function SaleForm({
   const onFileOrNew = customer !== null || (addCustomer && values.customerName.trim() !== "");
 
   return (
+    <ProblemsContext.Provider value={boxProblems}>
     <form
       {...formProps}
       onSubmit={(event) => {
-        if (Object.keys(problems).length > 0) {
-          event.preventDefault();
-          setMessage({ error: Object.values(problems)[0] });
+        event.preventDefault();
+        if (sending.current) return;
+        const first = (Object.keys(boxProblems) as (keyof SaleValues)[])[0];
+        if (first && first !== serverProblem?.field) {
+          setMessage({ error: boxProblems[first] });
+          focusBox(first);
           return;
         }
+        sending.current = true;
         formProps.onSubmit(event);
       }}
+      onKeyDown={enterGoesOn}
       className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_19rem]"
       data-nusr-sale-form
     >
       {sale && <input type="hidden" name="id" value={sale.id} />}
+      {back && <input type="hidden" name="back" value={back} />}
       <input type="hidden" name="customerId" value={customer?.id ?? ""} />
       <input ref={nextInput} type="hidden" name="next" defaultValue="done" />
       <datalist id="nusr-salespeople">
@@ -525,7 +636,11 @@ export function SaleForm({
           <option key={name} value={name} />
         ))}
       </datalist>
-      <datalist id="nusr-coms">{suggestions.lastComs && <option value={suggestions.lastComs} />}</datalist>
+      <datalist id="nusr-coms">
+        {suggestions.comsNumbers.map((number) => (
+          <option key={number} value={number} />
+        ))}
+      </datalist>
 
       <div className="min-w-0 space-y-5">
         <Section title="The sale">
@@ -591,9 +706,12 @@ export function SaleForm({
                   <span className="text-ink-muted"> · on file{customer.detail ? ` · ${customer.detail}` : ""}</span>
                 </span>
                 <button
+                  ref={changeButton}
                   type="button"
                   onClick={() => {
+                    // Their details go with them: the next customer is picked or typed afresh.
                     setCustomer(null);
+                    setValues((old) => ({ ...old, customerName: "", customerPhone: "", customerAddress: "" }));
                     requestAnimationFrame(() => customerInput.current?.focus());
                   }}
                   className="min-h-11 rounded-lg px-2 text-sm font-medium text-glow/90 hover:text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
@@ -647,16 +765,26 @@ export function SaleForm({
             className={`${inputClass} font-mono tracking-wide uppercase`}
             wide
             hint={
-              "error" in vin ? (
-                <span className="text-trail">{vin.error}</span>
-              ) : shownDecode ? (
+              shownDecode ? (
                 <>
-                  {shownDecode.model ? `Model list: ${[shownDecode.year, shownDecode.model].filter(Boolean).join(" ")}${shownDecode.modelNumber ? ` (${shownDecode.modelNumber})` : ""}.` : shownDecode.year ? `A ${shownDecode.year}; not in the model list.` : ""}
+                  {soldBefore ? (
+                    <span className="text-trail" data-nusr-vin-sold>
+                      In the NUSR already: sold {soldBefore.condition === "new" ? "new" : "used"} {formatDay(soldBefore.soldOn)} to {soldBefore.customerName}.{" "}
+                      {values.soldOn && soldBefore.soldOn < values.soldOn ? "A trade coming back, so it's Used unless you say otherwise." : "Check it isn't logged twice."}{" "}
+                    </span>
+                  ) : null}
+                  {shownDecode.model
+                    ? `Model list: ${[shownDecode.year, shownDecode.model].filter(Boolean).join(" ")}${shownDecode.modelNumber ? ` (${shownDecode.modelNumber})` : ""}.`
+                    : lastModel?.model
+                      ? `A ${[shownDecode.year, lastModel.model].filter(Boolean).join(" ")}, as sold ${formatDay(lastModel.soldOn)}.`
+                      : shownDecode.year
+                        ? `A ${shownDecode.year}; not in the model list.`
+                        : ""}
                   {shownDecode.onFile ? ` On file: ${shownDecode.onFile.label}, ${shownDecode.onFile.relation === "sold" ? "sold to us by" : "of"} ${shownDecode.onFile.customerName}.` : ""}
                   {!shownDecode.checkDigitOk ? " Its check digit doesn't match: a character may be off." : ""}
                 </>
               ) : (
-                "A whole VIN fills in the year and model from the shop's model list."
+                "A whole VIN fills in the year and model from the shop's earlier sales and its model list."
               )
             }
           />
@@ -665,28 +793,62 @@ export function SaleForm({
         </Section>
 
         <Section title="Unit price">
+          {lastModel && pricesToUse.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-glow/30 bg-glow/5 px-3.5 py-2 text-sm sm:col-span-2 xl:col-span-3" data-nusr-last-prices>
+              <p className="min-w-0 text-ink">
+                The last {lastModel.model ?? "of this model"} sold, {formatDay(lastModel.soldOn)}:{" "}
+                {lastPrices.map(([name, cents]) => `${SALE_LABELS[name]} ${formatMoney(cents)}`).join(" · ")}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  for (const [name, cents] of pricesToUse) set(name, moneyInput(cents));
+                }}
+                className="min-h-11 rounded-lg px-3 text-sm font-medium text-glow hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+              >
+                Use {pricesToUse.length === lastPrices.length ? "these" : "the rest"}
+              </button>
+            </div>
+          )}
           {(["msrp", "salesPrice", "dealerCost", "unitLabor", "rebate"] as const).map((name) => (
-            <MoneyField key={name} name={name} values={values} set={set} problem={problems[name]} />
+            <MoneyField key={name} name={name} values={values} set={set} />
           ))}
         </Section>
 
         <Section title="Accessories">
           {(["accPrice", "accCost", "accLabor"] as const).map((name) => (
-            <MoneyField key={name} name={name} values={values} set={set} problem={problems[name]} />
+            <MoneyField key={name} name={name} values={values} set={set} />
           ))}
         </Section>
 
         <Section title="Service contract and rewards">
           {(["escPrice", "escCost", "rewards"] as const).map((name) => (
-            <MoneyField key={name} name={name} values={values} set={set} problem={problems[name]} />
+            <MoneyField key={name} name={name} values={values} set={set} />
           ))}
         </Section>
 
         <Section title="Financing and payoff">
           <Field name="financeCompany" values={values} set={set} list="nusr-finance" maxLength={SALE_LIMITS.financeCompany} hint="Blank for cash." />
-          <MoneyField name="amountFinanced" values={values} set={set} problem={problems.amountFinanced} />
-          <MoneyField name="downPayment" values={values} set={set} problem={problems.downPayment} />
-          <Field name="fundingReceivedOn" values={values} set={set} type="date" />
+          <MoneyField name="amountFinanced" values={values} set={set} />
+          <MoneyField name="downPayment" values={values} set={set} />
+          <Field
+            name="fundingReceivedOn"
+            values={values}
+            set={set}
+            type="date"
+            hint={
+              !values.fundingReceivedOn && values.soldOn && !values.amountFinanced.trim() ? (
+                <button
+                  type="button"
+                  onClick={() => set("fundingReceivedOn", values.soldOn)}
+                  className="-mx-1 inline-flex min-h-11 items-center px-1 font-medium text-glow/90 hover:text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+                  data-nusr-same-day
+                >
+                  Same day as the sale (cash)
+                </button>
+              ) : undefined
+            }
+          />
           <Field name="paidOn" values={values} set={set} type="date" hint="When the unit was paid off." />
           <Field name="comsNumber" values={values} set={set} list="nusr-coms" maxLength={SALE_LIMITS.comsNumber} spellCheck={false} />
         </Section>
@@ -698,10 +860,9 @@ export function SaleForm({
             set={set}
             inputMode="decimal"
             hint={unitType === "whole_good" ? "% of MSRP." : "No holdback on this kind of deal."}
-            aria-invalid={Boolean(problems.holdbackRateBp)}
           />
-          <Field name="bonusRateBp" values={values} set={set} inputMode="decimal" hint="% of the total profit." aria-invalid={Boolean(problems.bonusRateBp)} />
-          <MoneyField name="bonusAdjustment" values={values} set={set} problem={problems.bonusAdjustment} />
+          <Field name="bonusRateBp" values={values} set={set} inputMode="decimal" hint="% of the total profit." />
+          <MoneyField name="bonusAdjustment" values={values} set={set} />
         </Section>
 
         <div className={sectionClass}>
@@ -744,22 +905,22 @@ export function SaleForm({
         <div className="space-y-3">
           <button
             type="submit"
-            disabled={pending}
+            aria-disabled={pending}
             onClick={() => {
-              if (nextInput.current) nextInput.current.value = "done";
+              if (nextInput.current && !sending.current) nextInput.current.value = "done";
             }}
-            className={primaryButtonClass}
+            className={`${primaryButtonClass} aria-disabled:cursor-wait aria-disabled:opacity-70`}
           >
             {sale ? (pending ? "Saving…" : "Save changes") : pending ? "Logging…" : "Log sale"}
           </button>
           {!sale && (
             <button
               type="submit"
-              disabled={pending}
+              aria-disabled={pending}
               onClick={() => {
-                if (nextInput.current) nextInput.current.value = "another";
+                if (nextInput.current && !sending.current) nextInput.current.value = "another";
               }}
-              className={secondaryButtonClass}
+              className={`${secondaryButtonClass} aria-disabled:cursor-wait aria-disabled:opacity-70`}
               data-nusr-another
             >
               Log and start another
@@ -768,19 +929,41 @@ export function SaleForm({
         </div>
       </aside>
     </form>
+    </ProblemsContext.Provider>
   );
+}
+
+// A box by its field, to put the focus in it (New or Used by its choice).
+function focusBox(field: string) {
+  const box = field === "condition" ? document.querySelector<HTMLInputElement>('input[name="condition"]:checked') : document.getElementById(`sale-${field}`);
+  box?.focus();
+}
+
+// Enter in a box goes on to the next one, as in a spreadsheet: only the
+// buttons log or save the sale, so an Enter never sends half a sale.
+function enterGoesOn(event: KeyboardEvent<HTMLFormElement>) {
+  const target = event.target;
+  if (event.key !== "Enter" || event.defaultPrevented || event.nativeEvent.isComposing) return;
+  if (!(target instanceof HTMLInputElement) || ["submit", "button", "file"].includes(target.type)) return;
+  event.preventDefault();
+  const boxes = [...event.currentTarget.querySelectorAll<HTMLElement>("input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button[type=submit]")].filter(
+    (box) => !(box instanceof HTMLInputElement && box.type === "radio" && !box.checked),
+  );
+  boxes[boxes.indexOf(target) + 1]?.focus();
 }
 
 const removeButtonClass =
   "h-12 rounded-lg border border-trail/50 text-base font-medium text-trail transition hover:bg-trail/10 focus-visible:ring-2 focus-visible:ring-trail/40 focus-visible:outline-none disabled:opacity-60";
 
 // Remove, asking first; the Activity log keeps what the sale was.
-export function RemoveSaleForm({ sale }: { sale: { id: string; label: string } }) {
+export function RemoveSaleForm({ sale, back = "" }: { sale: { id: string; label: string }; back?: string }) {
   const { state, pending, formProps } = useFormAction<SaleFormState>(removeSaleAction, {});
   const [confirming, setConfirming] = useState(false);
+  const removeButton = useRef<HTMLButtonElement>(null);
   return (
     <form {...formProps} className="space-y-4">
       <input type="hidden" name="id" value={sale.id} />
+      {back && <input type="hidden" name="back" value={back} />}
       <Feedback state={state} />
       {confirming ? (
         <div className="space-y-3">
@@ -794,7 +977,10 @@ export function RemoveSaleForm({ sale }: { sale: { id: string; label: string } }
             <button
               type="button"
               disabled={pending}
-              onClick={() => setConfirming(false)}
+              onClick={() => {
+                setConfirming(false);
+                requestAnimationFrame(() => removeButton.current?.focus());
+              }}
               className="h-12 rounded-lg px-4 text-sm text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
             >
               Cancel
@@ -802,7 +988,7 @@ export function RemoveSaleForm({ sale }: { sale: { id: string; label: string } }
           </div>
         </div>
       ) : (
-        <button type="button" onClick={() => setConfirming(true)} className={`${removeButtonClass} w-full`}>
+        <button ref={removeButton} type="button" onClick={() => setConfirming(true)} className={`${removeButtonClass} w-full`}>
           Remove from the NUSR
         </button>
       )}

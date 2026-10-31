@@ -726,13 +726,14 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
   const vin = readVin(value("vin"), note, moved);
 
   // A rate the NUSR tab's own columns give: a share as Excel keeps a
-  // percentage (0.04), a percentage (4, "4%"), or null when there's none or
-  // it can't be one.
+  // percentage (0.04, or 1 for 100%), a percentage typed as one (4, "4%"),
+  // or null when there's none or it can't be one.
   const givenRate = (column: Column) => {
     const typed = value(column);
     if (!typed) return null;
     const share = cachedNumber(typed);
-    const read = share === null ? parseRate(typed) : { bp: Math.round(share >= 1 ? share * 100 : share * 10_000) };
+    // 1 is 100%, as Excel keeps it (and as the download writes every rate).
+    const read = share === null ? parseRate(typed) : { bp: Math.round(share > 1 ? share * 100 : share * 10_000) };
     if ("bp" in read && read.bp !== null && read.bp >= 0 && read.bp <= MAX_RATE_BP) return read.bp;
     note("figures", `${heading(column)} ${quoted(typed)} isn't a rate: worked out from the sheet's figures instead.`);
     return null;

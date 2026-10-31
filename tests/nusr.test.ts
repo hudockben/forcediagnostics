@@ -28,6 +28,7 @@ import {
   removeSale,
   saleSuggestions,
   salesForCustomer,
+  searchSaleBuyers,
   splitAddress,
   unitsByMonth,
   updateSale,
@@ -36,20 +37,26 @@ import {
 import {
   blankSaleValues,
   checkSale,
+  filtersNarrowing,
   filtersSearch,
   filtersTitle,
   formatDay,
   formatMoney,
+  formatPct,
   guessCategory,
   guessUnitType,
+  logSearch,
   monthlyComparison,
   parseMoney,
   parseRate,
   parseSaleFilters,
+  perUnit,
   readSaleValues,
   saleFigures,
   saleTotals,
   saleValues,
+  shopToday,
+  shopYear,
   totalsBy,
   withFigures,
   type SaleFields,
@@ -103,13 +110,14 @@ describe("reading what's typed", () => {
     assert.deepEqual([sale.holdbackRateBp, sale.bonusRateBp], [0, 1000]);
     // A phone number that isn't one stays as typed.
     assert.equal(checked({ customerPhone: "call his wife" }).customerPhone, "call his wife");
-    assert.deepEqual(checkSale(typed({ customerName: " " })), { error: "Enter the customer's name." });
-    assert.deepEqual(checkSale(typed({ soldOn: "2026-02-30" })), { error: "Enter the date it was sold." });
+    assert.deepEqual(checkSale(typed({ customerName: " " })), { error: "Enter the customer's name.", field: "customerName" });
+    assert.deepEqual(checkSale(typed({ soldOn: "2026-02-30" })), { error: "Enter the date it was sold.", field: "soldOn" });
     assert.ok("error" in checkSale(typed({ vin: "3NSGZW99OTM100042" })), "an O in a whole VIN");
     assert.equal(checked({ vin: "5a4gflt" }).vin, "5A4GFLT");
     assert.ok("error" in checkSale(typed({ unitType: "lease" })));
-    assert.deepEqual(checkSale(typed({ dealerCost: "lots" })), { error: "Dealer Cost isn't an amount." });
-    assert.deepEqual(checkSale(typed({ paidOn: "N/A" })), { error: "Date Paid isn't a date." });
+    assert.deepEqual(checkSale(typed({ dealerCost: "lots" })), { error: "Dealer Cost isn't an amount.", field: "dealerCost" });
+    assert.deepEqual(checkSale(typed({ paidOn: "N/A" })), { error: "Date Paid isn't a date.", field: "paidOn" });
+    assert.deepEqual(checkSale(typed({ vin: "3NSGZW99OTM100042" })), { error: "A VIN never has I, O or Q in it (they'd pass for 1 and 0). Check those characters.", field: "vin" });
     assert.ok("error" in checkSale(typed({ unitYear: "26" })));
   });
 
@@ -185,6 +193,15 @@ describe("the figures", () => {
   test("half a cent rounds away from zero, both ways", () => {
     assert.equal(saleFigures(checked({ salesPrice: "100.05", bonusRateBp: "10" })).totalBonus, 1001);
     assert.equal(saleFigures(checked({ dealerCost: "100.05", bonusRateBp: "10" })).totalBonus, -1001);
+    // A unit's average too (two trades lost $0.51 and $0.50), as the
+    // download's AVG TOTAL shows it.
+    assert.deepEqual([perUnit(-101, 2), perUnit(101, 2), perUnit(5, 0)], [-51, 51, null]);
+  });
+
+  test("percentages as Excel shows them: the decimal rounded half away from zero", () => {
+    // $698.50 on $10,000 is 6.985%, a hair under in binary.
+    assert.equal(formatPct(saleFigures(checked({ salesPrice: "10000", dealerCost: "9301.50" })).unitProfitPct), "6.99%");
+    assert.deepEqual([formatPct(-0.06985), formatPct(0.0697), formatPct(null)], ["-6.99%", "6.97%", "—"]);
   });
 
   test("totals and percentages of the totals, by salesman and month", () => {
@@ -237,6 +254,25 @@ describe("the log's filters and dates", () => {
     assert.deepEqual([every.year, every.month], [null, null]);
     assert.equal(filtersSearch(every, 2026), "?year=all");
     assert.equal(filtersTitle(every), "All years");
+  });
+
+  test("the log opens on the shop's year, which on New Year's Eve evening is still the old one", () => {
+    const evening = new Date("2027-01-01T01:30:00Z");
+    assert.deepEqual([shopToday(evening), shopYear(evening)], ["2026-12-31", 2026]);
+  });
+
+  test("a back link brings back the log as it was, and nothing else", () => {
+    assert.equal(logSearch("year=2025&q=pine&page=3&columns=all&evil=%3Cx%3E", 2026), "?year=2025&q=pine&columns=all&page=3");
+    assert.equal(logSearch("?year=2026&page=1", 2026), "");
+    assert.equal(logSearch(42, 2026), "");
+    assert.equal(logSearch("page=0&columns=some", 2026), "");
+  });
+
+  test("filters are cut on a whole character, and say what narrows the log", () => {
+    const cut = parseSaleFilters({ category: `${"a".repeat(29)}😀`, salesperson: "Sam Ortega", condition: "used" }, 2026);
+    assert.equal(cut.category, "a".repeat(29));
+    assert.equal(filtersNarrowing(cut), `Used · ${"a".repeat(29)} · Sam Ortega`);
+    assert.equal(filtersNarrowing(parseSaleFilters({}, 2026)), "");
   });
 
   test("dates as the spreadsheet wrote them", () => {
@@ -325,7 +361,7 @@ describe("the log", () => {
     assert.equal(describeAuditEntry(entry).summary, "Logged the sale of 2026 Xpedition ADV 5P NS to Ridgeback Drilling Co.");
     // The same unit can't be logged as sold twice on one day.
     const again = await logSale(manager, input({ soldOn: "2026-01-02", vin: "3NSGZW999TM100042" }));
-    assert.deepEqual(again, { error: "The unit with VIN 3NSGZW999TM100042 is already in the NUSR as sold on 2026-01-02." });
+    assert.deepEqual(again, { field: "vin", error: "The unit with VIN 3NSGZW999TM100042 is already in the NUSR as sold on 2026-01-02." });
   });
 
   test("a customer on file fills it in; a new buyer and the unit are added to Customers", async () => {
@@ -354,6 +390,9 @@ describe("the log", () => {
     // A customer with sales logged stays on file.
     const removed = await removeCustomer(manager, made.id);
     assert.ok("error" in removed && /2 sales in the NUSR are for Casey Lindqvist/.test(removed.error), JSON.stringify(removed));
+    // Someone who can't open the NUSR is told who can change them.
+    const writer = await removeCustomer({ ...manager, role: "service_writer" }, made.id);
+    assert.ok("error" in writer && /ask a manager or an admin to change the customer on those sales in the NUSR first/.test(writer.error), JSON.stringify(writer));
     // Another shop's customer can't be picked.
     const theirs = await createCustomer(other, { name: "Elsewhere", phone: "", email: "", addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", notes: "" });
     assert.ok("id" in theirs);
@@ -449,6 +488,66 @@ describe("the log", () => {
     // The unit on a customer's record (Casey Lindqvist bought it above).
     assert.equal((await decodeSaleVin(manager.shop.id, "3NSMAU576TE100318"))?.onFile?.customerName, "Casey Lindqvist");
     assert.equal(await decodeSaleVin(manager.shop.id, "not a vin"), null);
+  });
+
+  test("a VIN brings in this unit's earlier sale, and the last of its model and year with its prices", async () => {
+    const shop = await createManager(`nv${suffix}`);
+    const first = await log(shop, {
+      soldOn: "2026-10-01",
+      customerName: "Harper Quill",
+      unitYear: "2026",
+      unitModel: "Rngr 570 NS",
+      vin: "3NSMAU576TE300101",
+      category: "UTV",
+      msrp: "18999",
+      salesPrice: "18200",
+      dealerCost: "17650",
+      rebate: "500",
+    });
+    // Another unit of the same model and year (characters 4-8 and 10).
+    const other = await decodeSaleVin(shop.shop.id, "3NSMAU571TE300202");
+    assert.equal(other?.sold, null);
+    assert.deepEqual(other?.sameModel, { soldOn: "2026-10-01", model: "Rngr 570 NS", category: "UTV", msrp: 1899900, dealerCost: 1765000, rebate: 50000 });
+    // A year earlier is another model year.
+    assert.equal((await decodeSaleVin(shop.shop.id, "3NSMAU579SE300303"))?.sameModel, null);
+    // The unit itself: in the NUSR already (back as a trade, or logged twice),
+    // but not when it's the sale being corrected.
+    const again = await decodeSaleVin(shop.shop.id, "3NSMAU576TE300101");
+    assert.deepEqual(again?.sold, { id: first, soldOn: "2026-10-01", condition: "new", unitType: "whole_good", year: 2026, model: "Rngr 570 NS", category: "UTV", customerName: "Harper Quill" });
+    assert.equal(again?.sameModel, null);
+    assert.equal((await decodeSaleVin(shop.shop.id, "3NSMAU576TE300101", first))?.sold, null);
+  });
+
+  test("the customer box finds past buyers who aren't on file, and a customer on file once", async () => {
+    const shop = await createManager(`nb${suffix}`);
+    await log(shop, { soldOn: "2026-10-02", customerName: "Rowan Ellery", customerPhone: "724-555-0191", customerAddress: "12 Foxglove Rd, Elmwood, PA" });
+    await log(shop, { soldOn: "2025-06-02", customerName: "Rowan Ellery", customerPhone: "724-555-0191", customerAddress: "an older address" });
+    const found = await searchSaleBuyers(shop.shop.id, "rowan");
+    assert.deepEqual(found, [
+      { kind: "buyer", id: "buyer:rowan ellery|(724) 555-0191", name: "Rowan Ellery", phone: "(724) 555-0191", address: "12 Foxglove Rd, Elmwood, PA", detail: "Bought 10/2/2026 · (724) 555-0191" },
+    ]);
+    assert.equal((await searchSaleBuyers(shop.shop.id, "5550191")).length, 1);
+    // On file with the same name and phone: they're that customer.
+    const made = await createCustomer(shop, { name: "Rowan Ellery", phone: "(724) 555-0191", email: "", addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", notes: "" });
+    assert.ok("id" in made);
+    assert.deepEqual(
+      (await searchSaleBuyers(shop.shop.id, "rowan")).map((choice) => [choice.kind, choice.id]),
+      [["customer", made.id]],
+    );
+    // Another shop's buyers are never offered.
+    assert.deepEqual(await searchSaleBuyers(other.shop.id, "rowan"), []);
+  });
+
+  test("the COMS #s offered are the ones entered last; the year-by-year counts follow the filters", async () => {
+    const shop = await createManager(`nc${suffix}`);
+    await log(shop, { soldOn: "2026-09-01", customerName: "Paid First", paidOn: "2026-09-20", comsNumber: "TST2001" });
+    await log(shop, { soldOn: "2026-08-01", customerName: "Paid Last", paidOn: "2026-10-05", comsNumber: "TST2002" });
+    await log(shop, { soldOn: "2026-10-20", customerName: "Not Paid Yet", condition: "used", unitType: "trade" });
+    assert.deepEqual((await saleSuggestions(shop.shop.id)).comsNumbers, ["TST2002", "TST2001"]);
+    const filters = { year: 2026, month: 10, condition: "used" as const, unitType: null, category: null, salesperson: null, status: null, query: "" };
+    const used = await unitsByMonth(shop.shop.id, filters);
+    assert.deepEqual([used.totals[2026], used.months[9].units[2026]], [1, 1]);
+    assert.equal((await unitsByMonth(shop.shop.id)).totals[2026], 3);
   });
 
   test("app_user can't move a sale to another shop, or change who logged it", async () => {

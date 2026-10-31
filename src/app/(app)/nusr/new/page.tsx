@@ -56,7 +56,7 @@ async function NewSale({ searchParams }: { searchParams: PageProps<"/nusr/new">[
           financeCompanies: suggestions.financeCompanies,
           categories: suggestions.categories,
           models: suggestions.models,
-          lastComs: suggestions.latest?.comsNumber ?? null,
+          comsNumbers: suggestions.comsNumbers,
         }}
       />
     </WidePage>

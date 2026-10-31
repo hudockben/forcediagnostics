@@ -25,6 +25,7 @@ import {
   type MonthlyComparison,
   type SaleTotals,
 } from "@/lib/nusr-rules";
+import { cutText } from "@/lib/manual-rules";
 import type { Cell, CellStyle, CellValue, Column, Sheet } from "@/lib/xlsx-write";
 
 // The shop's own time zone, for when the download was made.
@@ -426,15 +427,16 @@ export function nusrFileName(title: string, today: string) {
     .replace(/\s+/g, " ")
     .replace(/[\u0000-\u001F\u007F]/g, "")
     .replace(/[\\/:*?"<>|]+/g, "-")
-    .trim()
-    .slice(0, 120)
     .trim();
-  return `NUSR ${safe} ${today}.xlsx`.replace(/\s+/g, " ");
+  const cut = cutText(safe, 120).trim();
+  return `NUSR ${cut} ${today}.xlsx`.replace(/\s+/g, " ");
 }
 
 // Content-Disposition for a download: the name as it is (filename*, which
 // today's browsers read), and in plain ASCII for any that don't.
-export function attachmentHeader(fileName: string) {
+export function attachmentHeader(name: string) {
+  // Half an emoji (a lone surrogate) can't be encoded: it's a U+FFFD.
+  const fileName = name.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
   const ascii = fileName
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")

@@ -4,10 +4,10 @@ import { Suspense } from "react";
 
 import { Card, LoadingLine, PageHeading } from "@/components/app/ui";
 import { findSales, unitsByMonth } from "@/lib/nusr";
-import { filtersSearch, filtersTitle, parseSaleFilters } from "@/lib/nusr-rules";
+import { filtersNarrowing, filtersSearch, filtersTitle, parseSaleFilters, shopToday, shopYear } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
 
-import { WidePage } from "../forms";
+import { ExcelLink, WidePage } from "../forms";
 import { SummaryTables } from "../summary-tables";
 
 export const metadata: Metadata = { title: "NUSR summary" };
@@ -27,9 +27,9 @@ const linkButton =
 // added them up, and the units of every year month by month.
 async function Summary({ searchParams }: { searchParams: PageProps<"/nusr/summary">["searchParams"] }) {
   const user = await requireCapability("sales.log");
-  const thisYear = new Date().getUTCFullYear();
+  const thisYear = shopYear();
   const filters = parseSaleFilters(await searchParams, thisYear);
-  const [sales, comparison] = await Promise.all([findSales(user.shop.id, filters, "oldest"), unitsByMonth(user.shop.id)]);
+  const [sales, comparison] = await Promise.all([findSales(user.shop.id, filters, "oldest"), unitsByMonth(user.shop.id, filters)]);
   const search = filtersSearch(filters, thisYear);
   return (
     <WidePage className="space-y-6">
@@ -42,9 +42,7 @@ async function Summary({ searchParams }: { searchParams: PageProps<"/nusr/summar
           description="The totals and averages the spreadsheet's summary rows had, worked out from every sale, so they're never stale."
           action={
             <div className="flex flex-wrap gap-3">
-              <a href={`/nusr/export${search}`} className={linkButton}>
-                Download Excel
-              </a>
+              <ExcelLink search={search} className={linkButton} />
               <Link href={`/nusr/print${search}${search ? "&" : "?"}summary=only`} className={linkButton}>
                 Print or PDF
               </Link>
@@ -56,7 +54,7 @@ async function Summary({ searchParams }: { searchParams: PageProps<"/nusr/summar
         {sales.length === 0 ? (
           <p className="text-sm text-ink-muted">No sales in {filtersTitle(filters)}.</p>
         ) : (
-          <SummaryTables sales={sales} comparison={comparison} variant="screen" />
+          <SummaryTables sales={sales} comparison={comparison} narrowing={filtersNarrowing(filters)} today={shopToday()} variant="screen" />
         )}
       </Card>
     </WidePage>

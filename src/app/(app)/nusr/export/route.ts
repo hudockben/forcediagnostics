@@ -1,6 +1,6 @@
 import { findSales, unitsByMonth } from "@/lib/nusr";
 import { attachmentHeader, nusrFileName, nusrWorkbook } from "@/lib/nusr-export";
-import { filtersTitle, parseSaleFilters } from "@/lib/nusr-rules";
+import { filtersTitle, parseSaleFilters, shopYear } from "@/lib/nusr-rules";
 import { allows, lookupCurrentUser } from "@/lib/session";
 import { writeXlsx } from "@/lib/xlsx-write";
 
@@ -17,7 +17,7 @@ export async function GET(request: Request) {
   // As a page's searchParams has them, so the download finds what the log
   // shows.
   const query = Object.fromEntries([...new Set(params.keys())].map((key) => [key, params.getAll(key)]));
-  const filters = parseSaleFilters(query, new Date().getUTCFullYear());
+  const filters = parseSaleFilters(query, shopYear());
   // A time zone the browser named, if it's a real one.
   let timeZone = "America/New_York";
   try {
@@ -28,7 +28,7 @@ export async function GET(request: Request) {
   }
 
   const shopId = lookup.user.shop.id;
-  const [sales, comparison] = await Promise.all([findSales(shopId, filters, "oldest"), unitsByMonth(shopId)]);
+  const [sales, comparison] = await Promise.all([findSales(shopId, filters, "oldest"), unitsByMonth(shopId, filters)]);
   const title = filtersTitle(filters);
   const now = new Date();
   const workbook = writeXlsx(nusrWorkbook(sales, { title, comparison, generatedAt: now, timeZone }), { title: `NUSR ${title}`, created: now });

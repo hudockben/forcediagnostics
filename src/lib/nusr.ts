@@ -14,6 +14,7 @@ import {
   MONEY_FIELDS,
   SALE_LABELS,
   checkSale,
+  formatDay,
   formatMoney,
   formatRate,
   monthlyComparison,
@@ -25,10 +26,14 @@ import {
   type MoneyField,
   type SaleFields,
   type SaleFilters,
+  type SaleProblem,
   type SaleTotals,
+  type UnitCondition,
+  type UnitType,
 } from "@/lib/nusr-rules";
 import type { CurrentUser } from "@/lib/session";
-import { checkVin, sharedModelName, vinModelNumberPatterns, vinYears } from "@/lib/vin";
+import { searchCustomersForLog } from "@/lib/sticker-log";
+import { checkVin, sharedModelName, vinModelCode, vinModelNumberPatterns, vinYears } from "@/lib/vin";
 
 // NUSR, the unit sales log (the NUSR tab). Callers check sales.log first;
 // everything here runs inside withShop for the user's own shop, and every
@@ -139,7 +144,8 @@ async function audit(tx: ShopTransaction, actor: CurrentUser, action: string, ta
 const isUniqueViolation = (error: unknown) =>
   ((error instanceof DrizzleQueryError ? error.cause : error) as { code?: string } | undefined)?.code === "23505";
 
-const alreadyLogged = (sale: SaleFields) => ({
+const alreadyLogged = (sale: SaleFields): SaleProblem => ({
+  field: "vin",
   error: `The unit with VIN ${sale.vin} is already in the NUSR as sold on ${sale.soldOn}.`,
 });
 
@@ -243,8 +249,10 @@ export async function saleYears(shopId: string): Promise<number[]> {
   return rows.map((row) => row.year);
 }
 
-// Units sold each month of every year with sales (or of the years given).
-export async function unitsByMonth(shopId: string, years?: number[]): Promise<MonthlyComparison> {
+// Units sold each month of every year with sales: of the sales the log's
+// filters find, every year (a salesman's or the used units' own counts),
+// or of all of them.
+export async function unitsByMonth(shopId: string, filters: SaleFilters | null = null): Promise<MonthlyComparison> {
   const rows = await withShop(shopId, (tx) =>
     tx
       .select({
@@ -253,7 +261,7 @@ export async function unitsByMonth(shopId: string, years?: number[]): Promise<Mo
         units: sql<number>`count(*)::int`,
       })
       .from(unitSales)
-      .where(years?.length ? sql`extract(year from ${unitSales.soldOn})::int in (${sql.join(years.map((year) => sql`${year}`), sql`, `)})` : undefined)
+      .where(filters ? saleWhere({ ...filters, year: null, month: null }) : undefined)
       .groupBy(sql`1`, sql`2`),
   );
   return monthlyComparison(rows);
@@ -264,8 +272,11 @@ export type SaleSuggestions = {
   financeCompanies: string[];
   categories: string[];
   models: string[];
-  // The rates and COMS # of the latest sale, which a new one starts from.
-  latest: { holdbackRateBp: number; bonusRateBp: number; comsNumber: string | null } | null;
+  // The rates of the latest sale, which a new one starts from.
+  latest: { holdbackRateBp: number; bonusRateBp: number } | null;
+  // The COMS #s entered last (a payoff covers several units, paid off
+  // after they're sold), the newest first.
+  comsNumbers: string[];
 };
 
 // What the form offers as it's typed: the names, lenders, categories and
@@ -289,10 +300,17 @@ export async function saleSuggestions(shopId: string): Promise<SaleSuggestions> 
       await distinct(unitSales.unitModel, 300),
     ];
     const [latest] = await tx
-      .select({ bonusRateBp: unitSales.bonusRateBp, comsNumber: unitSales.comsNumber })
+      .select({ bonusRateBp: unitSales.bonusRateBp })
       .from(unitSales)
       .orderBy(desc(unitSales.soldOn), desc(unitSales.createdAt))
       .limit(1);
+    const coms = await tx
+      .select({ value: sql<string>`min(${unitSales.comsNumber})` })
+      .from(unitSales)
+      .where(sql`${unitSales.comsNumber} is not null`)
+      .groupBy(sql`lower(${unitSales.comsNumber})`)
+      .orderBy(sql`max(coalesce(${unitSales.paidOn}, ${unitSales.soldOn})) desc`, sql`max(${unitSales.updatedAt}) desc`)
+      .limit(5);
     // The holdback of the latest new whole good that had one.
     const [holdback] = await tx
       .select({ holdbackRateBp: unitSales.holdbackRateBp })
@@ -306,8 +324,63 @@ export async function saleSuggestions(shopId: string): Promise<SaleSuggestions> 
       categories,
       models,
       latest: latest ? { ...latest, holdbackRateBp: holdback?.holdbackRateBp ?? DEFAULT_HOLDBACK_RATE_BP } : null,
+      comsNumbers: coms.map((row) => row.value),
     };
   });
+}
+
+// Someone to fill a sale in from: a customer on file, or someone the NUSR
+// has sold to who isn't on file (an import brings years of them), with the
+// name, phone and address of the latest sale to them.
+export type BuyerChoice =
+  | { kind: "customer"; id: string; name: string; detail: string | null }
+  | { kind: "buyer"; id: string; name: string; detail: string | null; phone: string | null; address: string | null };
+
+const BUYER_SUGGESTIONS = 6;
+
+// Customers on file by name or phone number (A to Z), then past buyers
+// who aren't, the latest first: a buyer with a customer of the same name
+// and phone number on file is that customer.
+export async function searchSaleBuyers(shopId: string, query: string): Promise<BuyerChoice[]> {
+  const words = listSearchWords(query);
+  if (words.length === 0) return [];
+  const onFile = await searchCustomersForLog(shopId, query);
+  const digits = (column: SQL | AnyPgColumn) => sql`regexp_replace(coalesce(${column}, ''), '[^0-9]', '', 'g')`;
+  const text = sql`concat_ws(' ', ${unitSales.customerName}, ${unitSales.customerPhone}, ${digits(unitSales.customerPhone)})`;
+  const rows = await withShop(shopId, (tx) =>
+    tx.execute<{ name: string; phone: string | null; address: string | null; sold_on: string }>(sql`
+      select name, phone, address, sold_on from (
+        select distinct on (lower(${unitSales.customerName}), ${digits(unitSales.customerPhone)})
+          ${unitSales.customerName} as name, ${unitSales.customerPhone} as phone, ${unitSales.customerAddress} as address, to_char(${unitSales.soldOn}, 'YYYY-MM-DD') as sold_on
+        from ${unitSales}
+        where ${unitSales.customerId} is null
+          and ${text} ilike all (array[${sql.join(
+            words.map((word) => sql`${containsPattern(word)}`),
+            sql`, `,
+          )}]::text[])
+          and not exists (
+            select 1 from ${customers}
+            where lower(${customers.name}) = lower(${unitSales.customerName}) and ${digits(customers.phone)} = ${digits(unitSales.customerPhone)}
+          )
+        order by lower(${unitSales.customerName}), ${digits(unitSales.customerPhone)}, ${unitSales.soldOn} desc, ${unitSales.createdAt} desc
+      ) latest
+      order by sold_on desc, lower(name)
+      limit ${BUYER_SUGGESTIONS}
+    `),
+  );
+  return [
+    ...onFile.map((choice): BuyerChoice => ({ kind: "customer", ...choice })),
+    ...rows.rows.map(
+      (row): BuyerChoice => ({
+        kind: "buyer",
+        id: `buyer:${row.name.toLowerCase()}|${row.phone ?? ""}`,
+        name: row.name,
+        phone: row.phone,
+        address: row.address,
+        detail: [`Bought ${formatDay(row.sold_on)}`, row.phone].filter(Boolean).join(" · "),
+      }),
+    ),
+  ];
 }
 
 // --- Changing sales -----------------------------------------------------------
@@ -396,7 +469,7 @@ const saleSummary = (sale: SaleFields) => ({
   salesperson: sale.salesperson,
 });
 
-export async function logSale(actor: CurrentUser, input: SaleInput): Promise<{ id: string } | { error: string }> {
+export async function logSale(actor: CurrentUser, input: SaleInput): Promise<{ id: string } | SaleProblem> {
   const checked = checkSale(input);
   if ("error" in checked) return checked;
   const sale = checked.sale;
@@ -441,7 +514,7 @@ function changesOf(before: SaleFields, after: SaleFields) {
   return { fields, changes };
 }
 
-export async function updateSale(actor: CurrentUser, id: string, input: SaleInput): Promise<{ ok: true } | { error: string }> {
+export async function updateSale(actor: CurrentUser, id: string, input: SaleInput): Promise<{ ok: true } | SaleProblem> {
   if (!isUuid(id)) return NOT_HERE;
   const checked = checkSale(input);
   if ("error" in checked) return checked;
@@ -564,15 +637,42 @@ export type VinDecode = {
   category: string | null;
   // The unit on a customer's record already (traded in, say), the latest.
   onFile: { label: string; year: number | null; model: string | null; customerName: string; relation: string } | null;
+  // The unit in the NUSR already, the latest sale of it: a trade coming
+  // back, or a sale logged twice.
+  sold: {
+    id: string;
+    soldOn: string;
+    condition: UnitCondition;
+    unitType: UnitType;
+    year: number | null;
+    model: string | null;
+    category: string | null;
+    customerName: string;
+  } | null;
+  // The latest new whole good the shop sold of the same model and model
+  // year (the VIN's characters 4-8 and 10): its model as the shop writes
+  // it, and its prices to offer (they change, so they're offered, not
+  // filled in).
+  sameModel: {
+    soldOn: string;
+    model: string | null;
+    category: string | null;
+    msrp: number | null;
+    dealerCost: number | null;
+    rebate: number | null;
+  } | null;
 };
 
-// What a VIN says about the unit: its model year (character 10), and from
-// the shop's model list (Polaris's, imported under System Admin >
-// Manuals) its model, model number and category. A trailer's or another
-// brand's VIN gives the year only.
-export async function decodeSaleVin(shopId: string, text: string): Promise<VinDecode | null> {
+// What a VIN says about the unit: its model year (character 10); from the
+// shop's model list (Polaris's, imported under System Admin > Manuals) its
+// model, model number and category; and from the NUSR, an earlier sale of
+// this unit (other than the one being corrected, exceptId) and the latest
+// of its model and year. A trailer's or another brand's VIN gives the year
+// only.
+export async function decodeSaleVin(shopId: string, text: string, exceptId: string | null = null): Promise<VinDecode | null> {
   const check = checkVin(String(text ?? "").slice(0, 40));
   if (check.status !== "ok") return null;
+  const except = exceptId && isUuid(exceptId) ? exceptId : null;
   const thisYear = new Date().getUTCFullYear();
   const years = vinYears(check.vin);
   const decoded: VinDecode = {
@@ -583,7 +683,52 @@ export async function decodeSaleVin(shopId: string, text: string): Promise<VinDe
     modelNumber: null,
     category: null,
     onFile: null,
+    sold: null,
+    sameModel: null,
   };
+  const [sold, sameModel] = await withShop(shopId, async (tx) => {
+    const [unit] = await tx
+      .select({
+        id: unitSales.id,
+        soldOn: unitSales.soldOn,
+        condition: unitSales.condition,
+        unitType: unitSales.unitType,
+        year: unitSales.unitYear,
+        model: unitSales.unitModel,
+        category: unitSales.category,
+        customerName: unitSales.customerName,
+      })
+      .from(unitSales)
+      .where(and(eq(unitSales.vin, check.vin), except ? sql`${unitSales.id} <> ${except}` : undefined))
+      .orderBy(desc(unitSales.soldOn), desc(unitSales.createdAt))
+      .limit(1);
+    const [model] = await tx
+      .select({
+        soldOn: unitSales.soldOn,
+        model: unitSales.unitModel,
+        category: unitSales.category,
+        msrp: unitSales.msrpCents,
+        dealerCost: unitSales.dealerCostCents,
+        rebate: unitSales.rebateCents,
+      })
+      .from(unitSales)
+      .where(
+        and(
+          eq(unitSales.unitType, "whole_good"),
+          sql`length(${unitSales.vin}) = 17`,
+          sql`substr(${unitSales.vin}, 4, 5) = ${vinModelCode(check.vin)}`,
+          sql`substr(${unitSales.vin}, 10, 1) = ${check.vin[9]}`,
+          sql`${unitSales.vin} <> ${check.vin}`,
+          sql`(${unitSales.unitModel} is not null or ${unitSales.msrpCents} is not null)`,
+          except ? sql`${unitSales.id} <> ${except}` : undefined,
+        ),
+      )
+      .orderBy(desc(unitSales.soldOn), desc(unitSales.createdAt))
+      .limit(1);
+    return [unit ?? null, model ?? null];
+  });
+  decoded.sold = sold;
+  decoded.sameModel = sameModel;
   const [record] = await withShop(shopId, (tx) =>
     tx
       .select({

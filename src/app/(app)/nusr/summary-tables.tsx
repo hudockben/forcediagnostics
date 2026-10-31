@@ -80,13 +80,38 @@ const profitRow = ({ label, totals }: Row): ReactNode[] => [
   formatMoney(totals.figures.salesBonus),
 ];
 
+// What a unit averaged, as the spreadsheet's AVG rows had it: each total
+// over the units, to the cent.
+const AVERAGE_HEAD = ["", "Units", "Sales price", "Dealer cost", "Unit profit", "Acc. profit", "Holdback", "Total profit", "Total bonus", "Sales bonus"];
+const averageRow = ({ label, totals }: Row): ReactNode[] => [
+  label,
+  totals.units.toLocaleString("en-US"),
+  ...[
+    totals.amounts.salesPrice,
+    totals.amounts.dealerCost,
+    totals.figures.unitProfit,
+    totals.figures.accProfit,
+    totals.figures.holdback,
+    totals.figures.totalProfit,
+    totals.figures.totalBonus,
+    totals.figures.salesBonus,
+  ].map((cents) => formatMoney(perUnit(cents, totals.units))),
+];
+
 export function SummaryTables({
   sales,
   comparison,
+  narrowing = "",
+  today,
   variant,
 }: {
   sales: FiguredSale[];
   comparison: MonthlyComparison | null;
+  // What narrows the log besides the year and month, which the
+  // year-by-year counts follow too.
+  narrowing?: string;
+  // The shop's day ("2026-10-31"): months after it are still to come.
+  today: string;
   variant: "screen" | "print";
 }) {
   const all = saleTotals(sales);
@@ -108,6 +133,7 @@ export function SummaryTables({
   return (
     <div className={gap} data-nusr-summary>
       <Table caption="By type of deal (NEW WG, Trade, Trailer…)" head={PROFIT_HEAD} rows={[...byType, total].map(profitRow)} variant={variant} />
+      <Table caption="Averages a unit, by type of deal (AVG NEW WG, AVG TRADE…)" head={AVERAGE_HEAD} rows={[...byType, total].map(averageRow)} variant={variant} />
       <Table
         caption="By salesman"
         head={["", "Units", "Total profit", "A unit", "Total bonus", "Holdback bonus", "Sales bonus"]}
@@ -124,26 +150,42 @@ export function SummaryTables({
       />
       <Table caption="By category" head={PROFIT_HEAD} rows={[...byCategory, total].map(profitRow)} variant={variant} />
       {byMonth.length > 1 && <Table caption="By month" head={PROFIT_HEAD} rows={[...byMonth, total].map(profitRow)} variant={variant} />}
-      {comparison && comparison.years.length > 0 && <ComparisonTable comparison={comparison} variant={variant} />}
+      {comparison && comparison.years.length > 0 && <ComparisonTable comparison={comparison} narrowing={narrowing} today={today} variant={variant} />}
     </div>
   );
 }
 
 // Units sold each month, year beside year, with the change from the year
-// before, as the spreadsheet's Comparison table had them.
-export function ComparisonTable({ comparison, variant }: { comparison: MonthlyComparison; variant: "screen" | "print" }) {
+// before, as the spreadsheet's Comparison table had them. A month still to
+// come is blank, not 0, unless it has sales, as in the download.
+export function ComparisonTable({
+  comparison,
+  narrowing = "",
+  today,
+  variant,
+}: {
+  comparison: MonthlyComparison;
+  narrowing?: string;
+  today: string;
+  variant: "screen" | "print";
+}) {
   const { years } = comparison;
   const change = (now: number, before: number) => {
     const diff = now - before;
     return diff > 0 ? `+${diff}` : String(diff);
   };
+  const [thisYear, thisMonth] = [Number(today.slice(0, 4)), Number(today.slice(5, 7))];
+  const toCome = (year: number, month: number, units: number) => units === 0 && (year > thisYear || (year === thisYear && month > thisMonth));
   const head = ["", ...years.flatMap((year, index) => (index === 0 ? [String(year)] : [String(year), `vs ${years[index - 1]}`]))];
   const rows = [
     ...comparison.months.map(({ month, units }) => [
       MONTH_NAMES[month - 1],
-      ...years.flatMap((year, index) => (index === 0 ? [String(units[year])] : [String(units[year]), change(units[year], units[years[index - 1]])])),
+      ...years.flatMap((year, index) => {
+        const count = toCome(year, month, units[year]) ? "" : String(units[year]);
+        return index === 0 ? [count] : [count, count === "" ? "" : change(units[year], units[years[index - 1]])];
+      }),
     ]),
     ["Total", ...years.flatMap((year, index) => (index === 0 ? [String(comparison.totals[year])] : [String(comparison.totals[year]), change(comparison.totals[year], comparison.totals[years[index - 1]])]))],
   ];
-  return <Table caption="Units sold, year by year" head={head} rows={rows} variant={variant} />;
+  return <Table caption={`Units sold, year by year${narrowing ? ` · ${narrowing}` : ""}`} head={head} rows={rows} variant={variant} />;
 }

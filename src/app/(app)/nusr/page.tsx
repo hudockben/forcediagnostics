@@ -17,6 +17,7 @@ import {
   formatMoney,
   parseSaleFilters,
   perUnit,
+  shopYear,
   unitLabel,
   type SaleFilters,
 } from "@/lib/nusr-rules";
@@ -45,7 +46,7 @@ const linkButton =
 async function Nusr({ searchParams }: { searchParams: PageProps<"/nusr">["searchParams"] }) {
   const user = await requireCapability("sales.log");
   const params = await searchParams;
-  const thisYear = new Date().getUTCFullYear();
+  const thisYear = shopYear();
   const filters = parseSaleFilters(params, thisYear);
   const columns: TableColumns = params.columns === "all" ? "all" : "key";
   const [log, years, suggestions, logged] = await Promise.all([
@@ -152,7 +153,7 @@ async function Nusr({ searchParams }: { searchParams: PageProps<"/nusr">["search
         </div>
         <div className="mt-4">
           <ListSearch query={filters.query} path={path} label="Search the NUSR" placeholder="Customer, phone, VIN, model, COMS #…">
-            <Results log={log} filters={filters} columns={columns} path={path} download={download} search={search} />
+            <Results log={log} filters={filters} columns={columns} path={path} download={download} search={search} everyYear={`/nusr${filtersSearch({ ...filters, year: null, month: null }, thisYear, extra)}`} />
           </ListSearch>
         </div>
       </Card>
@@ -177,6 +178,7 @@ function Results({
   path,
   download,
   search,
+  everyYear,
 }: {
   log: SaleLog;
   filters: SaleFilters;
@@ -184,6 +186,8 @@ function Results({
   path: string;
   download: string;
   search: string;
+  // The same search and filters across every year.
+  everyYear: string;
 }) {
   const { totals } = log;
   const title = filtersTitle(filters);
@@ -220,7 +224,7 @@ function Results({
             </Link>
           </div>
           <div className="-mx-5 mt-4 overflow-x-auto border-y border-white/10 sm:-mx-6">
-            <SalesTable sales={log.items} totals={totals} columns={columns} variant="screen" />
+            <SalesTable sales={log.items} totals={totals} columns={columns} variant="screen" back={search} />
           </div>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
             <p className="font-mono text-xs text-ink-muted" data-list-range>
@@ -232,7 +236,7 @@ function Results({
       )}
       {log.total === 0 && filters.year !== null && (
         <p className="mt-2 text-sm leading-6 text-ink-muted" data-list-empty>
-          <Link href="/nusr?year=all" className="text-glow hover:underline">
+          <Link href={everyYear} className="text-glow hover:underline">
             Look through every year
           </Link>
           , or{" "}

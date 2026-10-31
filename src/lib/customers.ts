@@ -30,6 +30,7 @@ import {
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid, type ConversationStatus } from "@/lib/diagnose-rules";
 import { cutText } from "@/lib/manual-rules";
+import { allows } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/session";
 
 // The shop's customers and their vehicles, for System Admin > Customers, and
@@ -372,7 +373,13 @@ export async function removeCustomer(actor: CurrentUser, id: string): Promise<Re
         .where(eq(customerVehicles.customerId, id));
       if (diagnoses > 0) {
         return {
-          error: `${plural(diagnoses, "diagnosis is", "diagnoses are")} tied to ${customer.name}'s vehicles, so the record stays. Unlink ${diagnoses === 1 ? "it" : "them"} on the diagnosis first if this customer was added by mistake.`,
+          // Said to whoever's asking: someone who can't open Diagnose asks
+          // someone who can.
+          error: `${plural(diagnoses, "diagnosis is", "diagnoses are")} tied to ${customer.name}'s vehicles, so the record stays. ${
+            allows(actor, "diagnostics.work")
+              ? `Unlink ${diagnoses === 1 ? "it" : "them"} on the diagnosis first if this customer was added by mistake.`
+              : `If this customer was added by mistake, ask a tech or a manager to unlink ${diagnoses === 1 ? "it" : "them"} on the diagnosis first.`
+          }`,
         };
       }
       const [{ stickers }] = await tx
@@ -387,7 +394,11 @@ export async function removeCustomer(actor: CurrentUser, id: string): Promise<Re
       const [{ sales }] = await tx.select({ sales: sql<number>`count(*)::int` }).from(unitSales).where(eq(unitSales.customerId, id));
       if (sales > 0) {
         return {
-          error: `${plural(sales, "sale in the NUSR is", "sales in the NUSR are")} for ${customer.name}, so the record stays. Change the customer on ${sales === 1 ? "that sale" : "those sales"} first if this customer was added by mistake.`,
+          error: `${plural(sales, "sale in the NUSR is", "sales in the NUSR are")} for ${customer.name}, so the record stays. ${
+            allows(actor, "sales.log")
+              ? `Change the customer on ${sales === 1 ? "that sale" : "those sales"} first if this customer was added by mistake.`
+              : `If this customer was added by mistake, ask a manager or an admin to change the customer on ${sales === 1 ? "that sale" : "those sales"} in the NUSR first.`
+          }`,
         };
       }
       await tx.delete(customers).where(eq(customers.id, id));
