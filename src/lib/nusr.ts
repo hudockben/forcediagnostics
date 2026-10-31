@@ -13,11 +13,13 @@ import {
   DEFAULT_HOLDBACK_RATE_BP,
   MONEY_FIELDS,
   SALE_LABELS,
+  SALE_LIMITS,
   checkSale,
   formatDay,
   formatMoney,
   formatRate,
   monthlyComparison,
+  parseIsoDate,
   saleTotals,
   unitLabel,
   withFigures,
@@ -542,6 +544,44 @@ export async function updateSale(actor: CurrentUser, id: string, input: SaleInpu
     if (isUniqueViolation(error)) return alreadyLogged(sale);
     throw error;
   }
+}
+
+export const MAX_MARKED_PAID = 200;
+
+// Marks new units paid off together, as one floorplan payment pays off
+// several: the same Date Paid on each, and the payment's COMS # when it's
+// given. Only new units of this shop not marked paid yet are changed; each
+// is written to the Activity log as a correction, from what to what.
+export async function markPaid(
+  actor: CurrentUser,
+  input: { ids: unknown; paidOn: unknown; comsNumber: unknown },
+): Promise<{ marked: number; skipped: number } | { error: string; field?: "paidOn" | "comsNumber" }> {
+  const ids = [...new Set(Array.isArray(input.ids) ? input.ids.filter((id): id is string => typeof id === "string" && isUuid(id)) : [])];
+  if (ids.length === 0) return { error: "Tick the units the payment paid off." };
+  if (ids.length > MAX_MARKED_PAID) return { error: `That's more than ${MAX_MARKED_PAID} units at once: mark them a page at a time.` };
+  const paidOn = parseIsoDate(input.paidOn);
+  if (!paidOn) return { error: "Enter the date they were paid off.", field: "paidOn" };
+  const comsNumber = typeof input.comsNumber === "string" ? input.comsNumber.replace(/\s+/g, " ").trim() : "";
+  if (comsNumber.length > SALE_LIMITS.comsNumber) return { error: `${SALE_LABELS.comsNumber} is too long.`, field: "comsNumber" };
+  return withShop(actor.shop.id, async (tx) => {
+    const rows = await tx
+      .select(saleColumns)
+      .from(unitSales)
+      .leftJoin(users, eq(users.id, unitSales.createdByUserId))
+      .where(inArray(unitSales.id, ids))
+      .orderBy(unitSales.soldOn, unitSales.id)
+      .for("update", { of: unitSales });
+    let marked = 0;
+    for (const before of rows) {
+      if (before.condition !== "new" || before.paidOn !== null) continue;
+      const after: SaleFields = { ...(before as SaleFields), paidOn, comsNumber: comsNumber || before.comsNumber };
+      const { fields, changes } = changesOf(before as SaleFields, after);
+      await tx.update(unitSales).set({ paidOn: after.paidOn, comsNumber: after.comsNumber }).where(eq(unitSales.id, before.id));
+      await audit(tx, actor, "unit_sale.updated", before.id, { ...saleSummary(after), fields, changes });
+      marked++;
+    }
+    return { marked, skipped: ids.length - marked };
+  });
 }
 
 // Removes a sale logged by mistake; the Activity log keeps what it was.

@@ -167,6 +167,9 @@ const ALL_COLUMNS: Column[] = [
 
 export type TableColumns = "key" | "all";
 
+// The form the Not paid off list's tick boxes belong to (MarkPaidForm).
+export const MARK_PAID_FORM = "nusr-mark-paid";
+
 // Every column doesn't fit a printed page across, so printed it's four
 // tables one after another, each starting with the day and the customer.
 const PRINT_GROUPS: { title: string; keys: string[] }[] = [
@@ -191,12 +194,15 @@ export function SalesTable({
   columns,
   variant,
   back = "",
+  ticking = false,
 }: {
   sales: Sale[];
   totals: SaleTotals;
   columns: TableColumns;
   variant: "screen" | "print";
   back?: string;
+  // A tick box on each sale, for marking them paid off together.
+  ticking?: boolean;
 }) {
   if (variant === "print" && columns === "all") {
     return (
@@ -212,8 +218,25 @@ export function SalesTable({
       </div>
     );
   }
-  return <SalesTableOf sales={sales} totals={totals} shown={columns === "all" ? ALL_COLUMNS : KEY_COLUMNS} variant={variant} back={back} tableColumns={columns} />;
+  const shown = columns === "all" ? ALL_COLUMNS : KEY_COLUMNS;
+  return <SalesTableOf sales={sales} totals={totals} shown={ticking && variant === "screen" ? [TICK_COLUMN, ...shown] : shown} variant={variant} back={back} tableColumns={columns} />;
 }
+
+const TICK_COLUMN: Column = {
+  key: "tick",
+  label: "Paid off?",
+  cell: (sale) => (
+    <input
+      type="checkbox"
+      name="ids"
+      value={sale.id}
+      form={MARK_PAID_FORM}
+      aria-label={`Paid off: ${unitLabel(sale)} to ${sale.customerName}, sold ${formatDay(sale.soldOn)}`}
+      className="size-5 accent-glow"
+      data-nusr-tick
+    />
+  ),
+};
 
 function TotalsGroup({ screen, children }: { screen: boolean; children: ReactNode }) {
   return screen ? <tfoot className="border-t border-white/20">{children}</tfoot> : <tbody>{children}</tbody>;
@@ -247,7 +270,7 @@ function SalesTableOf({
         <tr>
           {shown.map((column) => (
             <th key={column.key} scope="col" className={`${headClass} ${column.numeric ? "text-right" : ""}`}>
-              {column.label}
+              {column.key === "tick" ? <span className="sr-only">{column.label}</span> : column.label}
             </th>
           ))}
         </tr>
@@ -255,9 +278,9 @@ function SalesTableOf({
       <tbody className={screen ? "divide-y divide-white/10" : undefined}>
         {sales.map((sale) => (
           <tr key={sale.id} className={screen ? "transition hover:bg-white/[0.03]" : "break-inside-avoid"} data-nusr-sale={sale.id}>
-            {shown.map((column, index) => (
-              <td key={column.key} className={`${cellClass} ${fit(column)} ${column.numeric ? "text-right tabular-nums" : ""} ${screen && index > 0 ? "text-ink" : ""}`}>
-                {screen && index === 0 ? (
+            {shown.map((column) => (
+              <td key={column.key} className={`${cellClass} ${fit(column)} ${column.numeric ? "text-right tabular-nums" : ""} ${screen && column.key !== "soldOn" ? "text-ink" : ""}`}>
+                {screen && column.key === "soldOn" ? (
                   <Link
                     href={`/nusr/${sale.id}${back ? `?back=${encodeURIComponent(back)}` : ""}`}
                     className="font-medium text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
@@ -277,9 +300,9 @@ function SalesTableOf({
           doesn't total: the totals go once, under the last sale. */}
       <TotalsGroup screen={screen}>
         <tr className={screen ? "font-semibold text-ink" : "font-semibold break-inside-avoid"} data-nusr-totals>
-          {shown.map((column, index) => (
+          {shown.map((column) => (
             <td key={column.key} className={`${cellClass} ${fit(column)} ${column.numeric ? "text-right tabular-nums" : ""} ${screen ? "" : "bg-neutral-100"}`}>
-              {index === 0 ? `TOTAL · ${plural(totals.units, "unit", "units")}` : (column.total?.(totals) ?? "")}
+              {column.key === "soldOn" ? `TOTAL · ${plural(totals.units, "unit", "units")}` : (column.total?.(totals) ?? "")}
             </td>
           ))}
         </tr>

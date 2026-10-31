@@ -17,6 +17,7 @@ import {
   formatMoney,
   parseSaleFilters,
   perUnit,
+  shopToday,
   shopYear,
   unitLabel,
   type SaleFilters,
@@ -25,8 +26,8 @@ import { requireCapability } from "@/lib/session";
 
 import { ListSearch } from "../diagnose/list-search";
 import { Pagination } from "../diagnose/pagination";
-import { ExcelLink, LogFilter, WidePage } from "./forms";
-import { SalesTable, type TableColumns } from "./sales-table";
+import { ExcelLink, LogFilter, MarkPaidForm, WidePage } from "./forms";
+import { MARK_PAID_FORM, SalesTable, type TableColumns } from "./sales-table";
 
 export const metadata: Metadata = { title: "NUSR" };
 
@@ -88,6 +89,14 @@ async function Nusr({ searchParams }: { searchParams: PageProps<"/nusr">["search
         </Notice>
       )}
       {typeof params.removed === "string" && <Notice>Removed the sale of {params.removed} from the NUSR.</Notice>}
+      {typeof params.paid === "string" && /^\d+$/.test(params.paid) && (
+        <Notice>
+          Marked {plural(Number(params.paid), "unit", "units")} paid off.
+          {typeof params.unchanged === "string" && /^\d+$/.test(params.unchanged) && Number(params.unchanged) > 0
+            ? ` ${plural(Number(params.unchanged), "ticked unit was", "ticked units were")} left as they were: used, or paid off already.`
+            : ""}
+        </Notice>
+      )}
 
       <Card>
         <div className="flex flex-wrap items-center gap-3" data-nusr-filters>
@@ -153,7 +162,16 @@ async function Nusr({ searchParams }: { searchParams: PageProps<"/nusr">["search
         </div>
         <div className="mt-4">
           <ListSearch query={filters.query} path={path} label="Search the NUSR" placeholder="Customer, phone, VIN, model, COMS #…">
-            <Results log={log} filters={filters} columns={columns} path={path} download={download} search={search} everyYear={`/nusr${filtersSearch({ ...filters, year: null, month: null }, thisYear, extra)}`} />
+            <Results
+              log={log}
+              filters={filters}
+              columns={columns}
+              path={path}
+              download={download}
+              search={search}
+              everyYear={`/nusr${filtersSearch({ ...filters, year: null, month: null }, thisYear, extra)}`}
+              comsNumbers={suggestions.comsNumbers}
+            />
           </ListSearch>
         </div>
       </Card>
@@ -179,6 +197,7 @@ function Results({
   download,
   search,
   everyYear,
+  comsNumbers,
 }: {
   log: SaleLog;
   filters: SaleFilters;
@@ -188,7 +207,10 @@ function Results({
   search: string;
   // The same search and filters across every year.
   everyYear: string;
+  comsNumbers: string[];
 }) {
+  // The Not paid off list: its units can be ticked and marked paid off together.
+  const ticking = filters.status === "unpaid" && log.items.length > 0;
   const { totals } = log;
   const title = filtersTitle(filters);
   const cut = listSearchIsCut(filters.query) ? ` (only its first ${MAX_LIST_WORDS} words are searched)` : "";
@@ -223,8 +245,9 @@ function Results({
               {columns === "all" ? "Show the key columns" : "Show every column"}
             </Link>
           </div>
+          {ticking && <MarkPaidForm formId={MARK_PAID_FORM} back={search} today={shopToday()} comsNumbers={comsNumbers} />}
           <div className="-mx-5 mt-4 overflow-x-auto border-y border-white/10 sm:-mx-6">
-            <SalesTable sales={log.items} totals={totals} columns={columns} variant="screen" back={search} />
+            <SalesTable sales={log.items} totals={totals} columns={columns} variant="screen" back={log.page > 1 ? `${search}${search ? "&" : ""}page=${log.page}` : search} ticking={ticking} />
           </div>
           <div className="mt-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
             <p className="font-mono text-xs text-ink-muted" data-list-range>

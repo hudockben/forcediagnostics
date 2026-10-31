@@ -25,6 +25,7 @@ import {
   getSale,
   listSales,
   logSale,
+  markPaid,
   removeSale,
   saleSuggestions,
   salesForCustomer,
@@ -548,6 +549,39 @@ describe("the log", () => {
     const used = await unitsByMonth(shop.shop.id, filters);
     assert.deepEqual([used.totals[2026], used.months[9].units[2026]], [1, 1]);
     assert.equal((await unitsByMonth(shop.shop.id)).totals[2026], 3);
+  });
+
+  test("units paid off together: one Date Paid and COMS #, new unpaid units of this shop only, each in the Activity log", async () => {
+    const shop = await createManager(`np${suffix}`);
+    const first = await log(shop, { soldOn: "2026-10-01", customerName: "Unit One" });
+    const second = await log(shop, { soldOn: "2026-10-03", customerName: "Unit Two", comsNumber: "TST0999" });
+    const used = await log(shop, { soldOn: "2026-10-04", customerName: "A Trade", condition: "used", unitType: "trade" });
+    const paid = await log(shop, { soldOn: "2026-10-05", customerName: "Paid Already", paidOn: "2026-10-06", comsNumber: "TST1000" });
+    const theirs = await log(other, { soldOn: "2026-10-06", customerName: "Kept Elsewhere" });
+    const result = await markPaid(shop, { ids: [first, second, used, paid, theirs, "not an id", first], paidOn: "2026-10-30", comsNumber: " TST3001 " });
+    assert.deepEqual(result, { marked: 2, skipped: 3 });
+    const after = await Promise.all([first, second, used, paid].map((id) => getSale(shop.shop.id, id)));
+    assert.deepEqual(
+      after.map((sale) => [sale?.paidOn, sale?.comsNumber]),
+      [
+        ["2026-10-30", "TST3001"],
+        ["2026-10-30", "TST3001"],
+        [null, null],
+        ["2026-10-06", "TST1000"],
+      ],
+    );
+    assert.equal((await getSale(other.shop.id, theirs))?.paidOn, null);
+    const [entry] = await systemDb.select().from(auditLog).where(and(eq(auditLog.targetId, second), eq(auditLog.action, "unit_sale.updated")));
+    const details = entry.details as { fields: string[]; changes: Record<string, unknown> };
+    assert.deepEqual(details.fields.sort(), ["comsNumber", "paidOn"]);
+    assert.deepEqual(details.changes.paidOn, { from: null, to: "2026-10-30" });
+    assert.deepEqual(details.changes.comsNumber, { from: "TST0999", to: "TST3001" });
+    // No COMS # given: the one a unit has stays.
+    const third = await log(shop, { soldOn: "2026-10-07", customerName: "Unit Three", comsNumber: "TST0777" });
+    assert.deepEqual(await markPaid(shop, { ids: [third], paidOn: "2026-10-31", comsNumber: "" }), { marked: 1, skipped: 0 });
+    assert.equal((await getSale(shop.shop.id, third))?.comsNumber, "TST0777");
+    assert.deepEqual(await markPaid(shop, { ids: [], paidOn: "2026-10-31", comsNumber: "" }), { error: "Tick the units the payment paid off." });
+    assert.deepEqual(await markPaid(shop, { ids: [first], paidOn: "10/31/2026", comsNumber: "" }), { error: "Enter the date they were paid off.", field: "paidOn" });
   });
 
   test("app_user can't move a sale to another shop, or change who logged it", async () => {

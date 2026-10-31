@@ -8,6 +8,7 @@ import {
   customerForSale,
   decodeSaleVin,
   logSale,
+  markPaid,
   removeSale,
   searchSaleBuyers,
   updateSale,
@@ -92,6 +93,22 @@ export async function removeSaleAction(_previous: SaleFormState, form: FormData)
       redirect(`/nusr${back}${back ? "&" : "?"}removed=${encodeURIComponent(result.label)}`, RedirectType.replace);
     },
     { error: "Couldn't remove that. Check the connection and try again." },
+  );
+}
+
+// Marks the ticked units paid off together (one floorplan payment), then
+// shows the log again, saying how many.
+export async function markPaidAction(_previous: SaleFormState, form: FormData): Promise<SaleFormState> {
+  return attempt<SaleFormState>(
+    "mark the units paid off",
+    async () => {
+      const user = await requireCapability("sales.log");
+      const result = await markPaid(user, { ids: form.getAll("ids"), paidOn: field(form, "paidOn"), comsNumber: field(form, "comsNumber") });
+      if ("error" in result) return { error: result.error, field: result.field };
+      const back = logSearch(field(form, "back"), shopYear());
+      redirect(`/nusr${back}${back ? "&" : "?"}paid=${result.marked}${result.skipped ? `&unchanged=${result.skipped}` : ""}`, RedirectType.replace);
+    },
+    { error: "Couldn't mark them paid off. Check the connection and try again." },
   );
 }
 

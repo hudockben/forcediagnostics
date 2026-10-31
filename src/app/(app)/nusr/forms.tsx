@@ -18,7 +18,7 @@ import {
 } from "react";
 
 import { Notice } from "@/components/app/ui";
-import { inputBaseClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
+import { inputBaseClass, inputClass, labelClass, primaryButtonClass, primaryLinkClass, secondaryButtonClass } from "@/components/hud";
 import type { BuyerChoice, SaleCustomer, VinDecode } from "@/lib/nusr";
 import {
   CATEGORIES,
@@ -46,7 +46,7 @@ import {
 import type { CustomerChoice } from "@/lib/sticker-log";
 import { useFormAction } from "@/lib/use-form-action";
 
-import { customerForSaleAction, decodeVinAction, removeSaleAction, saveSaleAction, searchSaleCustomersAction, type SaleFormState } from "./actions";
+import { customerForSaleAction, decodeVinAction, markPaidAction, removeSaleAction, saveSaleAction, searchSaleCustomersAction, type SaleFormState } from "./actions";
 
 // NUSR's forms: a sale (new or being corrected), removing one, the log's
 // filters, and the wide page and print button the log and printout use.
@@ -135,6 +135,93 @@ export function ExcelLink({ search, className }: { search: string; className: st
     <a href={`/nusr/export${query ? `?${query}` : ""}`} className={className} data-nusr-export>
       Download Excel
     </a>
+  );
+}
+
+// --- Paid off together ----------------------------------------------------------------
+
+// The Not paid off list's units, ticked, marked paid off together: one
+// floorplan payment pays off several, so its Date Paid and COMS # are
+// typed once. The tick boxes are in the table (their form attribute is
+// formId); the server checks each again.
+const tickBoxes = (formId: string) => [...document.querySelectorAll<HTMLInputElement>(`input[name="ids"][form="${formId}"]`)];
+
+export function MarkPaidForm({ formId, back, today, comsNumbers }: { formId: string; back: string; today: string; comsNumbers: string[] }) {
+  const { state, pending, formProps } = useFormAction<SaleFormState>(markPaidAction, {});
+  const [ticked, setTicked] = useState(0);
+  const [boxCount, setBoxCount] = useState(0);
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    const count = () => {
+      const boxes = tickBoxes(formId);
+      setTicked(boxes.filter((box) => box.checked).length);
+      setBoxCount(boxes.length);
+    };
+    count();
+    document.addEventListener("change", count);
+    return () => document.removeEventListener("change", count);
+  }, [formId]);
+  const [seen, setSeen] = useState(state);
+  if (seen !== state) {
+    setSeen(state);
+    setProblem(null);
+  }
+  const all = ticked > 0 && ticked === boxCount;
+  return (
+    <form
+      id={formId}
+      {...formProps}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (pending) return;
+        if (ticked === 0) {
+          setProblem("Tick the units the payment paid off.");
+          return;
+        }
+        formProps.onSubmit(event);
+      }}
+      className="mt-4 rounded-xl border border-glow/30 bg-glow/5 p-4"
+      data-nusr-mark-paid
+    >
+      <input type="hidden" name="back" value={back} />
+      <p className="text-sm text-ink">Paid off together: tick the units one payment paid off, then enter its date and COMS # once.</p>
+      <div className="mt-3 flex flex-wrap items-end gap-3">
+        <div>
+          <label htmlFor={`${formId}-paidOn`} className={labelClass}>
+            {SALE_LABELS.paidOn}
+          </label>
+          <input id={`${formId}-paidOn`} type="date" name="paidOn" defaultValue={today} required className={`${inputClass} w-44`} />
+        </div>
+        <div>
+          <label htmlFor={`${formId}-coms`} className={labelClass}>
+            {SALE_LABELS.comsNumber}
+          </label>
+          <input id={`${formId}-coms`} name="comsNumber" list={`${formId}-coms-list`} maxLength={SALE_LIMITS.comsNumber} autoComplete="off" spellCheck={false} className={`${inputClass} w-44`} />
+          <datalist id={`${formId}-coms-list`}>
+            {comsNumbers.map((number) => (
+              <option key={number} value={number} />
+            ))}
+          </datalist>
+        </div>
+        <button type="submit" aria-disabled={pending || ticked === 0} className={`${primaryLinkClass} aria-disabled:opacity-60`} data-nusr-mark-paid-submit>
+          {pending ? "Marking…" : ticked === 0 ? "Mark paid off" : `Mark ${ticked} paid off`}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            const boxes = tickBoxes(formId);
+            for (const box of boxes) box.checked = !all;
+            setTicked(all ? 0 : boxes.length);
+          }}
+          className="min-h-11 rounded-lg px-3 text-sm font-medium text-glow/90 hover:text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+        >
+          {all ? "Untick all" : "Tick all on this page"}
+        </button>
+      </div>
+      <div className="mt-3">
+        <Feedback state={problem ? { error: problem } : state} />
+      </div>
+    </form>
   );
 }
 
