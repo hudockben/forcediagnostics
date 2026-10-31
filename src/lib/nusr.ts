@@ -186,20 +186,18 @@ export const MAX_LOG_ROWS = 20_000;
 // Every sale the filters find, the newest first, or the oldest first as
 // the spreadsheet read (the download and the printout).
 export async function findSales(shopId: string, filters: SaleFilters, order: "newest" | "oldest" = "newest"): Promise<Sale[]> {
+  // The newest MAX_LOG_ROWS either way, so a cap would leave out the oldest.
   const rows = await withShop(shopId, (tx) =>
     tx
       .select(saleColumns)
       .from(unitSales)
       .leftJoin(users, eq(users.id, unitSales.createdByUserId))
       .where(saleWhere(filters))
-      .orderBy(
-        ...(order === "newest"
-          ? [desc(unitSales.soldOn), desc(unitSales.createdAt), desc(unitSales.id)]
-          : [unitSales.soldOn, unitSales.createdAt, unitSales.id]),
-      )
+      .orderBy(desc(unitSales.soldOn), desc(unitSales.createdAt), desc(unitSales.id))
       .limit(MAX_LOG_ROWS),
   );
-  return rows.map(toSale);
+  const sales = rows.map(toSale);
+  return order === "newest" ? sales : sales.reverse();
 }
 
 export const LOG_PAGE_SIZE = 50;

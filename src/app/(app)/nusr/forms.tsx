@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useLayoutEffect, useRef, useState, type InputHTMLAttributes, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type InputHTMLAttributes, type ReactNode, type RefObject } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputBaseClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
@@ -84,6 +84,27 @@ export function PrintButton() {
     >
       Print or save as PDF
     </button>
+  );
+}
+
+const noSubscription = () => () => {};
+
+// Download Excel, for the log as filtered (its search, "?year=2025…"), with
+// the day in the file's name and its "Downloaded" line in the viewer's own
+// time zone, which only the browser knows.
+export function ExcelLink({ search, className }: { search: string; className: string }) {
+  const timeZone = useSyncExternalStore(
+    noSubscription,
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone,
+    () => "",
+  );
+  const params = new URLSearchParams(search);
+  if (timeZone) params.set("tz", timeZone);
+  const query = params.toString();
+  return (
+    <a href={`/nusr/export${query ? `?${query}` : ""}`} className={className} data-nusr-export>
+      Download Excel
+    </a>
   );
 }
 

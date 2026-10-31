@@ -24,7 +24,7 @@ import { requireCapability } from "@/lib/session";
 
 import { ListSearch } from "../diagnose/list-search";
 import { Pagination } from "../diagnose/pagination";
-import { LogFilter, WidePage } from "./forms";
+import { ExcelLink, LogFilter, WidePage } from "./forms";
 import { SalesTable, type TableColumns } from "./sales-table";
 
 export const metadata: Metadata = { title: "NUSR" };
@@ -211,9 +211,7 @@ function Results({
             <Link href={`/nusr/summary${download}`} className={linkButton} data-nusr-summary-link>
               Summary
             </Link>
-            <a href={`/nusr/export${download}`} className={linkButton} data-nusr-export>
-              Download Excel
-            </a>
+            <ExcelLink search={download} className={linkButton} />
             <Link href={`/nusr/print${download}${columns === "all" ? `${download ? "&" : "?"}columns=all` : ""}`} className={linkButton} data-nusr-print>
               Print or PDF
             </Link>
