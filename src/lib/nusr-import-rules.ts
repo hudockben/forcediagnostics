@@ -21,6 +21,7 @@ import {
   MIN_UNIT_YEAR,
   SALE_LABELS,
   SALE_LIMITS,
+  UNIT_TYPES,
   UNIT_TYPE_LABELS,
   checkSale,
   formatMoney,
@@ -29,6 +30,7 @@ import {
   moneyInput,
   parseCondition,
   parseMoney,
+  parseRate,
   rateInput,
   saleFigures,
   type Cents,
@@ -90,6 +92,12 @@ const HEADINGS = {
   totalBonus: ["totalbonus"],
   holdbackBonus: ["holdbackbonus"],
   salesBonus: ["salesbonus"],
+  // The NUSR tab's own columns, on a workbook its Download Excel made: they
+  // say outright what the import otherwise works out from the rest.
+  unitType: ["type", "typeofdeal", "dealtype"],
+  holdbackRate: ["holdbackpct", "holdbackrate"],
+  bonusRate: ["bonuspct", "bonusrate"],
+  bonusAdjustment: ["bonusadjustment"],
 } satisfies Record<string, string[]>;
 type Column = keyof typeof HEADINGS;
 
@@ -159,17 +167,17 @@ const COMPARISON = /^comparison$/i;
 const DATE_LIKE = /^\d{1,4}(?:[/.-]+\d{1,4}){1,3}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/;
 
 // What a row of an NUSR sheet is, by the sheet's own pattern: a sale has a
-// date (a date cell, or typed like one), a salesman (not a TOTAL or AVG
-// label) and a customer. Anything else is a spacer, a year divider, a row
-// of formulas waiting for a sale, or a stray number. "end" is the first
-// TOTAL, AVG or Comparison row, under the last sale: nothing below it is
-// read.
+// date (a date cell, or typed like one) and a customer, with or without a
+// salesman (the NUSR tab logs sales without one, and the shop's own sheets
+// have no sale missing one, so a forgotten one never drops a sale).
+// Anything else is a spacer, a year divider, a row of formulas waiting for
+// a sale, or a stray number. "end" is the first TOTAL, AVG or Comparison
+// row, under the last sale: nothing below it is read.
 function rowKind(cells: readonly string[], layout: Layout): "sale" | "end" | "other" {
   const salesman = cellAt(cells, layout.columns.salesperson);
   const customer = cellAt(cells, layout.columns.customerName);
   if (LABEL_ROW.test(salesman) || COMPARISON.test(salesman) || COMPARISON.test(customer)) return "end";
-  const hasSalesman = layout.columns.salesperson === undefined || salesman !== "";
-  return DATE_LIKE.test(cellAt(cells, layout.columns.soldOn)) && hasSalesman && customer !== "" ? "sale" : "other";
+  return DATE_LIKE.test(cellAt(cells, layout.columns.soldOn)) && customer !== "" ? "sale" : "other";
 }
 
 // The sale rows of a sheet (their index in rows), and where the TOTAL rows
@@ -687,8 +695,17 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
   const conditionTyped = value("condition");
   let condition = parseCondition(conditionTyped);
   const trailer = category === "Trailer" || guessCategory(model) === "Trailer";
-  const unitType: UnitType = marker ?? (msrp !== null ? (trailer ? "trailer" : "whole_good") : guessUnitType({ condition, category, model }));
-  if (!marker && msrp === null) note("unit", `No MSRP, and nothing to say what kind of deal it is: taken as ${UNIT_TYPE_LABELS[unitType].toLowerCase()}.`);
+  // The kind of deal, as the NUSR tab's Type column says it ("New whole
+  // good", "Trade"), or else from the MSRP column and the unit.
+  const typeTyped = oneLine(value("unitType"));
+  const typeGiven = UNIT_TYPES.find((type) => [type, UNIT_TYPE_LABELS[type]].some((name) => name.toLowerCase() === typeTyped.toLowerCase())) ?? null;
+  if (typeTyped && !typeGiven) {
+    moved.push(`${heading("unitType")}: ${typeTyped}`);
+    note("unit", `${heading("unitType")} ${quoted(typeTyped)} isn't a kind of deal the NUSR keeps: worked out from the MSRP column instead.`);
+  }
+  const unitType: UnitType =
+    typeGiven ?? marker ?? (msrp !== null ? (trailer ? "trailer" : "whole_good") : guessUnitType({ condition, category, model }));
+  if (!typeGiven && !marker && msrp === null) note("unit", `No MSRP, and nothing to say what kind of deal it is: taken as ${UNIT_TYPE_LABELS[unitType].toLowerCase()}.`);
   if (unitType === "trailer") category ??= "Trailer";
   if (unitType === "trade" && condition === "new") {
     condition = "used";
@@ -708,12 +725,26 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
 
   const vin = readVin(value("vin"), note, moved);
 
+  // A rate the NUSR tab's own columns give: a share as Excel keeps a
+  // percentage (0.04), a percentage (4, "4%"), or null when there's none or
+  // it can't be one.
+  const givenRate = (column: Column) => {
+    const typed = value(column);
+    if (!typed) return null;
+    const share = cachedNumber(typed);
+    const read = share === null ? parseRate(typed) : { bp: Math.round(share >= 1 ? share * 100 : share * 10_000) };
+    if ("bp" in read && read.bp !== null && read.bp >= 0 && read.bp <= MAX_RATE_BP) return read.bp;
+    note("figures", `${heading(column)} ${quoted(typed)} isn't a rate: worked out from the sheet's figures instead.`);
+    return null;
+  };
+
   // The holdback's rate: the sheet's Holdback over the MSRP, to the basis
   // point (4%, 5%, 7% as the years went), none without an MSRP.
   const holdbackTyped = value("holdback");
   const holdback = cachedNumber(holdbackTyped);
-  let holdbackRateBp = 0;
-  if (msrp !== null && msrp !== 0) {
+  const holdbackGiven = givenRate("holdbackRate");
+  let holdbackRateBp = holdbackGiven ?? 0;
+  if (holdbackGiven === null && msrp !== null && msrp !== 0) {
     if (holdback !== null && holdback !== 0) {
       const bp = Math.round((holdback * 100 * 10_000) / msrp);
       if (bp >= 0 && bp <= MAX_RATE_BP) holdbackRateBp = bp;
@@ -729,18 +760,27 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
   // where the sheet zeroed a loss deal's bonus).
   const totalProfit = cachedNumber(value("totalProfit"));
   const totalBonus = cachedNumber(value("totalBonus"));
-  let bonusRateBp = DEFAULT_BONUS_RATE_BP;
-  if (totalProfit !== null && Math.abs(totalProfit) >= 1 && totalBonus !== null) {
+  const bonusGiven = givenRate("bonusRate");
+  let bonusRateBp = bonusGiven ?? DEFAULT_BONUS_RATE_BP;
+  if (bonusGiven === null && totalProfit !== null && Math.abs(totalProfit) >= 1 && totalBonus !== null) {
     const bp = Math.round((totalBonus / totalProfit) * 10_000);
     if (bp >= 0 && bp <= MAX_RATE_BP) bonusRateBp = bp;
     else note("figures", `${heading("totalBonus")} isn't a share of ${heading("totalProfit")} on the sheet: worked out at the usual ${rateInput(DEFAULT_BONUS_RATE_BP)}%.`);
   }
   // A Sales Bonus the sheet changed by hand (TOTAL BONUS less Holdback
   // Bonus, less $100, say) keeps the change as the sale's adjustment.
+  // The NUSR tab's own Bonus adjustment column says it outright.
   const holdbackBonus = cachedNumber(value("holdbackBonus"));
   const salesBonus = cachedNumber(value("salesBonus"));
-  let bonusAdjustment: Cents | null = null;
-  if (totalBonus !== null && holdbackBonus !== null && salesBonus !== null) {
+  const adjustmentColumn = layout.columns.bonusAdjustment !== undefined;
+  const adjustmentTyped = value("bonusAdjustment");
+  const adjustmentRead = parseMoney(adjustmentTyped);
+  if (adjustmentTyped && "error" in adjustmentRead) {
+    note("figures", `${heading("bonusAdjustment")} ${quoted(adjustmentTyped)} isn't an amount: worked out from the sheet's bonuses instead.`);
+  }
+  const adjustmentGiven = adjustmentColumn && !("error" in adjustmentRead);
+  let bonusAdjustment: Cents | null = adjustmentGiven && "cents" in adjustmentRead ? adjustmentRead.cents : null;
+  if (!adjustmentGiven && totalBonus !== null && holdbackBonus !== null && salesBonus !== null) {
     const change = Math.round((salesBonus - (totalBonus - holdbackBonus)) * 100);
     if (Math.abs(change) > 1) {
       bonusAdjustment = change;
@@ -814,9 +854,11 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
   if (paidOn) far("paidOn", paidOn, 730, 90);
   const comsNumber = NOTHING.test(comsTyped) ? "" : oneLine(comsTyped);
 
-  // The Notes column, and text in any column without a heading (past the
-  // Date: column A has the month's running count).
-  sheetNotes.unshift(...(value("notes") ? [oneLine(value("notes"))] : []));
+  // The Notes column, its lines kept as typed (Alt+Enter in Excel), and
+  // text in any column without a heading (past the Date: column A has the
+  // month's running count).
+  const notesLines = value("notes").split(/\r\n?|\n/).map(oneLine).filter(Boolean).join("\n");
+  sheetNotes.unshift(...(notesLines ? [notesLines] : []));
   const dateColumn = layout.columns.soldOn ?? 0;
   cells.forEach((cell, column) => {
     if (column <= dateColumn || column === layout.besideRebate || (layout.headings[column] ?? "").trim()) return;

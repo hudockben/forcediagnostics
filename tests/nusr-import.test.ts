@@ -21,8 +21,9 @@ import { and, eq, sql } from "drizzle-orm";
 import { systemDb } from "../src/db";
 import { auditLog, customers, shops, unitSales, users } from "../src/db/schema";
 import { createCustomer } from "../src/lib/customers";
-import type { Sheet } from "../src/lib/customer-import-rules";
+import { readSpreadsheet, type Sheet } from "../src/lib/customer-import-rules";
 import { logSale } from "../src/lib/nusr";
+import { nusrWorkbook } from "../src/lib/nusr-export";
 import { importSales } from "../src/lib/nusr-import";
 import {
   MAX_NUSR_IMPORT_BATCH,
@@ -36,8 +37,9 @@ import {
   type NusrImportPlan,
   type PlannedSale,
 } from "../src/lib/nusr-import-rules";
-import { SALE_LABELS, checkSale, saleFigures, type SaleFields } from "../src/lib/nusr-rules";
+import { SALE_LABELS, checkSale, monthlyComparison, saleFigures, withFigures, type SaleFields } from "../src/lib/nusr-rules";
 import type { CurrentUser } from "../src/lib/session";
+import { writeXlsx } from "../src/lib/xlsx-write";
 import { vinCheckDigit } from "../src/lib/vin";
 
 // The NUSR's headings, A to AM, as every sheet has them (column A has none).
@@ -672,6 +674,106 @@ describe("a big workbook", () => {
     const result = planNusrImport(workbook, workbook.sheets.map((entry) => entry.index));
     assert.ok(performance.now() - started < 300, `planned in ${Math.round(performance.now() - started)} ms`);
     assert.equal(result.sales.length + result.sheets.reduce((sum, entry) => sum + entry.duplicates, 0), 5200 + 4400);
+  });
+});
+
+describe("the NUSR tab's own Download Excel", () => {
+  test("comes back in as it went out: every field of every sale, with no notes", async () => {
+    const blank: SaleFields = {
+      soldOn: "2026-01-02",
+      salesperson: null,
+      customerName: "",
+      customerAddress: null,
+      customerPhone: null,
+      unitYear: null,
+      unitModel: null,
+      condition: "new",
+      unitType: "whole_good",
+      vin: null,
+      category: null,
+      notes: null,
+      financeCompany: null,
+      fundingReceivedOn: null,
+      paidOn: null,
+      comsNumber: null,
+      msrp: null,
+      salesPrice: null,
+      dealerCost: null,
+      unitLabor: null,
+      rebate: null,
+      accPrice: null,
+      accCost: null,
+      accLabor: null,
+      escPrice: null,
+      escCost: null,
+      rewards: null,
+      amountFinanced: null,
+      downPayment: null,
+      bonusAdjustment: null,
+      holdbackRateBp: 400,
+      bonusRateBp: 1000,
+    };
+    const sales: SaleFields[] = [
+      {
+        ...blank,
+        soldOn: "2026-03-04",
+        salesperson: "Sam Ortega",
+        customerName: "Casey Lindqvist",
+        customerAddress: "301 Birch Hill Rd, Stonebridge, PA",
+        customerPhone: "(724) 555-0118",
+        unitYear: 2026,
+        unitModel: "Rngr 570 NS",
+        vin: "3NSMAU576TE100318",
+        category: "UTV",
+        notes: "Line one\nline two",
+        financeCompany: "Lakeside Credit",
+        fundingReceivedOn: "2026-03-10",
+        paidOn: "2026-03-12",
+        comsNumber: "TST1001",
+        msrp: 1899900,
+        salesPrice: 1805125,
+        dealerCost: 1765000,
+        unitLabor: 5000,
+        rebate: 50000,
+        accPrice: 74000,
+        accCost: 50250,
+        accLabor: 7500,
+        escPrice: 89900,
+        escCost: 43000,
+        rewards: 2500,
+        amountFinanced: 1444100,
+        downPayment: 150000,
+        holdbackRateBp: 475,
+        bonusRateBp: 1250,
+      },
+      // A trade that had an MSRP typed: only the Type column says it's a trade.
+      { ...blank, soldOn: "2026-03-05", customerName: "Terry Voss", condition: "used", unitType: "trade", unitModel: "Spmn 570 EPS", category: "ATV", msrp: 979900, salesPrice: 836700, dealerCost: 746700, holdbackRateBp: 0 },
+      { ...blank, soldOn: "2026-03-06", customerName: "Maplewick Orchards", unitType: "trailer", unitModel: "6x12 Trailer", category: "Trailer", salesPrice: 245000, dealerCost: 198000, holdbackRateBp: 0 },
+      { ...blank, soldOn: "2026-03-07", customerName: "Avery Quinlan", unitType: "contest", unitModel: "RZR XP 1000", category: "RZR", salesPrice: 2752625, dealerCost: 2582000, holdbackRateBp: 0, bonusRateBp: 0 },
+      { ...blank, soldOn: "2026-03-08", customerName: "Jamie Okafor", unitType: "free", unitModel: "Outlaw 70", category: "ATV", holdbackRateBp: 0 },
+      // A loss, and a Sales Bonus taken down by hand.
+      { ...blank, soldOn: "2026-03-09", customerName: "Robin Achterberg", unitModel: "General XP 1000", category: "UTV", msrp: 2799900, salesPrice: 2500000, dealerCost: 2582000, bonusAdjustment: -5000 },
+      // No model, no category, no salesman: still a sale.
+      { ...blank, soldOn: "2026-03-10", customerName: "Lee Brandvold", salesPrice: 100000, dealerCost: 90000 },
+    ];
+    const file = writeXlsx(nusrWorkbook(sales.map(withFigures), { title: "2026", comparison: monthlyComparison([]), generatedAt: new Date("2026-03-20T12:00:00Z") }));
+    const read = await readSpreadsheet("NUSR 2026.xlsx", file);
+    assert.ok("sheets" in read, JSON.stringify(read));
+    const book = readNusrWorkbook(read.sheets, { today: "2026-03-20" });
+    assert.deepEqual(book.sheets.map((entry) => [entry.name, entry.sales, entry.chosen]), [["NUSR", sales.length, true]]);
+    const plan = planNusrImport(book, book.sheets.map((entry) => entry.index));
+    assert.deepEqual(plan.notes, []);
+    assert.equal(plan.sales.length, sales.length);
+    for (const original of sales) {
+      const planned = plan.sales.find((entry) => entry.fields.customerName === original.customerName);
+      assert.ok(planned, original.customerName);
+      assert.deepEqual(checkSale(planned.fields), { sale: original }, original.customerName);
+    }
+    // A blank category is filled in from the model, as the sale form does.
+    const read2 = await readSpreadsheet("NUSR 2026.xlsx", writeXlsx(nusrWorkbook([withFigures({ ...sales[1], category: null })], { title: "2026", comparison: monthlyComparison([]), generatedAt: new Date("2026-03-20T12:00:00Z") })));
+    assert.ok("sheets" in read2);
+    const again = planNusrImport(readNusrWorkbook(read2.sheets, { today: "2026-03-20" }), [0]);
+    assert.equal(again.sales[0]?.fields.category, "ATV");
   });
 });
 
