@@ -7,6 +7,8 @@ import { LocalTime } from "@/components/app/local-time";
 import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { addressLines } from "@/lib/customer-rules";
 import { getCustomer, type VehicleRecord } from "@/lib/customers";
+import { salesForCustomer, type Sale } from "@/lib/nusr";
+import { formatDay, formatMoney, unitLabel } from "@/lib/nusr-rules";
 import { allows, requireCapability } from "@/lib/session";
 import { stickersForCustomer, type StickerEntry } from "@/lib/sticker-log";
 
@@ -42,7 +44,14 @@ async function Customer({
   const user = await requireCapability("repair_orders.intake");
   const [{ id }, query] = await Promise.all([params, searchParams]);
   // Only finds customers in the user's own shop.
-  const [detail, stickers] = await Promise.all([getCustomer(user.shop.id, id), stickersForCustomer(user.shop.id, id)]);
+  // Their sales in the NUSR only for those who can open it: it has the
+  // shop's costs and profits.
+  const canSeeSales = allows(user, "sales.log");
+  const [detail, stickers, sales] = await Promise.all([
+    getCustomer(user.shop.id, id),
+    stickersForCustomer(user.shop.id, id),
+    canSeeSales ? salesForCustomer(user.shop.id, id) : Promise.resolve(null),
+  ]);
   if (!detail) notFound();
   const { customer, vehicles } = detail;
   const canDiagnose = allows(user, "diagnostics.work");
@@ -109,13 +118,15 @@ async function Customer({
 
       <Stickers customerId={customer.id} stickers={stickers} />
 
+      {sales && <Sales customerId={customer.id} sales={sales} />}
+
       <Card title="Details">
         <CustomerForm customer={customer} />
       </Card>
 
       <Card
         title="Remove customer"
-        description="For a record added by mistake. A customer whose vehicles have diagnoses stays: those are the shop's records."
+        description="For a record added by mistake. A customer whose vehicles have diagnoses, or with stickers or sales logged, stays: those are the shop's records."
       >
         <RemoveCustomerForm customer={customer} />
       </Card>
@@ -167,6 +178,42 @@ function VehicleBlock({ customerId, vehicle, canDiagnose }: { customerId: string
       </div>
       <DiagnosisHistory diagnoses={vehicle.diagnoses} canOpen={canDiagnose} />
     </li>
+  );
+}
+
+// What they've bought, from the NUSR, the newest first.
+function Sales({ customerId, sales }: { customerId: string; sales: Sale[] }) {
+  return (
+    <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" aria-labelledby="sales-heading" data-customer-sales>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="sales-heading" className="text-base font-semibold text-ink">
+          Sales (NUSR){sales.length > 0 && <span className="ml-2 font-mono text-sm font-normal text-ink-muted">{sales.length}</span>}
+        </h2>
+        <Link href={`/nusr/new?customer=${customerId}`} className={smallLinkClass}>
+          Log a sale
+        </Link>
+      </div>
+      {sales.length === 0 ? (
+        <p className="mt-3 text-sm text-ink-muted">None logged.</p>
+      ) : (
+        <ul className="mt-4 divide-y divide-white/10 rounded-lg border border-white/10">
+          {sales.map((sale) => (
+            <li key={sale.id}>
+              <Link
+                href={`/nusr/${sale.id}`}
+                className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset"
+              >
+                <span className="min-w-0 text-sm break-words text-ink">{unitLabel(sale)}</span>
+                <span className="flex items-center gap-3 text-xs text-ink-muted tabular-nums">
+                  <span>{formatDay(sale.soldOn)}</span>
+                  {sale.salesPrice !== null && <span>{formatMoney(sale.salesPrice)}</span>}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

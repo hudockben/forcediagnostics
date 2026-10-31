@@ -37,6 +37,7 @@ import {
   type TurnUsage,
 } from "../lib/diagnose-rules";
 import { PAGE_FACTS_STATUSES, type PageFacts, type PageFactsStatus } from "../lib/manual-facts-rules";
+import { UNIT_CONDITIONS, UNIT_TYPES, type UnitCondition, type UnitType } from "../lib/nusr-rules";
 import { PLATE_CLASSES, type PlateClass } from "../lib/sticker-log-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
@@ -919,6 +920,100 @@ export const suppliers = pgTable(
     // Which columns can change is set by the grant in
     // drizzle/0033_suppliers_grants.sql.
     pgPolicy("suppliers_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// NUSR, the unit sales log (the NUSR tab, src/lib/nusr.ts): one row per unit
+// sold, as the shop's NUSR spreadsheet kept them. Only what's typed is
+// stored; the profits, holdback and bonuses are worked out from it
+// (saleFigures in src/lib/nusr-rules.ts). Amounts are whole cents, rates
+// basis points. The customer's details are kept as they were at the sale;
+// customer_id ties it to their record when they're on file, and a customer
+// with sales logged can't be removed: the log is the shop's record of them.
+export const unitSales = pgTable(
+  "unit_sales",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    soldOn: date("sold_on").notNull(),
+    salesperson: text("salesperson"),
+    customerId: uuid("customer_id"),
+    customerName: text("customer_name").notNull(),
+    customerAddress: text("customer_address"),
+    customerPhone: text("customer_phone"),
+    unitYear: integer("unit_year"),
+    unitModel: text("unit_model"),
+    condition: text("condition").notNull().$type<UnitCondition>(),
+    // A new whole good, a trade, a trailer, a contest or free unit: what the
+    // spreadsheet wrote in the MSRP column when it had no number.
+    unitType: text("unit_type").notNull().$type<UnitType>(),
+    // Upper-cased; a whole VIN, or a trailer's or an old unit's serial.
+    vin: text("vin"),
+    // UTV, ATV, RZR, Trailer and the like, as the spreadsheet's Category.
+    category: text("category"),
+    msrpCents: integer("msrp_cents"),
+    salesPriceCents: integer("sales_price_cents"),
+    dealerCostCents: integer("dealer_cost_cents"),
+    unitLaborCents: integer("unit_labor_cents"),
+    rebateCents: integer("rebate_cents"),
+    accPriceCents: integer("acc_price_cents"),
+    accCostCents: integer("acc_cost_cents"),
+    accLaborCents: integer("acc_labor_cents"),
+    escPriceCents: integer("esc_price_cents"),
+    escCostCents: integer("esc_cost_cents"),
+    rewardsCents: integer("rewards_cents"),
+    holdbackRateBp: integer("holdback_rate_bp").notNull(),
+    bonusRateBp: integer("bonus_rate_bp").notNull(),
+    notes: text("notes"),
+    financeCompany: text("finance_company"),
+    amountFinancedCents: integer("amount_financed_cents"),
+    downPaymentCents: integer("down_payment_cents"),
+    // Added to the sales bonus: a chargeback, say, which the spreadsheet
+    // made by changing the formula.
+    bonusAdjustmentCents: integer("bonus_adjustment_cents"),
+    fundingReceivedOn: date("funding_received_on"),
+    // When the unit was paid off, and the payment's reference (COMS #).
+    paidOn: date("paid_on"),
+    comsNumber: text("coms_number"),
+    // Where an imported sale came from ("2026!374": the sheet and row), so
+    // importing the same workbook again adds nothing twice.
+    importRef: text("import_ref"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // A sale can only be for a customer in its own shop.
+    foreignKey({
+      name: "unit_sales_customer_shop_fk",
+      columns: [t.customerId, t.shopId],
+      foreignColumns: [customers.id, customers.shopId],
+    }),
+    index("unit_sales_shop_sold").on(t.shopId, t.soldOn),
+    index("unit_sales_customer").on(t.customerId),
+    // A unit is sold once a day: logging the same VIN for the same day
+    // again (or importing a sheet twice) finds the first.
+    uniqueIndex("unit_sales_shop_vin_day").on(t.shopId, t.vin, t.soldOn).where(sql`${t.vin} is not null`),
+    uniqueIndex("unit_sales_shop_import_ref").on(t.shopId, t.importRef).where(sql`${t.importRef} is not null`),
+    check(
+      "unit_sales_condition",
+      sql`${t.condition} in (${sql.raw(UNIT_CONDITIONS.map((c) => `'${c}'`).join(", "))})`,
+    ),
+    check("unit_sales_unit_type", sql`${t.unitType} in (${sql.raw(UNIT_TYPES.map((u) => `'${u}'`).join(", "))})`),
+    check("unit_sales_customer_name", sql`length(${t.customerName}) between 1 and 120`),
+    check("unit_sales_vin", sql`length(${t.vin}) between 1 and 30`),
+    check("unit_sales_unit_year", sql`${t.unitYear} between 1950 and 2100`),
+    check("unit_sales_rates", sql`${t.holdbackRateBp} between 0 and 10000 and ${t.bonusRateBp} between 0 and 10000`),
+    // Which columns can change is set by the grant in
+    // drizzle/0039_unit_sales_grants.sql.
+    pgPolicy("unit_sales_own_shop", {
       for: "all",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
