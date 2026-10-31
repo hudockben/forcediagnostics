@@ -53,6 +53,7 @@ import type { UnitSpec } from "@/lib/unit-vehicle";
 import { cleanLibraryFilters, hasLibraryFilters, listReadyManuals } from "@/lib/library";
 import { VEHICLE_NAMES, brandLabel } from "@/lib/manual-catalog-rules";
 import { cutText } from "@/lib/manual-rules";
+import { allows, can, mayDeleteDiagnosis } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/session";
 import { VIN_LENGTH, checkVin, vinMatchesModelNumber, vinModelCode, vinYears } from "@/lib/vin";
 
@@ -324,7 +325,12 @@ export async function shopGlance(shopId: string): Promise<ShopGlance> {
   });
 }
 
-export type ConversationDetail = { conversation: ConversationView; turns: TurnView[] };
+export type ConversationDetail = {
+  conversation: ConversationView;
+  turns: TurnView[];
+  // Who started it (their id), for whether the viewer may delete it.
+  startedBy: string;
+};
 
 // One conversation and its messages, after marking a turn that died as
 // failed. Null when it isn't the shop's.
@@ -346,6 +352,7 @@ export async function getConversation(user: CurrentUser, id: string): Promise<Co
   return {
     conversation: await viewOf(user.shop.id, found.conversation),
     turns: found.turns.map((turn) => toTurnView(turn, found.names.get(turn.userId) ?? "")),
+    startedBy: found.conversation.userId,
   };
 }
 
@@ -1417,15 +1424,20 @@ export async function carryOver(user: CurrentUser, id: string) {
 
 // --- Deleting --------------------------------------------------------------
 
-// Deletes a diagnosis and its messages for good, for managers and admins
-// (diagnostics.delete; the caller checks). Not while Claude is answering one
-// of its messages. The Activity log keeps what it was, written in the same
+// Deletes a diagnosis and its messages for good: a tech one they started
+// (diagnostics.delete_own, on a bay tablet too), a manager or admin anyone's
+// (diagnostics.delete, signed in with a password). This is where that's
+// checked (mayDeleteDiagnosis). Not while Claude is answering one of its
+// messages. The Activity log keeps what it was, written in the same
 // transaction: its title, unit and VIN, who started it and when, how far it
 // got and what it cost, whose vehicle it was, and why it was deleted.
 export async function deleteConversation(
   user: CurrentUser,
   input: { conversationId: string; reason?: string },
 ): Promise<{ title: string } | { error: string }> {
+  if (!allows(user, "diagnostics.delete") && !allows(user, "diagnostics.delete_own")) {
+    return { error: "Your role can't delete diagnoses." };
+  }
   if (!isUuid(input.conversationId)) return { error: "That diagnosis isn't in this shop." };
   const reason = str(input.reason, DIAGNOSE_LIMITS.deleteReason);
   return withShop(user.shop.id, async (tx) => {
@@ -1437,6 +1449,13 @@ export async function deleteConversation(
       .where(eq(diagnosisConversations.id, input.conversationId))
       .for("update");
     if (!conversation) return { error: "That diagnosis isn't in this shop." };
+    if (!mayDeleteDiagnosis(user, conversation.userId)) {
+      return {
+        error: can(user.role, "diagnostics.delete")
+          ? "Deleting a diagnosis someone else started needs a password sign-in, not a bay tablet PIN."
+          : "You can only delete a diagnosis you started.",
+      };
+    }
     await failStaleTurns(tx, conversation.id);
     const [turns] = await tx
       .select({

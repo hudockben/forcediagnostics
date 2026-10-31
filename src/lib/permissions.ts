@@ -28,9 +28,15 @@ export const CAPABILITIES = [
     roles: ["tech", "manager", "admin"],
   },
   {
+    key: "diagnostics.delete_own",
+    label: "Delete own diagnoses",
+    detail: "Delete a diagnosis you started, with its messages, for good; the Activity log keeps a record",
+    roles: ["tech", "manager", "admin"],
+  },
+  {
     key: "diagnostics.delete",
-    label: "Delete diagnoses",
-    detail: "Delete a diagnosis and its messages for good; the Activity log keeps a record",
+    label: "Delete anyone's diagnoses",
+    detail: "Delete any diagnosis in the shop, with its messages, for good; the Activity log keeps a record",
     roles: ["manager", "admin"],
   },
   {
@@ -109,8 +115,9 @@ export function can(role: Role, capability: Capability) {
 
 // Admin areas need a password sign-in; a PIN on a bay tablet isn't enough.
 // So do customers' contact details, which stay off the shared tablets
-// (Diagnose shows a customer's name and vehicles only), deleting a
-// diagnosis, and the Activity log.
+// (Diagnose shows a customer's name and vehicles only), deleting someone
+// else's diagnosis, and the Activity log. Techs delete their own on the bay
+// tablets, where they work.
 const PASSWORD_ONLY: ReadonlySet<Capability> = new Set<Capability>([
   "accounts.manage",
   "audit.read",
@@ -130,6 +137,14 @@ export function needsPasswordSession(capability: Capability) {
 export function allows(user: { role: Role; bay: object | null }, capability: Capability) {
   if (user.bay && needsPasswordSession(capability)) return false;
   return can(user.role, capability);
+}
+
+// Whether this user may delete a diagnosis that startedBy (a user's id)
+// started: anyone's with diagnostics.delete, or their own with
+// diagnostics.delete_own. deleteConversation in src/lib/diagnose.ts checks
+// it again before it deletes.
+export function mayDeleteDiagnosis(user: { id: string; role: Role; bay: object | null }, startedBy: string) {
+  return allows(user, "diagnostics.delete") || (allows(user, "diagnostics.delete_own") && startedBy === user.id);
 }
 
 // The System Admin sections, in menu order. The tab opens the first one the

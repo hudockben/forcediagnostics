@@ -1000,8 +1000,8 @@ export function DiagnoseChat({
   // Whether the viewer can open customers' records (System Admin >
   // Customers), so the customer's name links to theirs.
   customerLinks: boolean;
-  // Whether the viewer can delete a diagnosis (managers and admins, signed
-  // in with a password).
+  // Whether the viewer may delete this diagnosis: one they started, or
+  // anyone's for a manager or admin signed in with a password.
   canDelete: boolean;
 }) {
   const [conversation, setConversation] = useState<ConversationView | null>(initial?.conversation ?? null);

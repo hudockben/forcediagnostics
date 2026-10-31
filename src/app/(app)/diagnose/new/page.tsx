@@ -7,6 +7,7 @@ import { isClaudeConfigured } from "@/lib/claude";
 import { carryOver } from "@/lib/diagnose";
 import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
 import { libraryFilterOptions } from "@/lib/library";
+import { mayDeleteDiagnosis } from "@/lib/permissions";
 import { getVehicleChoice } from "@/lib/customers";
 import { allows, requireCapability } from "@/lib/session";
 
@@ -50,7 +51,8 @@ async function NewDiagnosis({ searchParams }: { searchParams: PageProps<"/diagno
     <NewDiagnosisChat
       starter={{ vehicles: options.vehicles, brands: options.brands, years: options.years, carry, customer }}
       customerLinks={allows(user, "repair_orders.intake")}
-      canDelete={allows(user, "diagnostics.delete")}
+      // A diagnosis started here is the viewer's own.
+      canDelete={mayDeleteDiagnosis(user, user.id)}
     />
   );
 }

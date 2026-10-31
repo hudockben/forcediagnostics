@@ -4,8 +4,8 @@
 // one before it as it's saved (drizzle/0035_audit_log_locked.sql); the check
 // that finds an entry changed, taken out or slipped in behind the triggers'
 // back, and the log's pages and download (src/lib/audit-log.ts); and
-// deleting a diagnosis, which only managers and admins can and which the log
-// keeps (deleteConversation in src/lib/diagnose.ts).
+// deleting a diagnosis, a tech's own or, for a manager or admin, anyone's,
+// which the log keeps (deleteConversation in src/lib/diagnose.ts).
 // Needs DATABASE_URL pointing at a disposable Postgres database; run with
 // `npm test`, which migrates it first.
 import assert from "node:assert/strict";
@@ -29,7 +29,7 @@ import {
 } from "../src/lib/audit-log-rules";
 import { addVehicle, createCustomer, removeVehicle } from "../src/lib/customers";
 import { STALE_AFTER_MS, deleteConversation, getConversation, isProblem, listConversations, prepareTurn, runTurn } from "../src/lib/diagnose";
-import { ADMIN_SECTIONS, allows, can, needsPasswordSession } from "../src/lib/permissions";
+import { ADMIN_SECTIONS, allows, can, mayDeleteDiagnosis, needsPasswordSession } from "../src/lib/permissions";
 import { ROLES } from "../src/lib/roles";
 import type { CurrentUser } from "../src/lib/session";
 
@@ -386,19 +386,24 @@ describe("the log's pages and download", () => {
 
 describe("deleting a diagnosis", () => {
   let tech: CurrentUser;
+  let otherTech: CurrentUser;
   let manager: CurrentUser;
   let otherManager: CurrentUser;
 
   before(async () => {
     const shop = await createShop();
     tech = await createUser(shop, "tech", "Mike");
+    otherTech = await createUser(shop, "tech", "Sam");
     manager = await createUser(shop, "manager", "Morgan");
     otherManager = await createUser(await createShop(), "manager", "Elsewhere");
   });
 
+  // Signed in with their PIN on a bay tablet.
+  const onTablet = (user: CurrentUser): CurrentUser => ({ ...user, bay: { deviceId: randomUUID(), deviceName: "Bay 1", sessionId: randomUUID() } });
+
   // A diagnosis with one message, Claude's answer to it done.
-  async function diagnosis(complaint: string, start: Record<string, string> = {}) {
-    const prepared = await prepareTurn(tech, { start: { complaint, ...start } });
+  async function diagnosis(complaint: string, start: Record<string, string> = {}, by = tech) {
+    const prepared = await prepareTurn(by, { start: { complaint, ...start } });
     assert.ok(!isProblem(prepared), JSON.stringify(prepared));
     await systemDb
       .update(diagnosisTurns)
@@ -407,14 +412,54 @@ describe("deleting a diagnosis", () => {
     return prepared;
   }
 
-  test("only managers and admins can, signed in with a password", () => {
+  test("techs can delete their own, on a bay tablet too; managers and admins anyone's, with a password", () => {
+    assert.deepEqual(
+      ROLES.filter((role) => can(role, "diagnostics.delete_own")),
+      ["tech", "manager", "admin"],
+    );
     assert.deepEqual(
       ROLES.filter((role) => can(role, "diagnostics.delete")),
       ["manager", "admin"],
     );
+    assert.equal(needsPasswordSession("diagnostics.delete_own"), false);
     assert.ok(needsPasswordSession("diagnostics.delete"));
+    const tablet = { deviceId: "d", deviceName: "Bay 1", sessionId: "s" };
     assert.equal(allows({ role: "manager", bay: null }, "diagnostics.delete"), true);
-    assert.equal(allows({ role: "manager", bay: { deviceId: "d", deviceName: "Bay 1", sessionId: "s" } }, "diagnostics.delete"), false);
+    assert.equal(allows({ role: "manager", bay: tablet }, "diagnostics.delete"), false);
+    // Who may delete a diagnosis Mike started.
+    const mike = "u-mike";
+    assert.equal(mayDeleteDiagnosis({ id: mike, role: "tech", bay: null }, mike), true);
+    assert.equal(mayDeleteDiagnosis({ id: mike, role: "tech", bay: tablet }, mike), true);
+    assert.equal(mayDeleteDiagnosis({ id: "u-sam", role: "tech", bay: null }, mike), false);
+    assert.equal(mayDeleteDiagnosis({ id: "u-morgan", role: "manager", bay: null }, mike), true);
+    assert.equal(mayDeleteDiagnosis({ id: "u-morgan", role: "manager", bay: tablet }, mike), false);
+    assert.equal(mayDeleteDiagnosis({ id: "u-morgan", role: "manager", bay: tablet }, "u-morgan"), true);
+    assert.equal(mayDeleteDiagnosis({ id: "u-pat", role: "service_writer", bay: null }, "u-pat"), false);
+  });
+
+  test("a tech deletes one they started, from a bay tablet too, and the log says it was them", async () => {
+    const prepared = await diagnosis("Won't shift out of park");
+    const id = prepared.conversation.id;
+    assert.deepEqual(await deleteConversation(onTablet(tech), { conversationId: id, reason: "Wrong unit" }), { title: "Won't shift out of park" });
+    assert.equal(await getConversation(tech, id), null);
+    const [entry] = await systemDb.select().from(auditLog).where(and(eq(auditLog.action, "diagnosis.deleted"), eq(auditLog.targetId, id)));
+    assert.deepEqual([entry.actorUserId, entry.actorName, (entry.details as { startedBy: string }).startedBy], [tech.id, "Mike", tech.id]);
+  });
+
+  test("but not one someone else started; a manager can, signed in with a password", async () => {
+    const theirs = await diagnosis("Light bar flickers", {}, otherTech);
+    const id = theirs.conversation.id;
+    assert.deepEqual(await deleteConversation(tech, { conversationId: id }), { error: "You can only delete a diagnosis you started." });
+    assert.deepEqual(await deleteConversation(onTablet(manager), { conversationId: id }), {
+      error: "Deleting a diagnosis someone else started needs a password sign-in, not a bay tablet PIN.",
+    });
+    assert.ok(await getConversation(tech, id));
+    assert.equal((await systemDb.select().from(auditLog).where(eq(auditLog.targetId, id))).length, 0);
+    assert.deepEqual(await deleteConversation(manager, { conversationId: id }), { title: "Light bar flickers" });
+    // Nor can anyone without Diagnose, their own or not.
+    const writer = await createUser(tech.shop, "service_writer", "Pat");
+    const other = await diagnosis("Squeaks over bumps");
+    assert.deepEqual(await deleteConversation(writer, { conversationId: other.conversation.id }), { error: "Your role can't delete diagnoses." });
   });
 
   test("a manager deletes one, its messages with it, and the log keeps what it was", async () => {
@@ -460,7 +505,7 @@ describe("deleting a diagnosis", () => {
 
     // It shows in the Activity log, and the log still checks out.
     const log = await listAuditLog(shop, { area: "diagnoses" });
-    assert.deepEqual(log.items.map((item) => item.targetId), [id]);
+    assert.equal(log.items[0].targetId, id);
     assert.equal(describeAuditEntry(log.items[0]).summary, "Deleted the diagnosis “Belt squeal at idle”");
     assert.equal((await verifyAuditLog(shop)).broken, null);
 
