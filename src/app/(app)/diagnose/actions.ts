@@ -155,11 +155,12 @@ export async function stopTurnAction(turnId: string): Promise<{ ok: boolean } | 
   return attempt("stop the message", async () => ({ ok: await requestStop(user, String(turnId ?? "")) }));
 }
 
-// Deletes a diagnosis for good (managers and admins, signed in with a
-// password); the Activity log keeps what it was. Then the list, in the
-// diagnosis's place in the history, so Back doesn't lead to it.
+// Deletes a diagnosis for good: a tech one they started, a manager or admin
+// anyone's (deleteConversation checks which); the Activity log keeps what it
+// was. Then the list, in the diagnosis's place in the history, so Back
+// doesn't lead to it.
 export async function deleteConversationAction(_previous: { error?: string }, form: FormData): Promise<{ error?: string }> {
-  const user = await requireCapability("diagnostics.delete");
+  const user = await requireCapability("diagnostics.work");
   const result = await attempt("delete the diagnosis", () =>
     deleteConversation(user, {
       conversationId: String(form.get("conversationId") ?? ""),

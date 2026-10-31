@@ -6,6 +6,7 @@ import { LoadingLine, Notice } from "@/components/app/ui";
 import { isClaudeConfigured } from "@/lib/claude";
 import { getConversation } from "@/lib/diagnose";
 import { SETUP_MESSAGE } from "@/lib/diagnose-rules";
+import { mayDeleteDiagnosis } from "@/lib/permissions";
 import { allows, requireCapability } from "@/lib/session";
 
 import { DiagnoseChat } from "../chat";
@@ -35,7 +36,7 @@ async function Diagnosis({ params }: { params: PageProps<"/diagnose/[id]">["para
         initial={detail}
         starter={null}
         customerLinks={allows(user, "repair_orders.intake")}
-        canDelete={allows(user, "diagnostics.delete")}
+        canDelete={mayDeleteDiagnosis(user, detail.startedBy)}
       />
     </div>
   );
