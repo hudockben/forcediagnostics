@@ -9,7 +9,9 @@
 // Each cell comes out as the text Excel shows for it in a plain column:
 // numbers without floating-point noise, dates as 2024-03-05, TRUE and FALSE,
 // errors such as #N/A, and ZIP codes kept as numbers with their leading zero.
-// Hidden sheets and chart sheets are left out.
+// Hidden sheets and chart sheets are left out; asked for, hidden sheets are
+// read too, marked hidden (the NUSR import lists them, so a year sheet
+// hidden in Excel isn't missed).
 //
 // Files come from anyone's computer, so nothing here trusts them: a part that
 // unpacks to more than it should, a sheet with millions of cells, or a file
@@ -20,7 +22,7 @@
 // Every failure the person importing should see, in words they can act on.
 export class XlsxError extends Error {}
 
-export type XlsxSheet = { name: string; rows: string[][] };
+export type XlsxSheet = { name: string; rows: string[][]; hidden?: true };
 
 // How much one part of the zip may unpack to (all the parts read, together,
 // may unpack to four times that), and how many cells all the sheets may hold
@@ -59,10 +61,13 @@ function tooManyCells(max: number) {
 
 type Limits = typeof XLSX_LIMITS;
 
-export async function readXlsx(bytes: Uint8Array, limits?: Partial<Limits>): Promise<XlsxSheet[]> {
+// The limits, and hidden: true to read hidden sheets too.
+export type XlsxOptions = Partial<Limits> & { hidden?: boolean };
+
+export async function readXlsx(bytes: Uint8Array, options?: XlsxOptions): Promise<XlsxSheet[]> {
   const caps: Limits = {
-    maxEntryBytes: limits?.maxEntryBytes ?? XLSX_LIMITS.maxEntryBytes,
-    maxCells: limits?.maxCells ?? XLSX_LIMITS.maxCells,
+    maxEntryBytes: options?.maxEntryBytes ?? XLSX_LIMITS.maxEntryBytes,
+    maxCells: options?.maxCells ?? XLSX_LIMITS.maxCells,
   };
   if (!isZip(bytes)) {
     // Old .xls files and password-protected workbooks are both OLE compound
@@ -111,7 +116,8 @@ export async function readXlsx(bytes: Uint8Array, limits?: Partial<Limits>): Pro
   const counter = { cells: 0, max: caps.maxCells };
   const sheets: XlsxSheet[] = [];
   for (const sheet of book.sheets) {
-    if (sheet.state === "hidden" || sheet.state === "veryhidden") continue;
+    const hidden = sheet.state === "hidden" || sheet.state === "veryhidden";
+    if (hidden && !options?.hidden) continue;
     const rel = rels.get(sheet.id);
     if (!rel) throw damaged(`sheet "${sheet.name}" is missing`);
     // Chart sheets, dialog sheets and old macro sheets hold no rows.
@@ -119,7 +125,7 @@ export async function readXlsx(bytes: Uint8Array, limits?: Partial<Limits>): Pro
     if (!zip.entries.has(partKey(rel.target))) throw damaged(`sheet "${sheet.name}" is missing`);
     const xml = await readPart(zip, rel.target);
     const rows = readSheet(xml, rel.target, { sheet: sheet.name, strings, formats, dates: book.dates, counter });
-    sheets.push({ name: sheet.name, rows });
+    sheets.push(hidden ? { name: sheet.name, rows, hidden: true } : { name: sheet.name, rows });
   }
   return sheets;
 }
