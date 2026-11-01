@@ -245,7 +245,8 @@ function Results({
               {columns === "all" ? "Show the key columns" : "Show every column"}
             </Link>
           </div>
-          {ticking && <MarkPaidForm formId={MARK_PAID_FORM} back={search} today={shopToday()} comsNumbers={comsNumbers} />}
+          {/* A fresh count of the tick boxes for each page and search of the list. */}
+          {ticking && <MarkPaidForm key={`${search}|${log.page}`} formId={MARK_PAID_FORM} back={search} today={shopToday()} comsNumbers={comsNumbers} />}
           <div className="-mx-5 mt-4 overflow-x-auto border-y border-white/10 sm:-mx-6">
             <SalesTable sales={log.items} totals={totals} columns={columns} variant="screen" back={log.page > 1 ? `${search}${search ? "&" : ""}page=${log.page}` : search} ticking={ticking} />
           </div>

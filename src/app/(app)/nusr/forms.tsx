@@ -28,6 +28,7 @@ import {
   UNIT_TYPE_LABELS,
   blankSaleValues,
   cleanVin,
+  earlierSale,
   formatDay,
   formatMoney,
   formatPct,
@@ -90,12 +91,19 @@ export function WidePage({ children, className = "" }: { children: ReactNode; cl
 }
 
 // "Saved.", after a sale's changes are saved: the page comes back fresh, so
-// it takes the focus the Save button had.
+// it takes the focus the Save button had. It goes as soon as the sale is
+// sent again, so it never sits over a later save's problem.
 export function SavedNotice() {
   const element = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(true);
   useEffect(() => {
     element.current?.focus();
+    const form = document.querySelector("[data-nusr-sale-form]");
+    const hide = () => setShown(false);
+    form?.addEventListener("submit", hide);
+    return () => form?.removeEventListener("submit", hide);
   }, []);
+  if (!shown) return null;
   return (
     <div ref={element} tabIndex={-1} className="outline-none" data-nusr-saved>
       <Notice>Saved.</Notice>
@@ -235,11 +243,14 @@ export function LogFilter({ name, label, value, options, search }: { name: strin
   const router = useRouter();
   const id = useId();
   // What was picked shows at once, while the log loads it; the page's own
-  // value takes over when it comes.
+  // value takes over whenever the page changes (another filter picked
+  // straight after can replace this one's navigation, leaving the page
+  // as it was).
   const [shown, setShown] = useState(value);
-  const [seen, setSeen] = useState(value);
-  if (seen !== value) {
-    setSeen(value);
+  const page = `${search}|${value}`;
+  const [seen, setSeen] = useState(page);
+  if (seen !== page) {
+    setSeen(page);
     setShown(value);
   }
   const [loading, startLoading] = useTransition();
@@ -557,14 +568,11 @@ export function SaleForm({
   // Boxes the person has set themselves, which the form then leaves alone.
   const [touched, setTouched] = useState<Set<keyof SaleValues>>(() => new Set(sale ? (Object.keys(sale.values) as (keyof SaleValues)[]) : []));
   const [decode, setDecode] = useState<VinDecode | null>(null);
-  // The boxes set by hand as they are now, for what comes back after a wait.
-  const touchedNow = useRef(touched);
-  useEffect(() => {
-    touchedNow.current = touched;
-  }, [touched]);
   const [message, setMessage] = useState<SaleFormState>({});
   const customerInput = useRef<HTMLInputElement>(null);
-  const changeButton = useRef<HTMLButtonElement>(null);
+  // The customer picked last: their details, when they come, are filled in
+  // only if they're still the one picked.
+  const picked = useRef<string | null>(null);
   const nextInput = useRef<HTMLInputElement>(null);
   // A save on its way: a second click or Enter doesn't send it again.
   const sending = useRef(false);
@@ -595,6 +603,7 @@ export function SaleForm({
   }
   useEffect(() => {
     sending.current = false;
+    if (state.another) picked.current = null;
     if (state.another) customerInput.current?.focus();
     else if (state.error && state.field) focusBox(state.field);
   }, [state]);
@@ -611,17 +620,13 @@ export function SaleForm({
       setDecode(found);
       // Filled in only where nothing's been typed: from this unit's own
       // earlier sale, the shop's last of its model, the model list, or a
-      // customer's record of it. Sold before, it's back as a trade.
-      setValues((old) => {
-        const before = found.sold !== null && old.soldOn !== "" && found.sold.soldOn < old.soldOn;
-        return {
-          ...old,
-          unitYear: old.unitYear || String(found.year ?? found.sold?.year ?? found.onFile?.year ?? ""),
-          unitModel: old.unitModel || found.sold?.model || found.sameModel?.model || found.model || found.onFile?.model || "",
-          category: old.category || found.sold?.category || found.sameModel?.category || found.category || "",
-          condition: before && !touchedNow.current.has("condition") ? "used" : old.condition,
-        };
-      });
+      // customer's record of it.
+      setValues((old) => ({
+        ...old,
+        unitYear: old.unitYear || String(found.year ?? found.sold?.year ?? found.onFile?.year ?? ""),
+        unitModel: old.unitModel || found.sold?.model || found.sameModel?.model || found.model || found.onFile?.model || "",
+        category: old.category || found.sold?.category || found.sameModel?.category || found.category || "",
+      }));
     }, 300);
     return () => {
       cancelled = true;
@@ -630,6 +635,7 @@ export function SaleForm({
   }, [wholeVin, sale?.id]);
   const shownDecode = decode && decode.vin === wholeVin ? decode : null;
   const soldBefore = shownDecode?.sold ?? null;
+  const earlier = earlierSale(soldBefore, values.soldOn);
   // The prices of the last of this model sold, to use with a click where
   // nothing's typed: they change, so they're offered, not filled in. A
   // rebate only from a sale of the month before (rebates run that long).
@@ -640,10 +646,12 @@ export function SaleForm({
   if (lastModel?.rebate != null && values.soldOn && daysBetween(lastModel.soldOn, values.soldOn) <= 31) lastPrices.push(["rebate", lastModel.rebate]);
   const pricesToUse = lastPrices.filter(([name]) => values[name].trim() === "");
 
-  // What the form works out until the person sets it: the category from the
-  // model, the kind of deal from New/Used and the category, and the
-  // holdback rate from the kind of deal.
-  const condition = parseCondition(values.condition) ?? "new";
+  // What the form works out until the person sets it: Used for a unit sold
+  // before (a trade coming back), the category from the model, the kind of
+  // deal from New/Used and the category, and the holdback rate from the
+  // kind of deal. Worked out, never written in, so a VIN typed again
+  // takes it back.
+  const condition = touched.has("condition") || earlier !== "trade" ? (parseCondition(values.condition) ?? "new") : "used";
   const category = touched.has("category") || values.category ? values.category : (guessCategory(values.unitModel) ?? "");
   const unitType: UnitType = touched.has("unitType")
     ? (values.unitType as UnitType)
@@ -664,14 +672,17 @@ export function SaleForm({
     if (choice.kind === "buyer") {
       // Someone the NUSR has sold to before: their latest details, and
       // they're added to Customers unless that's unticked.
+      picked.current = null;
       setCustomer(null);
       setValues((old) => ({ ...old, customerName: choice.name, customerPhone: choice.phone ?? "", customerAddress: choice.address ?? "" }));
       return;
     }
     setCustomer({ id: choice.id, name: choice.name, detail: choice.detail });
-    // The search box goes: the focus goes to the Change button that's there now.
-    requestAnimationFrame(() => changeButton.current?.focus());
+    picked.current = choice.id;
+    // The search box goes: the focus goes on to the next box, as Enter does.
+    requestAnimationFrame(() => document.getElementById("sale-customerName")?.focus());
     const details: SaleCustomer | null = await customerForSaleAction(choice.id).catch(() => null);
+    if (picked.current !== choice.id) return;
     // Their details as they're on file, blank where they have none; what
     // was typed stays only if they couldn't be loaded.
     setValues((old) => ({
@@ -798,10 +809,10 @@ export function SaleForm({
                   <span className="text-ink-muted"> · on file{customer.detail ? ` · ${customer.detail}` : ""}</span>
                 </span>
                 <button
-                  ref={changeButton}
                   type="button"
                   onClick={() => {
                     // Their details go with them: the next customer is picked or typed afresh.
+                    picked.current = null;
                     setCustomer(null);
                     setValues((old) => ({ ...old, customerName: "", customerPhone: "", customerAddress: "" }));
                     requestAnimationFrame(() => customerInput.current?.focus());
@@ -860,10 +871,16 @@ export function SaleForm({
               shownDecode ? (
                 <>
                   {soldBefore ? (
-                    <span className="text-trail" data-nusr-vin-sold>
-                      In the NUSR already: sold {soldBefore.condition === "new" ? "new" : "used"} {formatDay(soldBefore.soldOn)} to {soldBefore.customerName}.{" "}
-                      {values.soldOn && soldBefore.soldOn < values.soldOn ? "A trade coming back, so it's Used unless you say otherwise." : "Check it isn't logged twice."}{" "}
-                    </span>
+                    earlier === "again" ? (
+                      <span data-nusr-vin-sold>
+                        Sold again {soldBefore.condition === "new" ? "new" : "used"} {formatDay(soldBefore.soldOn)} to {soldBefore.customerName}.{" "}
+                      </span>
+                    ) : (
+                      <span className="text-trail" data-nusr-vin-sold>
+                        In the NUSR already: sold {soldBefore.condition === "new" ? "new" : "used"} {formatDay(soldBefore.soldOn)} to {soldBefore.customerName}.{" "}
+                        {earlier === "trade" ? "A trade coming back, so it's Used unless you say otherwise." : "Check it isn't logged twice."}{" "}
+                      </span>
+                    )
                   ) : null}
                   {shownDecode.model
                     ? `Model list: ${[shownDecode.year, shownDecode.model].filter(Boolean).join(" ")}${shownDecode.modelNumber ? ` (${shownDecode.modelNumber})` : ""}.`
@@ -1036,7 +1053,7 @@ function focusBox(field: string) {
 function enterGoesOn(event: KeyboardEvent<HTMLFormElement>) {
   const target = event.target;
   if (event.key !== "Enter" || event.defaultPrevented || event.nativeEvent.isComposing) return;
-  if (!(target instanceof HTMLInputElement) || ["submit", "button", "file"].includes(target.type)) return;
+  if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement) || ["submit", "button", "file"].includes(target.type)) return;
   event.preventDefault();
   const boxes = [...event.currentTarget.querySelectorAll<HTMLElement>("input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button[type=submit]")].filter(
     (box) => !(box instanceof HTMLInputElement && box.type === "radio" && !box.checked),

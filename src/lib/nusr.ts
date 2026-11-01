@@ -18,6 +18,7 @@ import {
   formatDay,
   formatMoney,
   formatRate,
+  line,
   monthlyComparison,
   parseIsoDate,
   saleTotals,
@@ -561,7 +562,7 @@ export async function markPaid(
   if (ids.length > MAX_MARKED_PAID) return { error: `That's more than ${MAX_MARKED_PAID} units at once: mark them a page at a time.` };
   const paidOn = parseIsoDate(input.paidOn);
   if (!paidOn) return { error: "Enter the date they were paid off.", field: "paidOn" };
-  const comsNumber = typeof input.comsNumber === "string" ? input.comsNumber.replace(/\s+/g, " ").trim() : "";
+  const comsNumber = line(input.comsNumber);
   if (comsNumber.length > SALE_LIMITS.comsNumber) return { error: `${SALE_LABELS.comsNumber} is too long.`, field: "comsNumber" };
   return withShop(actor.shop.id, async (tx) => {
     const rows = await tx

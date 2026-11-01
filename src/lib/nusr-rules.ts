@@ -63,6 +63,18 @@ export function guessUnitType(sale: { condition: UnitCondition | null; category:
 
 export const isUnitType = (value: unknown): value is UnitType => (UNIT_TYPES as readonly string[]).includes(value as string);
 
+// What another sale of the same VIN in the NUSR means for the sale being
+// logged on soldOn ("2026-10-31"): sold before it, the unit's a trade
+// coming back (so it's Used unless someone says otherwise); the same day,
+// it may be logged twice; after it (when an older sale is being
+// corrected), it was simply sold again.
+export type EarlierSale = "trade" | "twice" | "again";
+export function earlierSale(other: { soldOn: string } | null, soldOn: string): EarlierSale | null {
+  if (!other) return null;
+  if (!soldOn || other.soldOn === soldOn) return "twice";
+  return other.soldOn < soldOn ? "trade" : "again";
+}
+
 // The amounts typed for a sale, in the spreadsheet's order: blank is null.
 export const MONEY_FIELDS = [
   "msrp",
@@ -209,7 +221,8 @@ export const SALE_LABELS: Record<keyof SaleFields, string> = {
 
 const text = (value: unknown) => (typeof value === "string" ? value.replace(/\u0000/g, "") : typeof value === "number" ? String(value) : "");
 // One line: runs of spaces, tabs and line breaks become one space.
-const line = (value: unknown) => text(value).replace(/\s+/g, " ").trim();
+// One line of text as typed: NULs (which Postgres refuses) taken out, spaces tidied.
+export const line = (value: unknown) => text(value).replace(/\s+/g, " ").trim();
 const orNull = (value: string) => (value === "" ? null : value);
 
 // "2026-10-30" (what a date box sends), checked to be a real day.

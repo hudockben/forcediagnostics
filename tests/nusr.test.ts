@@ -38,6 +38,7 @@ import {
 import {
   blankSaleValues,
   checkSale,
+  earlierSale,
   filtersNarrowing,
   filtersSearch,
   filtersTitle,
@@ -142,6 +143,14 @@ describe("reading what's typed", () => {
     assert.equal(guessUnitType({ condition: "used", category: "UTV", model: "Rngr 570" }), "trade");
     assert.equal(guessUnitType({ condition: "new", category: "Trailer", model: null }), "trailer");
     assert.equal(guessUnitType({ condition: "new", category: null, model: "7x16 trailer" }), "trailer");
+  });
+
+  test("another sale of the VIN: a trade coming back, logged twice, or sold again since", () => {
+    assert.equal(earlierSale(null, "2026-10-31"), null);
+    assert.equal(earlierSale({ soldOn: "2025-03-01" }, "2026-10-31"), "trade");
+    assert.equal(earlierSale({ soldOn: "2026-10-31" }, "2026-10-31"), "twice");
+    assert.equal(earlierSale({ soldOn: "2026-05-01" }, "2025-03-01"), "again");
+    assert.equal(earlierSale({ soldOn: "2026-05-01" }, ""), "twice");
   });
 });
 
@@ -517,6 +526,13 @@ describe("the log", () => {
     assert.deepEqual(again?.sold, { id: first, soldOn: "2026-10-01", condition: "new", unitType: "whole_good", year: 2026, model: "Rngr 570 NS", category: "UTV", customerName: "Harper Quill" });
     assert.equal(again?.sameModel, null);
     assert.equal((await decodeSaleVin(shop.shop.id, "3NSMAU576TE300101", first))?.sold, null);
+    // Sold again, used, the next spring: correcting the first sale, the
+    // other is a resale, not a second entry.
+    const resale = await log(shop, { soldOn: "2027-05-01", customerName: "Second Owner", condition: "used", unitType: "trade", vin: "3NSMAU576TE300101" });
+    const fromFirst = await decodeSaleVin(shop.shop.id, "3NSMAU576TE300101", first);
+    assert.equal(fromFirst?.sold?.id, resale);
+    assert.equal(earlierSale(fromFirst?.sold ?? null, "2026-10-01"), "again");
+    assert.equal(earlierSale((await decodeSaleVin(shop.shop.id, "3NSMAU576TE300101", resale))?.sold ?? null, "2027-05-01"), "trade");
   });
 
   test("the customer box finds past buyers who aren't on file, and a customer on file once", async () => {
@@ -582,6 +598,10 @@ describe("the log", () => {
     assert.equal((await getSale(shop.shop.id, third))?.comsNumber, "TST0777");
     assert.deepEqual(await markPaid(shop, { ids: [], paidOn: "2026-10-31", comsNumber: "" }), { error: "Tick the units the payment paid off." });
     assert.deepEqual(await markPaid(shop, { ids: [first], paidOn: "10/31/2026", comsNumber: "" }), { error: "Enter the date they were paid off.", field: "paidOn" });
+    // A COMS # pasted with a NUL in it is cleaned as the sale form cleans it.
+    const fourth = await log(shop, { soldOn: "2026-10-08", customerName: "Unit Four" });
+    assert.deepEqual(await markPaid(shop, { ids: [fourth], paidOn: "2026-10-31", comsNumber: "TST\u00003002" }), { marked: 1, skipped: 0 });
+    assert.equal((await getSale(shop.shop.id, fourth))?.comsNumber, "TST3002");
   });
 
   test("app_user can't move a sale to another shop, or change who logged it", async () => {

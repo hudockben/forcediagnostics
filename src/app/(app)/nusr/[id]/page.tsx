@@ -60,7 +60,8 @@ async function SaleScreen({ params, searchParams }: { params: PageProps<"/nusr/[
           }
         />
       </div>
-      {query.saved === "1" && <SavedNotice />}
+      {/* A new one for each save, so a save after a problem says so again. */}
+      {query.saved === "1" && <SavedNotice key={`saved-${sale.updatedAt.toISOString()}`} />}
       <SaleForm
         // Next keeps a visited page alive: a sale saved since is shown fresh.
         key={sale.updatedAt.toISOString()}
