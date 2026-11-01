@@ -1,0 +1,1 @@
+ALTER TABLE "unit_sales" ADD COLUMN "import_id" uuid;

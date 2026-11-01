@@ -585,17 +585,20 @@ export async function markPaid(
   });
 }
 
-// Removes a sale logged by mistake; the Activity log keeps what it was.
+// Removes a sale logged by mistake; the Activity log keeps what it was,
+// and the sheet and row an import brought it in from, so importing the
+// workbook again doesn't bring it back (importSales in nusr-import.ts).
 export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: true; label: string } | { error: string }> {
   if (!isUuid(id)) return NOT_HERE;
   return withShop(actor.shop.id, async (tx) => {
-    const [row] = await tx
-      .select(saleColumns)
+    const [found] = await tx
+      .select({ ...saleColumns, importRef: unitSales.importRef })
       .from(unitSales)
       .leftJoin(users, eq(users.id, unitSales.createdByUserId))
       .where(eq(unitSales.id, id))
       .for("update", { of: unitSales });
-    if (!row) return NOT_HERE;
+    if (!found) return NOT_HERE;
+    const { importRef, ...row } = found;
     const sale = toSale(row);
     await tx.delete(unitSales).where(eq(unitSales.id, id));
     await audit(tx, actor, "unit_sale.removed", id, {
@@ -603,6 +606,7 @@ export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: 
       salesPrice: sale.salesPrice,
       totalProfit: sale.figures.totalProfit,
       customerId: sale.customerId,
+      ...(importRef ? { importRef } : {}),
     });
     return { ok: true as const, label: `${unitLabel(sale)} to ${sale.customerName}` };
   });

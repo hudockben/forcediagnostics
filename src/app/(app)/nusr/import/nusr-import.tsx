@@ -7,6 +7,7 @@ import { Badge, Notice } from "@/components/app/ui";
 import { primaryLinkClass } from "@/components/hud";
 import { readSpreadsheet } from "@/lib/customer-import-rules";
 import {
+  MAX_NUSR_IMPORT_FOUND,
   NOTE_KINDS,
   NOTE_KIND_LABELS,
   importNotesCsv,
@@ -40,8 +41,18 @@ type Run =
   | { state: "stopped"; sent: number; total: number; outcomes: NusrImportOutcome[]; error: string };
 
 // An import under way: its batches, the next one to send, and what's come
-// back, so a stopped one carries on where it stopped.
-type Job = { importId: string; fileName: string; batches: NusrImportEntry[][]; next: number; sent: number; total: number; outcomes: NusrImportOutcome[] };
+// back (with the sales on file it has found, which go with each batch), so
+// a stopped one carries on where it stopped.
+type Job = {
+  importId: string;
+  fileName: string;
+  batches: NusrImportEntry[][];
+  next: number;
+  sent: number;
+  total: number;
+  outcomes: NusrImportOutcome[];
+  found: Set<string>;
+};
 
 const smallButtonClass =
   "inline-flex min-h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none disabled:opacity-60";
@@ -120,7 +131,8 @@ export function NusrImport() {
     setReadError(null);
     setRun(null);
     try {
-      const result = await readSpreadsheet(file.name, new Uint8Array(await file.arrayBuffer()));
+      // Hidden sheets too, so a year hidden in Excel is listed, not missed.
+      const result = await readSpreadsheet(file.name, new Uint8Array(await file.arrayBuffer()), { hidden: true });
       if ("error" in result) {
         setLoaded(null);
         setReadError(result.error);
@@ -133,7 +145,8 @@ export function NusrImport() {
         return;
       }
       const nusr = new Set(workbook.sheets.map((sheet) => sheet.index));
-      setLoaded({ fileName: file.name, workbook, others: result.sheets.flatMap((sheet, index) => (nusr.has(index) ? [] : [sheet.name])) });
+      const others = result.sheets.flatMap((sheet, index) => (nusr.has(index) ? [] : [sheet.hidden ? `${sheet.name} (hidden)` : sheet.name]));
+      setLoaded({ fileName: file.name, workbook, others });
       setChosen(workbook.sheets.filter((sheet) => sheet.chosen).map((sheet) => sheet.index));
     } catch (error) {
       console.error("Couldn't read the NUSR workbook", error);
@@ -152,7 +165,8 @@ export function NusrImport() {
     setRun({ state: "running", sent: current.sent, total: current.total, outcomes: [...current.outcomes] });
     while (current.next < current.batches.length) {
       const batch = current.batches[current.next];
-      const result = await importSalesAction({ importId: current.importId, fileName: current.fileName, sales: batch }).catch(() => ({
+      const found = [...current.found].slice(-MAX_NUSR_IMPORT_FOUND);
+      const result = await importSalesAction({ importId: current.importId, fileName: current.fileName, sales: batch, found }).catch(() => ({
         error: "The connection dropped.",
       }));
       if ("error" in result) {
@@ -160,6 +174,7 @@ export function NusrImport() {
         return;
       }
       current.outcomes.push(...result.outcomes);
+      for (const id of result.found) current.found.add(id);
       current.sent += batch.length;
       current.next++;
       setRun({ state: "running", sent: current.sent, total: current.total, outcomes: [...current.outcomes] });
@@ -178,6 +193,7 @@ export function NusrImport() {
       sent: 0,
       total: plan.sales.length,
       outcomes: [],
+      found: new Set(),
     };
     void send();
   }
@@ -207,6 +223,7 @@ export function NusrImport() {
 
   const counts = new Map((plan?.sheets ?? []).map((sheet) => [sheet.index, sheet]));
   const repeats = loaded?.workbook.sheets.filter((sheet) => sheet.repeats) ?? [];
+  const hidden = loaded?.workbook.sheets.filter((sheet) => sheet.hidden) ?? [];
 
   return (
     <div className="space-y-6">
@@ -254,17 +271,20 @@ export function NusrImport() {
           <ul className="divide-y divide-white/10 rounded-lg border border-white/10" data-nusr-import-sheets>
             {loaded.workbook.sheets.map((sheet) => {
               const count = chosen.includes(sheet.index) ? counts.get(sheet.index) : undefined;
-              const parts = count
-                ? [
-                    `${plural(count.toAdd, "to add", "to add")}`,
-                    ...(count.duplicates ? [`${plural(count.duplicates, "on another sheet too", "on another sheet too")}`] : []),
-                    ...(count.skipped ? [`${plural(count.skipped, "left out", "left out")}`] : []),
-                    // The sheet's TOTAL, AVG and comparison rows: the NUSR tab works them out.
-                    ...(count.totalsFrom ? [`TOTAL rows from row ${count.totalsFrom} left out`] : []),
-                  ]
-                : sheet.repeats
-                  ? ["repeats the year sheets"]
-                  : [];
+              const parts = [
+                ...(count
+                  ? [
+                      `${plural(count.toAdd, "to add", "to add")}`,
+                      ...(count.duplicates ? [`${plural(count.duplicates, "on another sheet too", "on another sheet too")}`] : []),
+                      ...(count.skipped ? [`${plural(count.skipped, "left out", "left out")}`] : []),
+                      // The sheet's TOTAL, AVG and comparison rows: the NUSR tab works them out.
+                      ...(count.totalsFrom ? [`TOTAL rows from row ${count.totalsFrom} left out`] : []),
+                    ]
+                  : sheet.repeats
+                    ? ["repeats the year sheets"]
+                    : []),
+                ...(sheet.hidden ? ["hidden in the workbook"] : []),
+              ];
               return (
                 <li key={sheet.index}>
                   <label className="flex min-h-11 cursor-pointer items-center gap-3 px-4 py-2.5 text-sm">
@@ -290,7 +310,18 @@ export function NusrImport() {
           {repeats.length > 0 && (
             <p className="mt-3 text-sm leading-6 text-ink-muted">
               {repeats.map((sheet) => sheet.name).join(" and ")} {repeats.length === 1 ? "repeats" : "repeat"} the year sheets: every unit on{" "}
-              {repeats.length === 1 ? "it" : "them"} is on its year&apos;s sheet too. Ticked, only the sales no year sheet has are added.
+              {repeats.length === 1 ? "it" : "them"} is on its year&apos;s sheet too. Ticked, a row is left out when a year sheet has its sale
+              {repeats.some((sheet) => /^\s*new\s*$/i.test(sheet.name))
+                ? ", a sale to the same customer that day, or (on New) its VIN sold new"
+                : " or a sale to the same customer that day"}
+              ; each sale {repeats.length === 1 ? "it still adds" : "they still add"} is noted, to check against the year sheets.
+            </p>
+          )}
+          {hidden.length > 0 && (
+            <p className="mt-3 text-sm leading-6 text-ink-muted">
+              {hidden.map((sheet) => sheet.name).join(", ")} {hidden.length === 1 ? "is" : "are"} hidden in the workbook, so{" "}
+              {hidden.length === 1 ? "it's" : "they're"} left unticked (a hidden sheet is often an old copy); tick {hidden.length === 1 ? "it" : "one"} to
+              import it all the same.
             </p>
           )}
           {loaded.others.length > 0 && (
@@ -360,8 +391,9 @@ function Preview({ plan, notes, fileName }: { plan: NusrImportPlan; notes: NusrI
       </ul>
       <p className="text-sm leading-6 text-ink-muted">
         The figures (unit profit, holdback, total profit and the bonuses) are worked out from each sale&apos;s amounts, at the holdback and bonus rates
-        the sheet used. Sales already in the NUSR, from an earlier import or typed in, are found as they&apos;re saved and left out, and a sale is
-        tied to a customer on file when the name and phone number both match.
+        the sheet used. Sales already in the NUSR, from an earlier import or typed in, are found as they&apos;re saved and left out, and so is a sale
+        an earlier import brought in that was removed from the NUSR since. A sale is tied to a customer on file when the name and phone number both
+        match.
       </p>
       {shown.length > 0 && (
         <div className="-mx-5 overflow-x-auto sm:-mx-6">

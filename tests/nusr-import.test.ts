@@ -18,11 +18,11 @@ import { after, before, describe, test } from "node:test";
 
 import { and, eq, sql } from "drizzle-orm";
 
-import { systemDb } from "../src/db";
+import { systemDb, withShop } from "../src/db";
 import { auditLog, customers, shops, unitSales, users } from "../src/db/schema";
 import { createCustomer } from "../src/lib/customers";
 import { readSpreadsheet, type Sheet } from "../src/lib/customer-import-rules";
-import { logSale } from "../src/lib/nusr";
+import { logSale, removeSale } from "../src/lib/nusr";
 import { nusrWorkbook } from "../src/lib/nusr-export";
 import { importSales } from "../src/lib/nusr-import";
 import {
@@ -37,7 +37,7 @@ import {
   type NusrImportPlan,
   type PlannedSale,
 } from "../src/lib/nusr-import-rules";
-import { SALE_LABELS, checkSale, monthlyComparison, saleFigures, withFigures, type SaleFields } from "../src/lib/nusr-rules";
+import { SALE_LABELS, checkSale, monthlyComparison, saleFigures, shopToday, withFigures, type SaleFields } from "../src/lib/nusr-rules";
 import type { CurrentUser } from "../src/lib/session";
 import { writeXlsx } from "../src/lib/xlsx-write";
 import { vinCheckDigit } from "../src/lib/vin";
@@ -183,6 +183,62 @@ describe("which sheets and rows", () => {
     // New's comparison table has the month in D.
     const onNew = plan([sheet("New", [unit({ B: "2026-01-02", D: "Dana Whitfield" }), cellsOf({ D: "Comparison" }), unit({ B: "2026-01-03", D: "Pat Lee" })], NEW_HEADINGS)]);
     assert.equal(onNew.sales.length, 1);
+  });
+
+  test("a sale whose Date is blank, lost its date format or was typed some other way still counts: read, or left out with a note", () => {
+    const result = plan([
+      sheet("2024", [
+        unit({ B: "2024-06-01", D: "Wren Calloway", J: vin("4XARRE99_R8000201") }),
+        // An Excel day number without its date format.
+        unit({ B: "45449", D: "Ezra Mossman", J: vin("4XARRE99_R8000202") }),
+        unit({ B: "", D: "Lior Fenwright", J: vin("4XARRE99_R8000203") }),
+        // No salesman or VIN, but a sales price: a sale too.
+        cellsOf({ B: "June 7, 2024", D: "Tamsin Okoro", L: "9800" }),
+        // A name and nothing else isn't a sale.
+        cellsOf({ D: "Odalys Brightwater" }),
+        unit({ B: "2024-06-08", D: "Ines Vandermeer", J: vin("4XARRE99_R8000204") }),
+      ]),
+    ]);
+    assert.deepEqual(
+      result.sales.map(({ ref, sale }) => [ref, sale.soldOn]),
+      [
+        ["2024!2", "2024-06-01"],
+        ["2024!3", "2024-06-06"],
+        ["2024!7", "2024-06-08"],
+      ],
+    );
+    assert.deepEqual(result.sheets, [{ index: 0, name: "2024", sales: 5, toAdd: 3, duplicates: 0, skipped: 2, totalsFrom: null }]);
+    assert.deepEqual(
+      result.notes.map((note) => [`${note.sheet}!${note.row}`, note.kind, note.message]),
+      [
+        ["2024!3", "date", "Date 45449 read as the date 2024-06-06."],
+        ["2024!4", "skipped", "No Date: left out."],
+        ["2024!5", "skipped", "Date “June 7, 2024” isn't a day: left out."],
+      ],
+    );
+  });
+
+  test("a sheet hidden in the workbook is listed, marked hidden, and left out to start with", () => {
+    const shown = unit({ B: "2020-05-01", D: "Wren Calloway", J: vin("4XARRE99_L8000211") });
+    const hiddenRow = unit({ B: "2019-05-01", D: "Ezra Mossman", J: vin("4XARRE99_K8000212") });
+    const workbook = readNusrWorkbook([
+      sheet("2020", [shown]),
+      { ...sheet("2019", [hiddenRow]), hidden: true },
+      { name: "Lookups", rows: [["Model", "Price"]], hidden: true },
+    ]);
+    assert.deepEqual(
+      workbook.sheets.map(({ name, sales, hidden, chosen }) => [name, sales, hidden, chosen]),
+      [
+        ["2020", 1, false, true],
+        ["2019", 1, true, false],
+      ],
+    );
+    // Ticked, its sales come in as any year sheet's do.
+    const ticked = planNusrImport(workbook, [0, 1]);
+    assert.deepEqual(
+      ticked.sales.map((sale) => sale.ref),
+      ["2020!2", "2019!2"],
+    );
   });
 });
 
@@ -349,6 +405,39 @@ describe("reading a sale", () => {
         "Finance Company “Keystone Finance Co” read as Keystone Finance, as most rows have it.",
         "Finance Company “Keystne Finance” read as Keystone Finance, as most rows have it.",
         "Salesman “Robin” read as Robin Hale, as most rows have it.",
+      ],
+    );
+  });
+
+  test("a look-alike of a much more common name is that one only as a one-sale slip of 8 letters or more; otherwise it's kept, noted", () => {
+    const day = (at: number) => `2022-0${1 + Math.floor(at / 28)}-${String((at % 28) + 1).padStart(2, "0")}`;
+    const rows = [
+      ...Array.from({ length: 10 }, (_, at) => unit({ B: day(at), C: "Corwin Haldane", D: `Buyer ${at}`, AG: "QNB" })),
+      ...Array.from({ length: 10 }, (_, at) => unit({ B: day(at + 10), C: "Abe", D: `Buyer ${at + 10}` })),
+      // Two sales each: someone else a letter or two off, maybe.
+      unit({ B: day(20), C: "Corwyn Haldane", D: "Buyer 20", AG: "ZNB" }),
+      unit({ B: day(21), C: "Corwyn Haldane", D: "Buyer 21", AG: "ZNB" }),
+      unit({ B: day(22), C: "Ade", D: "Buyer 22" }),
+      unit({ B: day(23), C: "Ade", D: "Buyer 23" }),
+      // One sale each: a slip, when it's long enough to tell.
+      unit({ B: day(24), C: "Corwin Haldame", D: "Buyer 24" }),
+      unit({ B: day(25), C: "Abd", D: "Buyer 25" }),
+    ];
+    // The slip's row copied onto New is still the one sale.
+    const result = plan([sheet("2022", rows), sheet("New", [rows[24]], NEW_HEADINGS)], ["2022"]);
+    const named = (ref: string) => [only(result, ref).fields.salesperson, only(result, ref).fields.financeCompany];
+    assert.deepEqual(named("2022!22"), ["Corwyn Haldane", "ZNB"]);
+    assert.deepEqual(named("2022!24"), ["Ade", ""]);
+    assert.deepEqual(named("2022!26"), ["Corwin Haldane", ""]);
+    assert.deepEqual(named("2022!27"), ["Abd", ""]);
+    assert.deepEqual(
+      result.notes.filter((note) => note.kind === "name").map((note) => `${note.sheet}!${note.row}: ${note.message}`),
+      [
+        "2022!22: Salesman “Corwyn Haldane” may be Corwin Haldane: kept as typed (2 sales).",
+        "2022!22: Finance Company “ZNB” may be QNB: kept as typed (2 sales).",
+        "2022!24: Salesman “Ade” may be Abe: kept as typed (2 sales).",
+        "2022!26: Salesman “Corwin Haldame” read as Corwin Haldane, as most rows have it.",
+        "2022!27: Salesman “Abd” may be Abe: kept as typed.",
       ],
     );
   });
@@ -598,6 +687,77 @@ describe("a sale on two sheets", () => {
     );
   });
 
+  test("ticked, New and Used leave out a row with the year sheet's customer that day, New one with a VIN it sold new; what they add is noted", () => {
+    const sold = vin("4XARRE99_S8000301");
+    const traded = vin("4XARRE99_P8000302");
+    const pair = [vin("3NSRGE99_S8000303"), vin("3NSRGE99_S8000304")];
+    const yearSheet = sheet("2025", [
+      unit({ B: "2025-06-02", D: "Petra Lindgren", J: sold, L: "20000" }),
+      // A unit traded in, sold again used.
+      unit({ B: "2025-06-03", D: "Oren Castellano", I: "U", K: "TRADE", J: traded, H: "Fieldrunner 900", L: "9000", M: "8000" }),
+      unit({ B: "2025-06-04", D: "Farrow Orchards", J: pair[0], H: "Fieldrunner 600", L: "11999" }),
+    ]);
+    const newSheet = sheet(
+      "New",
+      [
+        // The same deal with its VIN typed a character long and its price off.
+        unit({ B: "2025-06-02", D: "Petra Lindgren", J: `${sold}7`, L: "20500" }),
+        // The year sheet's new unit, sold new to someone else before: an unwound deal.
+        unit({ B: "2025-05-20", D: "Gideon Fairweather", J: sold }),
+        // The traded unit's own sale new, which the year sheets don't have.
+        unit({ B: "2021-04-10", D: "Mabel Dunmore", J: traded, L: "15000" }),
+        // A second unit bought that day, with a whole VIN of its own.
+        unit({ B: "2025-06-04", D: "Farrow Orchards", J: pair[1], H: "Fieldrunner 600", L: "11999" }),
+      ],
+      NEW_HEADINGS,
+    );
+    const usedSheet = sheet(
+      "Used",
+      [
+        // Only the customer, day and model filled in.
+        cellsOf({ B: "2025-06-03", D: "Oren Castellano", H: "Fieldrunner 900" }),
+        // The same deal with its VIN and price typed differently.
+        unit({ B: "2025-06-03", D: "Oren Castellano", I: "U", K: "TRADE", J: traded.slice(0, 16), L: "9100", M: "8000" }),
+        // The new unit back in trade and sold again: on Used a VIN isn't one sale.
+        unit({ B: "2025-09-15", D: "Lena Vasquez", I: "U", K: "TRADE", J: sold, L: "15000", M: "14000" }),
+      ],
+      USED_HEADINGS,
+    );
+    const result = plan([yearSheet, newSheet, usedSheet], ["2025", "New", "Used"]);
+    assert.deepEqual(
+      result.sheets.map(({ name, sales, toAdd, duplicates }) => [name, sales, toAdd, duplicates]),
+      [
+        ["2025", 3, 3, 0],
+        ["New", 4, 2, 2],
+        ["Used", 3, 1, 2],
+      ],
+    );
+    assert.deepEqual(
+      result.notes.filter((note) => note.kind === "duplicate").map((note) => `${note.sheet}!${note.row}: ${note.message}`),
+      [
+        "New!2: Already on the 2025 sheet, row 2 (the same customer the same day): left out.",
+        "New!3: Already on the 2025 sheet, row 2 (the same VIN, sold new): left out.",
+        "Used!2: Already on the 2025 sheet, row 3 (the same customer the same day, one of them with no sales price): left out.",
+        "Used!3: Already on the 2025 sheet, row 3 (the same customer the same day): left out.",
+      ],
+    );
+    assert.deepEqual(
+      result.notes.filter((note) => note.kind === "repeat").map((note) => `${note.sheet}!${note.row}`),
+      ["New!4", "New!5", "Used!4"],
+    );
+    assert.match(notesOn(result, "New!4")[0], /^No year sheet has this sale, but New repeats them: it may be one of theirs .* Check it\.$/);
+    // Without a year sheet in the import there's nothing for them to repeat.
+    const alone = plan([yearSheet, newSheet, usedSheet], ["New", "Used"]);
+    assert.deepEqual(
+      alone.sheets.map(({ name, toAdd, duplicates }) => [name, toAdd, duplicates]),
+      [
+        ["New", 4, 0],
+        ["Used", 3, 0],
+      ],
+    );
+    assert.equal(alone.notes.filter((note) => note.kind === "repeat").length, 0);
+  });
+
   test("every planned sale has its sheet and row and fields the form takes, in batches small enough to send", () => {
     const result = plan([repeats, trailers, year], ["2025", "Trailers", "New"]);
     for (const planned of result.sales) {
@@ -653,6 +813,40 @@ describe("a sale on two sheets", () => {
     assert.equal(find({ ref: null, vin: farm[0].slice(0, 16), soldOn: "2026-04-01", customerName: "Hollow Creek Farms", salesPrice: 1199900 }), "customerPrice");
     assert.equal(find({ ref: null, vin: `N0${farm[0]}`, soldOn: "2026-04-01", customerName: "Hollow Creek Farms", salesPrice: 1199900 }), "customerPrice");
     assert.equal(find({ ref: null, vin: "3NSVDE9920HF79278", soldOn: "2026-04-01", customerName: "Hollow Creek Farms", salesPrice: 1199900 }), null);
+  });
+
+  test("a sale on file is found by the customer rules once an import, and on its own sheet only once the rows have moved", () => {
+    const ids = Array.from({ length: 4 }, () => randomUUID());
+    const onFile = (id: string, ref: string | null, customerName: string, thisImport = false) => ({
+      ref,
+      vin: null,
+      soldOn: "2024-06-03",
+      customerName,
+      salesPrice: 1199900,
+      onFile: { id, thisImport },
+    });
+    // Typed in; from an earlier import of the 2024 sheet; from this import;
+    // typed in and found by an earlier batch of this import.
+    const finder = saleFinder(
+      [onFile(ids[0], null, "Quenby Marchetti"), onFile(ids[1], "2024!2", "Tobiah Ferncastle"), onFile(ids[2], "2024!3", "Linnet Okonkwo", true), onFile(ids[3], null, "Ysolde Penhallow")],
+      [ids[3]],
+    );
+    const find = (ref: string, customerName: string) => {
+      const found = finder.find({ ref, vin: null, soldOn: "2024-06-04", customerName, salesPrice: 1199900 });
+      return found.match ? `${found.how} ${found.match.onFile?.id}` : found.refTaken ? "refTaken" : null;
+    };
+    // Found once: the customer's second unit is another sale.
+    assert.equal(find("2024!40", "Quenby Marchetti"), `customerPrice ${ids[0]}`);
+    assert.equal(find("2024!41", "Quenby Marchetti"), null);
+    assert.equal(find("2024!42", "Ysolde Penhallow"), null);
+    // An earlier import's sale of the same sheet: not while the rows are
+    // where they were, but once its row is another sale's.
+    assert.equal(find("2024!9", "Tobiah Ferncastle"), null);
+    assert.equal(find("2024!2", "Wren Calloway"), "refTaken");
+    assert.equal(find("2024!9", "Tobiah Ferncastle"), `customerPrice ${ids[1]}`);
+    // This import's own is another row of the file: on another sheet only.
+    assert.equal(find("2024!8", "Linnet Okonkwo"), null);
+    assert.equal(find("New!8", "Linnet Okonkwo"), `customerPrice ${ids[2]}`);
   });
 });
 
@@ -1005,5 +1199,210 @@ describe("saving an import", () => {
     assert.equal(added, 20);
     const [{ count }] = await systemDb.select({ count: sql<number>`count(*)::int` }).from(unitSales).where(and(eq(unitSales.shopId, manager.shop.id), sql`${unitSales.customerName} like 'Racer %'`));
     assert.equal(count, 20);
+  });
+
+  // An import's batches as the page sends them: one after another, each
+  // with the sales on file the ones before it found.
+  async function sendInBatches(actor: CurrentUser, batches: NusrImportEntry[][], importId = randomUUID()) {
+    const outcomes: [string, string, string | null][] = [];
+    let found: string[] = [];
+    for (const batch of batches) {
+      const result = await importSales(actor, { importId, fileName: "NUSR_2026.xlsx", sales: batch, found });
+      assert.ok("outcomes" in result, JSON.stringify(result));
+      outcomes.push(...result.outcomes.map(({ ref, result: what, reason }): [string, string, string | null] => [ref, what, reason]));
+      found = [...found, ...result.found];
+    }
+    return { outcomes, found };
+  }
+
+  test("one sale on file stands for one of a customer's units, not all of them, in one batch or several", async () => {
+    const shop = await createManager(`nk${suffix}`);
+    // Logged by hand before the VIN was in.
+    const logged = await logSale(shop, typed({ soldOn: "2024-06-01", customerName: "Marlow Fenwick", unitModel: "Fieldrunner 600", salesPrice: "11999" }));
+    assert.ok("id" in logged, JSON.stringify(logged));
+    const units = (customerName: string, stem: string) =>
+      entriesOf([
+        sheet(
+          "2024",
+          ["2024-06-01", "2024-06-01", "2024-06-03"].map((day, at) => unit({ B: day, D: customerName, J: vin(`${stem}${at}`), H: "Fieldrunner 600", L: "11999" })),
+        ),
+      ]);
+    const one = await sendInBatches(shop, units("Marlow Fenwick", "3NSRGE99_R830000").map((entry) => [entry]));
+    assert.deepEqual(
+      one.outcomes.map(([ref, result]) => [ref, result]),
+      [
+        ["2024!2", "already"],
+        ["2024!3", "added"],
+        ["2024!4", "added"],
+      ],
+    );
+    assert.deepEqual(one.found, [logged.id]);
+    assert.equal((await salesOf(shop.shop.id)).length, 3);
+    // All in one batch, for another customer.
+    assert.ok("id" in (await logSale(shop, typed({ soldOn: "2024-06-01", customerName: "Delphine Ashgrove", unitModel: "Fieldrunner 600", salesPrice: "11999" }))));
+    const all = await sendInBatches(shop, [units("Delphine Ashgrove", "3NSRGE99_R830001")]);
+    assert.deepEqual(
+      all.outcomes.map(([, result]) => result),
+      ["already", "added", "added"],
+    );
+    // A sale sent back as found that wasn't only leaves a sale to be added.
+    const [entry] = entriesOf([sheet("2024", [unit({ B: "2024-06-20", D: "Ansel Whitcombe", J: vin("3NSRGE99_R8300020"), L: "8000" })])]);
+    assert.ok("id" in (await logSale(shop, typed({ soldOn: "2024-06-20", customerName: "Ansel Whitcombe", salesPrice: "8000" }))));
+    const made = await importSales(shop, { importId: randomUUID(), fileName: "x.xlsx", sales: [entry], found: ["nope", 7, ...(await salesOf(shop.shop.id)).map((row) => row.id)] });
+    assert.ok("outcomes" in made);
+    assert.deepEqual(made.outcomes.map((outcome) => outcome.result), ["added"]);
+  });
+
+  test("after a row is put in above them or taken out, importing again finds the sales without a VIN on their own sheet", async () => {
+    const shop = await createManager(`nl${suffix}`);
+    const rows = [
+      unit({ B: "2024-08-01", D: "Isolde Varga", J: vin("4XARRE99_R8300101") }),
+      unit({ B: "2024-08-02", D: "Caspian Rourke", J: "", L: "9999" }),
+      unit({ B: "2024-08-03", D: "Wilhelmina Strand", J: "", L: "8999" }),
+    ];
+    const first = await sendInBatches(shop, [entriesOf([sheet("2024", rows)])]);
+    assert.deepEqual(
+      first.outcomes.map(([, result]) => result),
+      ["added", "added", "added"],
+    );
+    // A late deal put in at the top: every row under it is a row down.
+    const late = unit({ B: "2024-07-31", D: "Leopold Avery", J: vin("4XARRE99_R8300104") });
+    const again = await sendInBatches(shop, [entriesOf([sheet("2024", [late, ...rows])])]);
+    assert.deepEqual(again.outcomes, [
+      ["2024!2", "added", null],
+      ["2024!3", "already", "Already in the NUSR: the same VIN, sold the same day."],
+      ["2024!4", "already", "Already in the NUSR: the same customer and sales price, within a week."],
+      ["2024!5", "already", "Already in the NUSR: the same customer and sales price, within a week."],
+    ]);
+    // Taken out again: every row back up one.
+    const back = await sendInBatches(shop, [entriesOf([sheet("2024", rows)])]);
+    assert.deepEqual(
+      back.outcomes.map(([, result]) => result),
+      ["already", "already", "already"],
+    );
+    assert.equal((await salesOf(shop.shop.id)).length, 4);
+    // A second unit of a customer's, at the same price that week, added to
+    // the sheet since: another sale, in the same batch or the next.
+    const second = unit({ B: "2024-08-04", D: "Caspian Rourke", J: "", L: "9999" });
+    const more = await sendInBatches(shop, [entriesOf([sheet("2024", [...rows, second])]).slice(0, 2), entriesOf([sheet("2024", [...rows, second])]).slice(2)]);
+    assert.deepEqual(
+      more.outcomes.map(([ref, result]) => [ref, result]),
+      [
+        ["2024!2", "already"],
+        ["2024!3", "already"],
+        ["2024!4", "already"],
+        ["2024!5", "added"],
+      ],
+    );
+  });
+
+  test("a sale removed from the NUSR isn't brought back by importing the workbook again; another sale on its row is added", async () => {
+    const shop = await createManager(`nm${suffix}`);
+    const kept = unit({ B: "2024-07-01", D: "Rosalind Pryce", J: vin("4XARRE99_R8300201") });
+    const workbook = [sheet("2024", [kept, unit({ B: "2024-07-02", D: "Thaddeus Wrenfield", J: "", L: "7300" })])];
+    assert.deepEqual(
+      results(await send(shop, entriesOf(workbook))).map(([, result]) => result),
+      ["added", "added"],
+    );
+    const gone = (await salesOf(shop.shop.id)).find((row) => row.importRef === "2024!3")!;
+    assert.ok("ok" in (await removeSale(shop, gone.id)));
+    const [removal] = await systemDb.select().from(auditLog).where(and(eq(auditLog.targetId, gone.id), eq(auditLog.action, "unit_sale.removed")));
+    assert.equal(removal.details.importRef, "2024!3");
+    assert.deepEqual(results(await send(shop, entriesOf(workbook))), [
+      ["2024!2", "already", "Already in the NUSR: the same row of the same sheet."],
+      ["2024!3", "failed", `It was removed from the NUSR on ${shopToday(removal.createdAt)}, so it isn't brought back.`],
+    ]);
+    // The workbook changed: that row is another customer's sale now.
+    const changed = [sheet("2024", [kept, unit({ B: "2024-07-05", D: "Ottoline Brandt", J: vin("4XARRE99_R8300203") })])];
+    assert.deepEqual(results(await send(shop, entriesOf(changed)))[1], ["2024!3", "added", null]);
+    // A sale logged by hand and removed has no row to leave out.
+    const typedIn = await logSale(shop, typed({ soldOn: "2024-07-09", customerName: "Thaddeus Wrenfield", salesPrice: "7300" }));
+    assert.ok("id" in typedIn && "ok" in (await removeSale(shop, typedIn.id)));
+    const [plain] = await systemDb.select().from(auditLog).where(and(eq(auditLog.targetId, typedIn.id), eq(auditLog.action, "unit_sale.removed")));
+    assert.equal("importRef" in plain.details, false);
+  });
+
+  test("a batch sent again after its reply was lost counts the sales it saved as added", async () => {
+    const shop = await createManager(`nn${suffix}`);
+    // On file from an earlier import: row 4 is another sale's.
+    assert.deepEqual(results(await send(shop, entriesOf([sheet("2023", [unit({ B: "2023-03-01", D: "Bramwell Thistlecombe", J: vin("4XARRE99_P8300301") })])]).map((entry) => ({ ...entry, ref: "2023!4" })))), [
+      ["2023!4", "added", null],
+    ]);
+    const entries = entriesOf([
+      sheet("2023", [
+        unit({ B: "2023-03-02", D: "Seraphine Quillfeather", J: vin("4XARRE99_P8300302") }),
+        unit({ B: "2023-03-03", D: "Quillon Dacre", J: "", L: "6400" }),
+        unit({ B: "2023-03-04", D: "Ingrid Solberg", J: vin("4XARRE99_P8300304") }),
+      ]),
+    ]);
+    const importId = randomUUID();
+    // Saved, but its reply never came, so it's sent again.
+    assert.deepEqual(results(await send(shop, entries, importId)).map(([, result]) => result), ["added", "added", "added"]);
+    assert.deepEqual(results(await send(shop, entries, importId)), [
+      ["2023!2", "added", null],
+      ["2023!3", "added", null],
+      ["2023!4", "added", null],
+    ]);
+    // Each batch's own entry in the Activity log says what it did itself.
+    const logged = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, importId)).orderBy(auditLog.seq);
+    assert.deepEqual(
+      logged.map(({ details }) => [details.added, details.already]),
+      [
+        [3, 0],
+        [0, 3],
+      ],
+    );
+    const saved = await salesOf(shop.shop.id);
+    assert.equal(saved.length, 4);
+    assert.deepEqual(
+      saved.filter((row) => row.importId === importId).map((row) => [row.importRef, row.customerName]),
+      [
+        ["2023!2", "Seraphine Quillfeather"],
+        ["2023!3", "Quillon Dacre"],
+        [null, "Ingrid Solberg"],
+      ],
+    );
+    // Another import of the same file finds them already in the NUSR.
+    assert.deepEqual(
+      results(await send(shop, entries)).map(([, result]) => result),
+      ["already", "already", "already"],
+    );
+  });
+
+  test("a sale logged by hand before its price was in is found by the same customer the same day, when the models agree", async () => {
+    const shop = await createManager(`nq${suffix}`);
+    const logged = await logSale(shop, typed({ soldOn: "2026-10-20", customerName: "Bertrand Ashby", unitModel: "Trailhawk 450", condition: "used", unitType: "trade" }));
+    assert.ok("id" in logged, JSON.stringify(logged));
+    const entries = entriesOf([
+      sheet("2026", [
+        // Another unit the same day, a model of its own.
+        unit({ B: "2026-10-20", D: "Bertrand Ashby", H: "Wisp 70", L: "2500", M: "2000" }),
+        unit({ B: "2026-10-20", D: "Bertrand Ashby", I: "U", K: "Trade", H: "TRAILHAWK450", L: "5500", M: "4800" }),
+      ]),
+    ]);
+    assert.deepEqual(results(await send(shop, entries)), [
+      ["2026!2", "added", null],
+      ["2026!3", "already", "Already in the NUSR: the same customer the same day, one of them with no sales price."],
+    ]);
+    assert.equal((await salesOf(shop.shop.id)).length, 2);
+  });
+
+  test("a file name with half of a two-part character is saved with that half replaced", async () => {
+    const shop = await createManager(`nr${suffix}`);
+    const importId = randomUUID();
+    const entries = entriesOf([sheet("2022", [unit({ B: "2022-09-01", D: "Corisande Ashvane", J: vin("4XARRE99_N8300401") })])]);
+    const outcome = await importSales(shop, { importId, fileName: "NUSR\ud800 2026.xlsx", sales: entries });
+    assert.deepEqual(results(outcome), [["2022!2", "added", null]]);
+    const [entry] = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, importId));
+    assert.equal(entry.details.fileName, "NUSR� 2026.xlsx");
+  });
+
+  test("app_user can't change which import added a sale", async () => {
+    const shop = await createManager(`ns${suffix}`);
+    results(await send(shop, entriesOf([sheet("2021", [unit({ B: "2021-02-01", D: "Evander Lusk", J: vin("4XARRE99_M8300501") })])])));
+    await assert.rejects(
+      withShop(shop.shop.id, (tx) => tx.execute(sql`update unit_sales set import_id = ${randomUUID()} where shop_id = ${shop.shop.id}`)),
+      (error: Error & { cause?: { code?: string } }) => error.cause?.code === "42501",
+    );
   });
 });

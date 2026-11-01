@@ -167,9 +167,10 @@ const COMPARISON = /^comparison$/i;
 const DATE_LIKE = /^\d{1,4}(?:[/.-]+\d{1,4}){1,3}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/;
 
 // What a row of an NUSR sheet is, by the sheet's own pattern: a sale has a
-// date (a date cell, or typed like one) and a customer, with or without a
-// salesman (the NUSR tab logs sales without one, and the shop's own sheets
-// have no sale missing one, so a forgotten one never drops a sale).
+// customer and a date (a date cell, or typed like one), a salesman, a VIN
+// or a sales price. So a sale with no salesman counts (the NUSR tab logs
+// sales without one), and so does one whose date was left blank or typed
+// some other way: it's left out with a note, not dropped without a word.
 // Anything else is a spacer, a year divider, a row of formulas waiting for
 // a sale, or a stray number. "end" is the first TOTAL, AVG or Comparison
 // row, under the last sale: nothing below it is read.
@@ -177,7 +178,9 @@ function rowKind(cells: readonly string[], layout: Layout): "sale" | "end" | "ot
   const salesman = cellAt(cells, layout.columns.salesperson);
   const customer = cellAt(cells, layout.columns.customerName);
   if (LABEL_ROW.test(salesman) || COMPARISON.test(salesman) || COMPARISON.test(customer)) return "end";
-  return DATE_LIKE.test(cellAt(cells, layout.columns.soldOn)) && customer !== "" ? "sale" : "other";
+  if (customer === "") return "other";
+  const dated = DATE_LIKE.test(cellAt(cells, layout.columns.soldOn));
+  return dated || salesman !== "" || cellAt(cells, layout.columns.vin) !== "" || cellAt(cells, layout.columns.salesPrice) !== "" ? "sale" : "other";
 }
 
 // The sale rows of a sheet (their index in rows), and where the TOTAL rows
@@ -200,10 +203,11 @@ const yearOf = (name: string) => {
 };
 
 // A workbook's NUSR sheets: where they are, their year (a sheet named for
-// one), how many sales each holds, and whether it's in the import to start
-// with. When there are year sheets, New and Used repeat them (every new
-// and every used unit since 2015, copied from the year sheets), so they're
-// offered but left out to start with; any other NUSR sheet (Trailers) is
+// one), how many sales each holds, whether it's hidden in the workbook, and
+// whether it's in the import to start with. When there are year sheets, New
+// and Used repeat them (every new and every used unit since 2015, copied
+// from the year sheets), so they're offered but left out to start with, as
+// is a hidden sheet (often an old copy); any other NUSR sheet (Trailers) is
 // in, its sales already on a year sheet left out as the same sales.
 export type NusrSheet = {
   index: number;
@@ -211,6 +215,7 @@ export type NusrSheet = {
   year: number | null;
   sales: number;
   repeats: boolean;
+  hidden: boolean;
   chosen: boolean;
 };
 
@@ -345,20 +350,29 @@ function withinEdits(a: string, b: string, most: number) {
 const startsWords = (short: string, long: string) => long.length > short.length && long.startsWith(`${short} `);
 
 // The names a sheet's salesmen or lenders go by, as each is spelt most
-// often. Case and spacing don't count ("sam Teller", "Keystone "); a name
-// that is the first words of a more common one ("Keystone Finance Co" and
-// "Keystone") or a slip or two from a much more common one ("Sam Tellr",
-// "Keystne", "Keyst one") is that one, when it can only be that one. By lower-cased name: the name it goes by, and whether
-// that's another name's.
-type Names = Map<string, { name: string; merged: boolean }>;
+// often. Case and spacing don't count ("sam Teller", "Keystone "), and a
+// name that is the first words of a more common one ("Keystone Finance Co"
+// and "Keystone") is that one, when it can only be that one. A slip or two
+// from a much more common name ("Sam Tellr", "Keystne", "Keyst one") is
+// that one only when it's on one sale and 8 letters or more: a short name
+// or one on several sales may be someone else a letter apart ("Abe" and
+// "Ade", or two banks' initials), so it's kept as typed, with the name it
+// may be. Each name typed comes with the sale it's on (its customer and
+// date), so a row copied onto New or Used is still one sale. By lower-cased
+// name: the name it goes by, whether that's another name's, and the name
+// it may be.
+type Names = Map<string, { name: string; merged: boolean; mayBe: string | null }>;
 
-function namesOf(typed: readonly string[]): Names {
-  const groups = new Map<string, { count: number; spellings: Map<string, number> }>();
-  for (const text of typed) {
+const LOOK_ALIKE_LETTERS = 8;
+
+function namesOf(typed: readonly { name: string; sale: string }[]): Names {
+  const groups = new Map<string, { count: number; sales: Set<string>; spellings: Map<string, number> }>();
+  for (const { name: text, sale } of typed) {
     const name = oneLine(text);
     if (!name) continue;
-    const group = groups.get(name.toLowerCase()) ?? { count: 0, spellings: new Map<string, number>() };
+    const group = groups.get(name.toLowerCase()) ?? { count: 0, sales: new Set<string>(), spellings: new Map<string, number>() };
     group.count++;
+    group.sales.add(sale);
     group.spellings.set(name, (group.spellings.get(name) ?? 0) + 1);
     groups.set(name.toLowerCase(), group);
   }
@@ -366,21 +380,24 @@ function namesOf(typed: readonly string[]): Names {
   const spelling = (spellings: Map<string, number>) =>
     [...spellings].sort((a, b) => b[1] - a[1] || Number(b[0] !== b[0].toLowerCase()) - Number(a[0] !== a[0].toLowerCase()) || (a[0] < b[0] ? -1 : 1))[0][0];
   const ranked = [...groups]
-    .map(([key, group]) => ({ key, count: group.count, name: spelling(group.spellings) }))
+    .map(([key, group]) => ({ key, count: group.count, sales: group.sales.size, name: spelling(group.spellings) }))
     .sort((a, b) => b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const kept: typeof ranked = [];
   const names: Names = new Map();
   for (const entry of ranked) {
+    const firstWords = (other: (typeof ranked)[number]) =>
+      other.count > entry.count && (startsWords(entry.key, other.key) || startsWords(other.key, entry.key));
     const into = kept.filter(
       (other) =>
-        (other.count > entry.count && (startsWords(entry.key, other.key) || startsWords(other.key, entry.key))) ||
+        firstWords(other) ||
         (other.count >= 5 * entry.count && withinEdits(entry.key, other.key, Math.min(entry.key.length, other.key.length) >= 6 ? 2 : 1)),
     );
-    if (into.length === 1) {
-      names.set(entry.key, { name: into[0].name, merged: true });
+    const slip = entry.sales === 1 && entry.key.replace(/[^\p{L}]/gu, "").length >= LOOK_ALIKE_LETTERS;
+    if (into.length === 1 && (firstWords(into[0]) || slip)) {
+      names.set(entry.key, { name: into[0].name, merged: true, mayBe: null });
     } else {
       kept.push(entry);
-      names.set(entry.key, { name: entry.name, merged: false });
+      names.set(entry.key, { name: entry.name, merged: false, mayBe: into.length === 1 ? into[0].name : null });
     }
   }
   return names;
@@ -390,16 +407,28 @@ function namesOf(typed: readonly string[]): Names {
 
 // A sale as matching sees it: where it was imported from ("2026!374", the
 // sheet and row; null when it was typed in), its VIN, the day it was sold
-// (null when the sheet's date can't be read), the customer and the price.
-export type KnownSale = { ref: string | null; vin: string | null; soldOn: string | null; customerName: string; salesPrice: Cents | null };
+// (null when the sheet's date can't be read), the customer, the price and
+// the model. A sale already in the NUSR when the server saves a batch has
+// onFile: its id, and whether this same import added it (an earlier batch,
+// or this one sent again); planned sales and the batch's own have none.
+export type KnownSale = {
+  ref: string | null;
+  vin: string | null;
+  soldOn: string | null;
+  customerName: string;
+  salesPrice: Cents | null;
+  unitModel?: string | null;
+  onFile?: { id: string; thisImport: boolean } | null;
+};
 
-export type SaleMatch = "ref" | "vinDay" | "vinCustomer" | "customerPrice";
+export type SaleMatch = "ref" | "vinDay" | "vinCustomer" | "customerPrice" | "customerDay";
 
 export const MATCH_WORDS: Record<SaleMatch, string> = {
   ref: "the same row of the same sheet",
   vinDay: "the same VIN, sold the same day",
   vinCustomer: "the same VIN, sold to the same customer",
   customerPrice: "the same customer and sales price, within a week",
+  customerDay: "the same customer the same day, one of them with no sales price",
 };
 
 // Customers are matched on their name's letters and digits: "Hollow Creek
@@ -414,34 +443,59 @@ export const isImportRef = (ref: unknown): ref is string => typeof ref === "stri
 
 export const refLabel = (ref: string) => `the ${refSheet(ref)} sheet, row ${ref.slice(ref.lastIndexOf("!") + 1)}`;
 
+// Whether a VIN is whole and right: 17 characters, its check digit
+// matching the rest.
+function isWholeVin(vin: string | null) {
+  if (!vin) return false;
+  const checked = checkVin(vin);
+  return checked.status === "ok" && checked.checkDigitOk && checked.vin === vin;
+}
+
+// Models are compared on their letters and digits, as customers are; a
+// sale without one agrees with any.
+const sameModel = (a: string | null | undefined, b: string | null | undefined) => !a || !b || customerKey(a) === customerKey(b);
+
 // The sales known so far (planned already, or on file), to find a sale
 // again: the same row of the same sheet, for the same unit or customer
 // (importing a file again); the same VIN sold the same day (what the log
 // can't hold twice); the same VIN sold to the same customer (a date typed
-// differently on another sheet); or the same customer and sales price
-// within a week, with VINs that could be one: one left out, one a
-// character off the other or inside it (a VIN typed wrong, with something
-// typed before it), or the sale's VIN another sale's already (copied from
-// the wrong row). Two different VINs that are both whole and right are two
-// units, so a customer's several units of a model bought together stay
-// several; and two rows of one sheet are never matched that way. When a
-// sale's row is already taken by another sale (the file has changed
-// since), refTaken says so.
-export function saleFinder(known: readonly KnownSale[] = []) {
+// differently on another sheet); the same customer and sales price within
+// a week, with VINs that could be one: one left out, one a character off
+// the other or inside it (a VIN typed wrong, with something typed before
+// it), or the sale's VIN another sale's already (copied from the wrong
+// row); or the same customer the same day when one of them has no sales
+// price yet (logged before its numbers were in), unless both have whole
+// VINs that differ or their models do. Two different VINs that are both
+// whole and right are two units, so a customer's several units of a model
+// bought together stay several. Those last two, the customer rules, never
+// match two rows of one sheet, as rows of the file in hand or of sales
+// this same import added; a sale an earlier import brought in from that
+// sheet is matched once the rows have moved (this row's place is another
+// sale's now, or that sale's is), so a row moved down or up by one put in
+// or taken out above is found again without a VIN. And they find a sale on
+// file only while this import hasn't found it already, in any way, so one
+// sale never stands for two of the file's: found (the ids of the sales
+// found by earlier batches of the import) carries that from batch to
+// batch, and only ever narrows what's found. When a sale's row is already
+// taken by another sale (the file has changed since), refTaken says so.
+export function saleFinder(known: readonly KnownSale[] = [], found: Iterable<string> = []) {
   const byRef = new Map<string, KnownSale>();
   const byVinDay = new Map<string, KnownSale>();
   const byVinCustomer = new Map<string, KnownSale>();
   const vins = new Set<string>();
   const byCustomer = new Map<string, KnownSale[]>();
+  // Sales on file this import has found, and those whose row is another
+  // sale's now.
+  const taken = new Set(found);
+  const moved = new Set<string>();
   const whole = new Map<string, boolean>();
   const isWhole = (vin: string | null) => {
     if (!vin) return false;
-    if (!whole.has(vin)) {
-      const checked = checkVin(vin);
-      whole.set(vin, checked.status === "ok" && checked.checkDigitOk && checked.vin === vin);
-    }
+    if (!whole.has(vin)) whole.set(vin, isWholeVin(vin));
     return whole.get(vin)!;
   };
+  // An earlier import's sale on file (not this one's).
+  const earlier = (sale: KnownSale) => (sale.onFile && !sale.onFile.thisImport ? sale.onFile.id : null);
 
   function add(sale: KnownSale) {
     const customer = customerKey(sale.customerName);
@@ -449,7 +503,7 @@ export function saleFinder(known: readonly KnownSale[] = []) {
     if (sale.vin && sale.soldOn && !byVinDay.has(`${sale.vin}|${sale.soldOn}`)) byVinDay.set(`${sale.vin}|${sale.soldOn}`, sale);
     if (sale.vin && customer && !byVinCustomer.has(`${sale.vin}|${customer}`)) byVinCustomer.set(`${sale.vin}|${customer}`, sale);
     if (sale.vin) vins.add(sale.vin);
-    if (customer && sale.soldOn && sale.salesPrice !== null) {
+    if (customer && sale.soldOn) {
       const list = byCustomer.get(customer);
       if (list) list.push(sale);
       else byCustomer.set(customer, [sale]);
@@ -457,20 +511,35 @@ export function saleFinder(known: readonly KnownSale[] = []) {
   }
 
   function find(sale: KnownSale): { match: KnownSale; how: SaleMatch } | { match: null; refTaken: boolean } {
+    const matched = (match: KnownSale, how: SaleMatch) => {
+      const id = earlier(match);
+      if (id) taken.add(id);
+      return { match, how };
+    };
     const customer = customerKey(sale.customerName);
     let refTaken = false;
     const onRef = sale.ref ? byRef.get(sale.ref) : undefined;
     if (onRef) {
-      if ((sale.vin && onRef.vin === sale.vin) || (customer && customerKey(onRef.customerName) === customer)) return { match: onRef, how: "ref" };
+      if ((sale.vin && onRef.vin === sale.vin) || (customer && customerKey(onRef.customerName) === customer)) return matched(onRef, "ref");
       refTaken = true;
+      const id = earlier(onRef);
+      if (id) moved.add(id);
     }
     const vinDay = sale.vin && sale.soldOn ? byVinDay.get(`${sale.vin}|${sale.soldOn}`) : undefined;
-    if (vinDay) return { match: vinDay, how: "vinDay" };
+    if (vinDay) return matched(vinDay, "vinDay");
     const vinCustomer = sale.vin && customer ? byVinCustomer.get(`${sale.vin}|${customer}`) : undefined;
-    if (vinCustomer) return { match: vinCustomer, how: "vinCustomer" };
-    if (customer && sale.soldOn && sale.salesPrice !== null) {
-      const day = dayNumber(sale.soldOn);
-      const sheet = refSheet(sale.ref);
+    if (vinCustomer) return matched(vinCustomer, "vinCustomer");
+    if (!customer || !sale.soldOn) return { match: null, refTaken };
+    const day = dayNumber(sale.soldOn);
+    const sheet = refSheet(sale.ref);
+    const open = (other: KnownSale) => {
+      if (other.onFile && taken.has(other.onFile.id)) return false;
+      if (sheet === null || refSheet(other.ref) !== sheet) return true;
+      const id = earlier(other);
+      return id !== null && (refTaken || moved.has(id));
+    };
+    const others = byCustomer.get(customer) ?? [];
+    if (sale.salesPrice !== null) {
       const copied = sale.vin !== null && vins.has(sale.vin);
       const couldBeOne = (other: string | null) => {
         if (!sale.vin || !other || copied) return true;
@@ -478,15 +547,20 @@ export function saleFinder(known: readonly KnownSale[] = []) {
         const inside = Math.min(sale.vin.length, other.length) >= 8 && (sale.vin.includes(other) || other.includes(sale.vin));
         return inside || withinEdits(sale.vin, other, 1);
       };
-      const near = (byCustomer.get(customer) ?? []).find(
-        (other) =>
-          other.salesPrice === sale.salesPrice &&
-          Math.abs(dayNumber(other.soldOn!) - day) <= 7 &&
-          !(sheet !== null && refSheet(other.ref) === sheet) &&
-          couldBeOne(other.vin),
+      const near = others.find(
+        (other) => other.salesPrice === sale.salesPrice && Math.abs(dayNumber(other.soldOn!) - day) <= 7 && couldBeOne(other.vin) && open(other),
       );
-      if (near) return { match: near, how: "customerPrice" };
+      if (near) return matched(near, "customerPrice");
     }
+    const sameDay = others.find(
+      (other) =>
+        other.soldOn === sale.soldOn &&
+        (other.salesPrice === null || sale.salesPrice === null) &&
+        !(isWhole(sale.vin) && isWhole(other.vin) && sale.vin !== other.vin) &&
+        sameModel(sale.unitModel, other.unitModel) &&
+        open(other),
+    );
+    if (sameDay) return matched(sameDay, "customerDay");
     return { match: null, refTaken };
   }
 
@@ -497,11 +571,12 @@ export function saleFinder(known: readonly KnownSale[] = []) {
 // --- Planning ---------------------------------------------------------------------------
 
 // What a note is about, to group them by.
-export const NOTE_KINDS = ["skipped", "duplicate", "onFile", "date", "payment", "amount", "figures", "vin", "unit", "name", "other"] as const;
+export const NOTE_KINDS = ["skipped", "duplicate", "repeat", "onFile", "date", "payment", "amount", "figures", "vin", "unit", "name", "other"] as const;
 export type NoteKind = (typeof NOTE_KINDS)[number];
 export const NOTE_KIND_LABELS: Record<NoteKind, string> = {
   skipped: "Left out",
   duplicate: "On another sheet too",
+  repeat: "May be on a year sheet too",
   onFile: "Already in the NUSR",
   date: "Sale dates",
   payment: "Funding and payment",
@@ -538,6 +613,15 @@ const TYPED_AMOUNTS = ["salesPrice", "dealerCost", "unitLabor", "accPrice", "acc
 // rows out of order) is a slip in the year.
 const FITS_DAYS = 31;
 
+// A sale's Date as readSheetDate reads it, or an Excel day number that lost
+// its date format (45457).
+function saleDay(typed: string): { date: Day; typed: boolean; serial: boolean } | null {
+  const read = readSheetDate(typed);
+  if (read) return { ...read, serial: false };
+  const serial = serialDay(typed);
+  return serial ? { date: serial, typed: true, serial: true } : null;
+}
+
 // Each sale row's date on a sheet, as read: a year sheet's date in another
 // year ("2023-06-14" on the 2024 sheet, "1924-06-14" on the 2024 sheet)
 // takes the sheet's year when that puts it between the rows around it, or
@@ -545,7 +629,7 @@ const FITS_DAYS = 31;
 function saleDates(rows: readonly string[][], sales: readonly number[], layout: Layout, sheetYear: number | null) {
   const read = sales.map((index) => {
     const typed = cellAt(rows[index], layout.columns.soldOn);
-    return { typed, read: readSheetDate(typed) };
+    return { typed, read: saleDay(typed) };
   });
   const inYear = read.map((entry) => (entry.read && entry.read.date.year === sheetYear ? dayNumber(dayText(entry.read.date)) : null));
   const nearest = (from: number, step: number) => {
@@ -553,10 +637,11 @@ function saleDates(rows: readonly string[][], sales: readonly number[], layout: 
     return null;
   };
   return read.map(({ typed, read: date }, at): { soldOn: string; notes: Note[] } | { problem: string } => {
-    if (!date) return { problem: `Date ${quoted(typed)} isn't a day: left out.` };
+    if (!date) return { problem: typed ? `Date ${quoted(typed)} isn't a day: left out.` : "No Date: left out." };
     const notes: Note[] = [];
     let day = date.date;
-    if (date.typed) notes.push({ kind: "date", message: `Date ${quoted(typed)} read as ${dayText(day)}.` });
+    if (date.serial) notes.push({ kind: "date", message: `Date ${typed} read as the date ${dayText(day)}.` });
+    else if (date.typed) notes.push({ kind: "date", message: `Date ${quoted(typed)} read as ${dayText(day)}.` });
     if (sheetYear !== null && day.year !== sheetYear) {
       const moved = { ...day, year: sheetYear };
       const before = nearest(at, -1);
@@ -793,7 +878,7 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
   }
 
   // Salesman and lender, by the names they go by most.
-  const named = (names: Names, typed: string) => names.get(typed.toLowerCase()) ?? { name: typed, merged: false };
+  const named = (names: Names, typed: string) => names.get(typed.toLowerCase()) ?? { name: typed, merged: false, mayBe: null };
   const salesTyped = oneLine(value("salesperson"));
   const salesperson = salesTyped ? named(context.salespeople, salesTyped) : null;
   const lenderTyped = oneLine(value("financeCompany"));
@@ -917,7 +1002,12 @@ function readSale(context: { layout: Layout; salespeople: Names; lenders: Names;
     ...(salesperson?.merged ? [{ what: heading("salesperson"), typed: salesTyped, name: salesperson.name }] : []),
     ...(lender?.merged ? [{ what: heading("financeCompany"), typed: lenderTyped, name: lender.name }] : []),
   ];
-  return { fields, notes, merged };
+  // Names kept as they are that may be another: the name kept, and that one.
+  const lookAlikes = [
+    ...(salesperson?.mayBe ? [{ what: heading("salesperson"), typed: salesperson.name, name: salesperson.mayBe }] : []),
+    ...(lender?.mayBe ? [{ what: heading("financeCompany"), typed: lender.name, name: lender.mayBe }] : []),
+  ];
+  return { fields, notes, merged, lookAlikes };
 }
 
 // Where the sheet's own figures and the ones worked out from the row's
@@ -939,13 +1029,15 @@ function figureNote(sale: SaleFields, cells: readonly string[], layout: Layout):
   return { kind: "figures", message: `Worked out from the row's amounts: ${list}.` };
 }
 
-// A sale row, read: the sale with its notes and any names read as another,
-// or why it can't be read (with what it is, to find it on another sheet).
+// A sale row, read: the sale with its notes, any names read as another and
+// any kept that may be another, or why it can't be read (with what it is,
+// to find it on another sheet).
+type NameNote = { what: string; typed: string; name: string };
 type ReadRow = {
   row: number;
   ref: string;
   read:
-    | { sale: SaleFields; fields: SaleInput; notes: Note[]; merged: { what: string; typed: string; name: string }[] }
+    | { sale: SaleFields; fields: SaleInput; notes: Note[]; merged: NameNote[]; lookAlikes: NameNote[] }
     | { problem: string; probe: KnownSale };
 };
 
@@ -959,19 +1051,25 @@ export type NusrWorkbook = {
 
 // Reads every NUSR sheet's sale rows: each checked as the form checks a
 // sale, with the sheet's own figures checked against the ones worked out.
-// Name spellings are settled across every NUSR sheet in the file, so the
-// same file always gives the same names. today ("2026-10-31") is for
-// noting dates in the future.
+// Name spellings are settled across every NUSR sheet in the file (hidden
+// ones too), so the same file always gives the same names. today
+// ("2026-10-31") is for noting dates in the future.
 export function readNusrWorkbook(sheets: readonly Sheet[], { today = null }: { today?: string | null } = {}): NusrWorkbook {
   const found = sheets.flatMap((sheet, index) => {
     const layout = layoutOf(sheet.rows);
     return layout ? [{ index, sheet, layout, year: yearOf(sheet.name), deals: dealRowsOf(sheet.rows, layout) }] : [];
   });
   const hasYears = found.some((entry) => entry.year !== null);
+  // Each sale row's salesman or lender as typed, with the sale it's on.
   const typedNames = (column: Column) =>
-    found.flatMap(({ sheet, layout, deals }) => deals.rows.map((index) => cellAt(sheet.rows[index], layout.columns[column])));
+    found.flatMap(({ sheet, layout, deals }) =>
+      deals.rows.map((index) => {
+        const cells = sheet.rows[index];
+        return { name: cellAt(cells, layout.columns[column]), sale: `${customerKey(cellAt(cells, layout.columns.customerName))}|${cellAt(cells, layout.columns.soldOn)}` };
+      }),
+    );
   const salespeople = namesOf(typedNames("salesperson"));
-  const lenders = namesOf(typedNames("financeCompany").filter((name) => name && !NOTHING.test(name) && cachedNumber(name) === null));
+  const lenders = namesOf(typedNames("financeCompany").filter(({ name }) => name && !NOTHING.test(name) && cachedNumber(name) === null));
 
   const rows = new Map<number, { rows: ReadRow[]; end: number | null }>();
   for (const { index, sheet, layout, year, deals } of found) {
@@ -999,14 +1097,15 @@ export function readNusrWorkbook(sheets: readonly Sheet[], { today = null }: { t
       const notes = [...future, ...date.notes, ...sheetRow.notes];
       const figures = figureNote(sale, cells, layout);
       if (figures) notes.push(figures);
-      return { row, ref, read: { sale, fields: sheetRow.fields, notes, merged: sheetRow.merged } };
+      return { row, ref, read: { sale, fields: sheetRow.fields, notes, merged: sheetRow.merged, lookAlikes: sheetRow.lookAlikes } };
     });
     rows.set(index, { rows: read, end: deals.end });
   }
   return {
     sheets: found.map(({ index, sheet, year, deals }) => {
       const repeats = hasYears && year === null && /^\s*(?:new|used)\s*$/i.test(sheet.name);
-      return { index, name: sheet.name, year, sales: deals.rows.length, repeats, chosen: !repeats };
+      const hidden = sheet.hidden === true;
+      return { index, name: sheet.name, year, sales: deals.rows.length, repeats, hidden, chosen: !repeats && !hidden };
     }),
     rows,
   };
@@ -1016,16 +1115,47 @@ export function readNusrWorkbook(sheets: readonly Sheet[], { today = null }: { t
 // the others (Trailers), then New and Used, so a sale on two sheets comes
 // in from its year sheet; each sale is matched against the sales planned
 // before it (see saleFinder), and only those found nowhere before are
-// added, with their notes.
+// added, with their notes. New and Used repeat the year sheets, typed
+// again with slips of their own, so a row of theirs is also a year sheet's
+// sale when that sheet has a sale to the same customer that day, whatever
+// the price, unless both have whole VINs that differ (two units bought
+// together); and a row of New is when a year sheet sold its VIN new on any
+// day, to anyone, as a new unit sells new once (on Used a VIN can come
+// back: a unit traded in sells used again). A sale they add all the same
+// is noted, to be checked.
 export function planNusrImport(workbook: NusrWorkbook, chosen: readonly number[]): NusrImportPlan {
   const rank = (sheet: NusrSheet) => (sheet.year !== null ? 0 : sheet.repeats ? 2 : 1);
   const order = workbook.sheets.filter((sheet) => chosen.includes(sheet.index)).sort((a, b) => rank(a) - rank(b) || a.index - b.index);
+  const withYears = order.some((sheet) => sheet.year !== null);
   const finder = saleFinder();
   const sales: PlannedSale[] = [];
   const notes: NusrImportNote[] = [];
   const counts: SheetPlan[] = [];
-  // Names read as another, with the first sale they're on and how many.
-  const merges = new Map<string, { sheet: string; row: number; what: string; typed: string; name: string; count: number }>();
+  // The year sheets' sales by customer and day, and their new units by
+  // VIN, for New and Used.
+  const yearDays = new Map<string, PlannedSale[]>();
+  const yearVins = new Map<string, PlannedSale>();
+  const yearSale = (sheet: NusrSheet, known: KnownSale): { planned: PlannedSale; words: string } | null => {
+    const customer = customerKey(known.customerName);
+    const sameDay = customer && known.soldOn ? yearDays.get(`${customer}|${known.soldOn}`) : undefined;
+    const twoUnits = (other: PlannedSale) => isWholeVin(known.vin) && isWholeVin(other.sale.vin) && known.vin !== other.sale.vin;
+    const day = sameDay?.find((other) => !twoUnits(other));
+    if (day) return { planned: day, words: "the same customer the same day" };
+    const unit = /^\s*new\s*$/i.test(sheet.name) && known.vin ? yearVins.get(known.vin) : undefined;
+    return unit ? { planned: unit, words: "the same VIN, sold new" } : null;
+  };
+  // Names read as another, or kept that may be another, with the first sale
+  // they're on and how many.
+  const merges = new Map<string, NameNote & { sheet: string; row: number; count: number }>();
+  const lookAlikes = new Map<string, NameNote & { sheet: string; row: number; count: number }>();
+  const tally = (into: typeof merges, sheet: string, row: number, names: NameNote[]) => {
+    for (const { what, typed, name } of names) {
+      const key = `${what}|${typed.toLowerCase()}`;
+      const entry = into.get(key);
+      if (entry) entry.count++;
+      else into.set(key, { sheet, row, what, typed, name, count: 1 });
+    }
+  };
 
   for (const sheet of order) {
     const read = workbook.rows.get(sheet.index) ?? { rows: [], end: null };
@@ -1035,11 +1165,19 @@ export function planNusrImport(workbook: NusrWorkbook, chosen: readonly number[]
     for (const { row, ref, read: entry } of read.rows) {
       const add = (kind: NoteKind, message: string, skipped = false) => notes.push({ sheet: sheet.name, row, kind, message, skipped });
       const known: KnownSale =
-        "problem" in entry ? entry.probe : { ref, vin: entry.sale.vin, soldOn: entry.sale.soldOn, customerName: entry.sale.customerName, salesPrice: entry.sale.salesPrice };
+        "problem" in entry
+          ? entry.probe
+          : { ref, vin: entry.sale.vin, soldOn: entry.sale.soldOn, customerName: entry.sale.customerName, salesPrice: entry.sale.salesPrice, unitModel: entry.sale.unitModel };
       const match = finder.find(known);
       if (match.match) {
         count.duplicates++;
         add("duplicate", `Already on ${match.match.ref ? refLabel(match.match.ref) : "another sheet"} (${MATCH_WORDS[match.how]}): left out.`);
+        continue;
+      }
+      const repeat = sheet.repeats ? yearSale(sheet, known) : null;
+      if (repeat) {
+        count.duplicates++;
+        add("duplicate", `Already on ${refLabel(repeat.planned.ref)} (${repeat.words}): left out.`);
         continue;
       }
       if ("problem" in entry) {
@@ -1049,19 +1187,28 @@ export function planNusrImport(workbook: NusrWorkbook, chosen: readonly number[]
       }
       finder.add(known);
       count.toAdd++;
-      sales.push({ ref, sheet: sheet.name, row, fields: entry.fields, sale: entry.sale });
-      for (const note of entry.notes) add(note.kind, note.message);
-      for (const { what, typed, name } of entry.merged) {
-        const key = `${what}|${typed.toLowerCase()}`;
-        const merge = merges.get(key);
-        if (merge) merge.count++;
-        else merges.set(key, { sheet: sheet.name, row, what, typed, name, count: 1 });
+      const planned: PlannedSale = { ref, sheet: sheet.name, row, fields: entry.fields, sale: entry.sale };
+      sales.push(planned);
+      if (sheet.year !== null) {
+        const key = `${customerKey(entry.sale.customerName)}|${entry.sale.soldOn}`;
+        yearDays.set(key, [...(yearDays.get(key) ?? []), planned]);
+        if (entry.sale.vin && entry.sale.condition === "new" && !yearVins.has(entry.sale.vin)) yearVins.set(entry.sale.vin, planned);
       }
+      if (sheet.repeats && withYears) {
+        add("repeat", `No year sheet has this sale, but ${sheet.name} repeats them: it may be one of theirs with its date, VIN or customer typed another way. Check it.`);
+      }
+      for (const note of entry.notes) add(note.kind, note.message);
+      tally(merges, sheet.name, row, entry.merged);
+      tally(lookAlikes, sheet.name, row, entry.lookAlikes);
     }
   }
   for (const { sheet, row, what, typed, name, count } of merges.values()) {
     const sales = count > 1 ? ` (${count.toLocaleString("en-US")} sales)` : "";
     notes.push({ sheet, row, kind: "name", message: `${what} ${quoted(typed)} read as ${name}, as most rows have it${sales}.`, skipped: false });
+  }
+  for (const { sheet, row, what, typed, name, count } of lookAlikes.values()) {
+    const sales = count > 1 ? ` (${count.toLocaleString("en-US")} sales)` : "";
+    notes.push({ sheet, row, kind: "name", message: `${what} ${quoted(typed)} may be ${name}: kept as typed${sales}.`, skipped: false });
   }
 
   // In the order the sheets were read, by row.
@@ -1079,6 +1226,11 @@ export type NusrImportEntry = { ref: string; fields: SaleInput };
 // Sales go to the server in batches, well under the 1 MB Server Action
 // limit, one batch at a time.
 export const MAX_NUSR_IMPORT_BATCH = 250;
+
+// The sales on file an import has found go back with each later batch, so
+// none is found twice (see saleFinder): the latest this many, which keeps
+// a batch well under that limit too.
+export const MAX_NUSR_IMPORT_FOUND = 10_000;
 
 export function nusrImportBatches(sales: readonly PlannedSale[]): NusrImportEntry[][] {
   const batches: NusrImportEntry[][] = [];
