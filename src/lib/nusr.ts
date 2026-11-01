@@ -592,13 +592,15 @@ export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: 
   if (!isUuid(id)) return NOT_HERE;
   return withShop(actor.shop.id, async (tx) => {
     const [found] = await tx
-      .select({ ...saleColumns, importRef: unitSales.importRef })
+      .select({ ...saleColumns, importRef: unitSales.importRef, importRow: unitSales.importRow })
       .from(unitSales)
       .leftJoin(users, eq(users.id, unitSales.createdByUserId))
       .where(eq(unitSales.id, id))
       .for("update", { of: unitSales });
     if (!found) return NOT_HERE;
-    const { importRef, ...row } = found;
+    const { importRef, importRow, ...row } = found;
+    // Where an import found it, even when that row was another sale's.
+    const from = importRow ?? importRef;
     const sale = toSale(row);
     await tx.delete(unitSales).where(eq(unitSales.id, id));
     await audit(tx, actor, "unit_sale.removed", id, {
@@ -606,7 +608,7 @@ export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: 
       salesPrice: sale.salesPrice,
       totalProfit: sale.figures.totalProfit,
       customerId: sale.customerId,
-      ...(importRef ? { importRef } : {}),
+      ...(from ? { importRef: from } : {}),
     });
     return { ok: true as const, label: `${unitLabel(sale)} to ${sale.customerName}` };
   });

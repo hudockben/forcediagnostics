@@ -41,8 +41,8 @@ type Run =
   | { state: "stopped"; sent: number; total: number; outcomes: NusrImportOutcome[]; error: string };
 
 // An import under way: its batches, the next one to send, and what's come
-// back (with the sales on file it has found, which go with each batch), so
-// a stopped one carries on where it stopped.
+// back (with the sales on file it has found and seen had moved, which go
+// with each batch), so a stopped one carries on where it stopped.
 type Job = {
   importId: string;
   fileName: string;
@@ -52,6 +52,7 @@ type Job = {
   total: number;
   outcomes: NusrImportOutcome[];
   found: Set<string>;
+  moved: Set<string>;
 };
 
 const smallButtonClass =
@@ -166,7 +167,8 @@ export function NusrImport() {
     while (current.next < current.batches.length) {
       const batch = current.batches[current.next];
       const found = [...current.found].slice(-MAX_NUSR_IMPORT_FOUND);
-      const result = await importSalesAction({ importId: current.importId, fileName: current.fileName, sales: batch, found }).catch(() => ({
+      const moved = [...current.moved].slice(-MAX_NUSR_IMPORT_FOUND);
+      const result = await importSalesAction({ importId: current.importId, fileName: current.fileName, sales: batch, found, moved }).catch(() => ({
         error: "The connection dropped.",
       }));
       if ("error" in result) {
@@ -175,6 +177,7 @@ export function NusrImport() {
       }
       current.outcomes.push(...result.outcomes);
       for (const id of result.found) current.found.add(id);
+      for (const id of result.moved) current.moved.add(id);
       current.sent += batch.length;
       current.next++;
       setRun({ state: "running", sent: current.sent, total: current.total, outcomes: [...current.outcomes] });
@@ -194,6 +197,7 @@ export function NusrImport() {
       total: plan.sales.length,
       outcomes: [],
       found: new Set(),
+      moved: new Set(),
     };
     void send();
   }
@@ -310,7 +314,8 @@ export function NusrImport() {
           {repeats.length > 0 && (
             <p className="mt-3 text-sm leading-6 text-ink-muted">
               {repeats.map((sheet) => sheet.name).join(" and ")} {repeats.length === 1 ? "repeats" : "repeat"} the year sheets: every unit on{" "}
-              {repeats.length === 1 ? "it" : "them"} is on its year&apos;s sheet too. Ticked, a row is left out when a year sheet has its sale
+              {repeats.length === 1 ? "it" : "them"} is on its year&apos;s sheet too. Ticked, a row is left out when a year sheet, ticked or not, has
+              its sale
               {repeats.some((sheet) => /^\s*new\s*$/i.test(sheet.name))
                 ? ", a sale to the same customer that day, or (on New) its VIN sold new"
                 : " or a sale to the same customer that day"}

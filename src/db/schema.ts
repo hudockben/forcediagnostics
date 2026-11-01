@@ -988,6 +988,11 @@ export const unitSales = pgTable(
     // The import that added it (each of its batches has the same id), so a
     // batch sent again knows its own sales; null for a sale logged by hand.
     importId: uuid("import_id"),
+    // The sheet and row it was imported from, as importRef, but kept even
+    // when that row was another sale's already (importRef null then): so
+    // the import knows its rows apart, a batch sent again knows them, and a
+    // removed sale's record keeps where it came from.
+    importRow: text("import_row"),
     createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -1015,7 +1020,8 @@ export const unitSales = pgTable(
     check("unit_sales_unit_year", sql`${t.unitYear} between 1950 and 2100`),
     check("unit_sales_rates", sql`${t.holdbackRateBp} between 0 and 10000 and ${t.bonusRateBp} between 0 and 10000`),
     // Which columns can change is set by the grant in
-    // drizzle/0039_unit_sales_grants.sql; import_id, added since, isn't one.
+    // drizzle/0039_unit_sales_grants.sql; import_id and import_row, added
+    // since, aren't among them.
     pgPolicy("unit_sales_own_shop", {
       for: "all",
       to: appUser,

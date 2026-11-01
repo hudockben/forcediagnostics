@@ -25,18 +25,21 @@ async function attempt<T extends object>(what: string, run: () => Promise<T>, fa
 
 // One batch of an import (see src/lib/nusr-import-rules.ts); the browser
 // sends them one after another, each with the sales on file the batches
-// before it found.
+// before it found, and those they saw had moved.
+type Saved = { outcomes: NusrImportOutcome[]; found: string[]; moved: string[] };
+
 export async function importSalesAction(input: {
   importId: string;
   fileName: string;
   sales: unknown;
   found: string[];
-}): Promise<{ outcomes: NusrImportOutcome[]; found: string[] } | { error: string }> {
-  return attempt<{ outcomes: NusrImportOutcome[]; found: string[] } | { error: string }>(
+  moved: string[];
+}): Promise<Saved | { error: string }> {
+  return attempt<Saved | { error: string }>(
     "import sales",
     async () => {
       const user = await requireCapability("sales.log");
-      return importSales(user, { importId: input?.importId, fileName: input?.fileName, sales: input?.sales, found: input?.found });
+      return importSales(user, { importId: input?.importId, fileName: input?.fileName, sales: input?.sales, found: input?.found, moved: input?.moved });
     },
     { error: "Couldn't save that batch. Check the connection and try again." },
   );
