@@ -114,3 +114,14 @@
   background: radial-gradient(ellipse 75% 70% at 50% 42%, #e6e8eb 0%, #d9dde1 55%, #c8cdd2 100%);
   color: #1f2328;
 }
+
+/* Printing (NUSR's printout): only the page itself, black on white,
+   whatever the screen's dark theme; no header, tabs or backdrop. */
+@media print {
+  html,
+  body,
+  .app-backdrop {
+    background: #fff !important;
+    color: #000;
+  }
+}

@@ -70,6 +70,12 @@ export const CAPABILITIES = [
     roles: ["parts", "manager", "admin"],
   },
   {
+    key: "sales.log",
+    label: "NUSR (unit sales log)",
+    detail: "Every unit sold: the customer, price, cost, profit, holdback, bonuses and financing",
+    roles: ["manager", "admin"],
+  },
+  {
     key: "reports.kpis",
     label: "Shop board and KPIs",
     detail: "Repair orders by stage, days in shop, AI accuracy",
@@ -116,14 +122,16 @@ export function can(role: Role, capability: Capability) {
 // Admin areas need a password sign-in; a PIN on a bay tablet isn't enough.
 // So do customers' contact details, which stay off the shared tablets
 // (Diagnose shows a customer's name and vehicles only), deleting someone
-// else's diagnosis, and the Activity log. Techs delete their own on the bay
-// tablets, where they work.
+// else's diagnosis, the Activity log, and NUSR, which has the shop's costs
+// and profits. Techs delete their own diagnoses on the bay tablets, where
+// they work.
 const PASSWORD_ONLY: ReadonlySet<Capability> = new Set<Capability>([
   "accounts.manage",
   "audit.read",
   "bay_tablets.manage",
   "diagnostics.delete",
   "repair_orders.intake",
+  "sales.log",
   "settings.manage",
 ]);
 

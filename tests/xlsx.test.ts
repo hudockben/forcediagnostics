@@ -11,7 +11,7 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { crc32, deflateRawSync, constants as zlib } from "node:zlib";
 
-import { XLSX_LIMITS, XlsxError, isZip, readXlsx, type XlsxSheet } from "../src/lib/xlsx";
+import { XLSX_LIMITS, XlsxError, isZip, readXlsx, type XlsxOptions, type XlsxSheet } from "../src/lib/xlsx";
 
 function fixture(name: string) {
   return readFileSync(new URL(`./fixtures/xlsx/${name}`, import.meta.url));
@@ -218,9 +218,9 @@ function escapeXml(text: string) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 }
 
-async function refusal(bytes: Uint8Array, limits?: Partial<typeof XLSX_LIMITS>): Promise<XlsxError> {
+async function refusal(bytes: Uint8Array, options?: XlsxOptions): Promise<XlsxError> {
   try {
-    await readXlsx(bytes, limits);
+    await readXlsx(bytes, options);
   } catch (error) {
     assert.ok(error instanceof XlsxError, `expected an XlsxError, got ${String(error)}`);
     return error;
@@ -563,6 +563,26 @@ describe("finding the sheets", () => {
       { name: "Visible", rows: [["four"]] },
       { name: "Empty", rows: [] },
     ]);
+  });
+
+  test("hidden sheets too, when asked for, marked hidden; still no chart or dialog sheets", async () => {
+    const bytes = book({
+      sheets: [
+        { name: "Shown", rows: rows("one") },
+        { name: "Hidden", rows: rows("two"), state: "hidden" },
+        { name: "Very hidden", rows: rows("three"), state: "veryHidden" },
+        { name: "Chart", xml: `<chartsheet xmlns="${MAIN}"/>`, type: "chartsheet", target: "chartsheets/sheet1.xml", state: "hidden" },
+      ],
+    });
+    assert.deepEqual(await readXlsx(bytes, { hidden: true }), [
+      { name: "Shown", rows: [["one"]] },
+      { name: "Hidden", rows: [["two"]], hidden: true },
+      { name: "Very hidden", rows: [["three"]], hidden: true },
+    ]);
+    assert.deepEqual(await readXlsx(bytes), [{ name: "Shown", rows: [["one"]] }]);
+    // Read, a hidden sheet has to be there.
+    const gone = await refusal(book({ sheets: [{ name: "Gone", missing: true, state: "hidden" }] }), { hidden: true });
+    assert.match(gone.message, /sheet "Gone" is missing/);
   });
 
   test("the workbook part is wherever the package's relationships say", async () => {

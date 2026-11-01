@@ -26,7 +26,8 @@ export const MAX_IMPORT_ROWS = 50_000;
 // two ("Customer list, printed 10/30/2026").
 export const HEADER_SEARCH_ROWS = 10;
 
-export type Sheet = { name: string; rows: string[][] };
+// hidden: hidden in the workbook (read only when asked for).
+export type Sheet = { name: string; rows: string[][]; hidden?: true };
 
 const OLD_EXCEL = "This is an old Excel file (.xls) or a password-protected workbook, which can't be read here. In Excel, use Save As > Excel Workbook (.xlsx) or CSV UTF-8, then choose it again.";
 
@@ -87,8 +88,13 @@ export function detectDelimiter(text: string): "," | ";" | "\t" {
 
 const isOldExcel = (bytes: Uint8Array) => bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
 
-// The file's sheets: an Excel workbook's visible ones, or a CSV as one.
-export async function readSpreadsheet(fileName: string, bytes: Uint8Array): Promise<{ sheets: Sheet[] } | { error: string }> {
+// The file's sheets: an Excel workbook's visible ones (and its hidden ones,
+// marked hidden, when asked for), or a CSV as one.
+export async function readSpreadsheet(
+  fileName: string,
+  bytes: Uint8Array,
+  { hidden = false }: { hidden?: boolean } = {},
+): Promise<{ sheets: Sheet[] } | { error: string }> {
   if (bytes.length === 0) return { error: "That file is empty." };
   if (bytes.length > MAX_IMPORT_FILE_BYTES) {
     return { error: `That file is over ${MAX_IMPORT_FILE_BYTES / 1024 / 1024} MB. Split it into smaller files.` };
@@ -97,7 +103,7 @@ export async function readSpreadsheet(fileName: string, bytes: Uint8Array): Prom
   const extension = /\.([a-z0-9]+)$/i.exec(fileName)?.[1]?.toLowerCase() ?? "";
   if (isZip(bytes)) {
     try {
-      const sheets = await readXlsx(bytes);
+      const sheets = await readXlsx(bytes, { hidden });
       if (sheets.length === 0) return { error: "That workbook has no sheets to read (they may all be hidden)." };
       return { sheets };
     } catch (error) {

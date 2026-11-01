@@ -2584,6 +2584,12 @@ describe("the Diagnose list and Home", () => {
     const rows: (typeof diagnosisConversations.$inferInsert)[] = [];
     const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000);
     const DAY = 24 * 60;
+    // A fix confirmed a little while ago, but this month as the database
+    // counts it: in a month's first hour, "an hour ago" was last month.
+    const { rows: [{ monthStart }] } = await systemDb.execute<{ monthStart: number }>(
+      sql`select extract(epoch from date_trunc('month', now()))::float8 * 1000 as "monthStart"`,
+    );
+    const confirmedAt = (minutesAgo: number) => new Date(Math.max(Date.now() - minutesAgo * 60_000, monthStart));
     for (let n = 0; n < 17; n++) {
       const solved = n % 4 === 0;
       rows.push({
@@ -2596,7 +2602,7 @@ describe("the Diagnose list and Home", () => {
         status: solved ? "solved" : "open",
         // Number 12 was started and solved before this month began.
         outcome: solved
-          ? { title: "Fouled plug", likelihood: "high", rank: 1, seq: 1, userId: dale.id, at: at(n === 12 ? 40 * DAY : 60).toISOString() }
+          ? { title: "Fouled plug", likelihood: "high", rank: 1, seq: 1, userId: dale.id, at: (n === 12 ? at(40 * DAY) : confirmedAt(60)).toISOString() }
           : null,
         // Numbers 15 and 16 were last used ten days ago.
         updatedAt: at((n >= 15 ? 10 * DAY : 100) + n),
@@ -2623,7 +2629,7 @@ describe("the Diagnose list and Home", () => {
         webSearch: true,
         status: "solved",
         // Started in 2020, confirmed today.
-        outcome: { title: "Winch solenoid", likelihood: "high", rank: 1, seq: 1, userId: rae.id, at: at(1).toISOString() },
+        outcome: { title: "Winch solenoid", likelihood: "high", rank: 1, seq: 1, userId: rae.id, at: confirmedAt(1).toISOString() },
         updatedAt: at(1),
         createdAt: new Date(Date.UTC(2020, 0, 15)),
       },

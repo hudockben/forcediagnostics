@@ -3,6 +3,7 @@
 // imports, so it's tested on its own (src/lib/audit-log.ts reads the log).
 
 import { RELATION_LABELS, type VehicleRelation } from "@/lib/customer-rules";
+import { SALE_LABELS, formatDay, formatMoney, type SaleFields } from "@/lib/nusr-rules";
 import { ROLE_LABELS } from "@/lib/permissions";
 import { ROLES, type Role } from "@/lib/roles";
 import { SUPPLIER_FIELD_LABELS, type SupplierField } from "@/lib/supplier-rules";
@@ -12,6 +13,7 @@ export const AUDIT_LOG_PAGE_SIZE = 25;
 // The filter's areas, by the kinds of record each covers (target_type).
 export const AUDIT_AREAS = {
   diagnoses: { label: "Diagnoses", targetTypes: ["diagnosis"] },
+  nusr: { label: "NUSR", targetTypes: ["unit_sale"] },
   customers: { label: "Customers", targetTypes: ["customer", "customer_vehicle"] },
   stickers: { label: "Sticker & Plate log", targetTypes: ["sticker"] },
   suppliers: { label: "Supplier", targetTypes: ["supplier"] },
@@ -158,7 +160,7 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
 
       // Customers
       case "customer.created":
-        return `Added the customer ${str(d.name)}${d.from === "sticker log" ? " from the Sticker & Plate log" : ""}`;
+        return `Added the customer ${str(d.name)}${d.from === "sticker log" ? " from the Sticker & Plate log" : d.from === "NUSR" ? " from the NUSR" : ""}`;
       case "customer.updated": {
         const fields = fieldsInWords(d.fields, CUSTOMER_FIELD_WORDS);
         return fields ? `Changed ${str(d.name)}'s ${fields}` : `Updated ${str(d.name)}`;
@@ -227,6 +229,36 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         fact("Manuals", num(d.manuals));
         fact("Models", num(d.models));
         return `Imported the model list ${str(d.fileName)}`;
+
+      // NUSR
+      case "unit_sale.logged":
+        fact("Date", formatDay(str(d.soldOn)));
+        fact("Salesman", d.salesperson);
+        fact("VIN", d.vin);
+        if (typeof d.salesPrice === "number") fact("Sales Price", formatMoney(d.salesPrice));
+        return `Logged the sale of ${str(d.unit) || "a unit"} to ${str(d.customerName)}`;
+      case "unit_sale.updated": {
+        const changes = (d.changes ?? {}) as Record<string, { from?: unknown; to?: unknown }>;
+        for (const [key, change] of Object.entries(changes)) {
+          const label = SALE_LABELS[key as keyof SaleFields] ?? key;
+          const shown = (value: unknown) => (value === null || value === undefined || value === "" ? "blank" : key.endsWith("On") ? formatDay(str(value)) || str(value) : str(value));
+          fact(label, `${shown(change.from)} → ${shown(change.to)}`);
+        }
+        const unlisted = (Array.isArray(d.fields) ? d.fields : []).filter((key): key is string => typeof key === "string" && !(key in changes));
+        if (unlisted.length) fact("Also changed", inWords(unlisted.map((key) => (key === "customerId" ? "the customer on file" : (SALE_LABELS[key as keyof SaleFields] ?? key).toLowerCase()))));
+        return `Corrected the sale of ${str(d.unit) || "a unit"} to ${str(d.customerName)}`;
+      }
+      case "unit_sale.removed":
+        fact("Date", formatDay(str(d.soldOn)));
+        fact("VIN", d.vin);
+        if (typeof d.salesPrice === "number") fact("Sales Price", formatMoney(d.salesPrice));
+        if (typeof d.totalProfit === "number") fact("Total profit", formatMoney(d.totalProfit));
+        return `Removed the sale of ${str(d.unit) || "a unit"} to ${str(d.customerName)} from the NUSR`;
+      case "unit_sales.imported":
+        fact("Added", num(d.added));
+        fact("Already in the NUSR", num(d.already));
+        if (num(d.failed) > 0) fact("Left out", num(d.failed));
+        return `Imported sales into the NUSR from ${str(d.fileName) || "a file"}`;
 
       // Diagnoses
       case "diagnosis.deleted": {

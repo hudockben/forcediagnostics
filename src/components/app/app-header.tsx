@@ -10,7 +10,7 @@ import { allows, getCurrentUser } from "@/lib/session";
 
 function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
   return (
-    <header className="border-b border-white/10 bg-charcoal-900/60 backdrop-blur-md">
+    <header className="border-b border-white/10 bg-charcoal-900/60 backdrop-blur-md print:hidden">
       {/* As wide as the page under it (see the app layout). */}
       <div className="mx-auto flex min-h-16 max-w-5xl flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 pt-4 group-has-[[data-wide-page]]/shell:max-w-[118rem] sm:px-8">
         <Link
@@ -33,6 +33,7 @@ export async function AppHeader() {
     { href: "/home", label: "Home", section: "/home" },
     ...(allows(user, "diagnostics.work") ? [{ href: "/diagnose", label: "Diagnose", section: "/diagnose" }] : []),
     ...(allows(user, "library.read") ? [{ href: "/library", label: "Library", section: "/library" }] : []),
+    ...(allows(user, "sales.log") ? [{ href: "/nusr", label: "NUSR", section: "/nusr" }] : []),
     ...(firstAdminSection
       ? [{ href: firstAdminSection.href, label: "System Admin", section: "/admin" }]
       : []),
