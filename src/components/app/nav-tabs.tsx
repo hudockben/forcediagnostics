@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Suspense } from "react";
+import { Suspense, useLayoutEffect, useRef } from "react";
 
 export type NavItem = { href: string; label: string; section: string };
 
@@ -25,9 +25,33 @@ type Props = { items: NavItem[]; label: string; variant?: keyof typeof styles };
 
 function TabList({ items, label, variant = "tabs", pathname }: Props & { pathname: string | null }) {
   const style = styles[variant];
+  const list = useRef<HTMLUListElement>(null);
+  const shown = useRef(false);
+
+  // On a phone the tabs are wider than the screen and the bar scrolls
+  // sideways. When the current tab is cut off, the bar (never the page)
+  // scrolls to put it in the middle, with the tabs either side of it
+  // showing: at once as a page opens, smoothly after a tap.
+  useLayoutEffect(() => {
+    const bar = list.current;
+    const current = bar?.querySelector<HTMLElement>("[aria-current]");
+    const first = !shown.current;
+    shown.current = true;
+    if (!bar || !current) return;
+    const barBox = bar.getBoundingClientRect();
+    const tabBox = current.getBoundingClientRect();
+    // A pixel's slack for rounding.
+    if (tabBox.left >= barBox.left - 1 && tabBox.right <= barBox.right + 1) return;
+    const smooth = !first && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    bar.scrollTo({
+      left: bar.scrollLeft + tabBox.left - barBox.left - (barBox.width - tabBox.width) / 2,
+      behavior: smooth ? "smooth" : "auto",
+    });
+  }, [pathname]);
+
   return (
     <nav aria-label={label}>
-      <ul className={style.list}>
+      <ul ref={list} className={style.list}>
         {items.map((item) => {
           const active =
             pathname !== null &&
