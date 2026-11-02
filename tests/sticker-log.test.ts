@@ -23,11 +23,14 @@ import { ADMIN_SECTIONS, needsPasswordSession } from "../src/lib/permissions";
 import type { CurrentUser } from "../src/lib/session";
 import {
   checkStickerImport,
+  countByKind,
   findStickerHeader,
+  parseKind,
   parsePlateClass,
   personKey,
   planStickerImport,
   stickerColumns,
+  stickerLists,
   type StickerImportRow,
 } from "../src/lib/sticker-import-rules";
 import {
@@ -41,50 +44,60 @@ import {
   stickersForCustomer,
   updateSticker,
 } from "../src/lib/sticker-log";
-import { checkStickerEntry, normalizeSticker, parseClassFilter, stickerLogCsv } from "../src/lib/sticker-log-rules";
+import { checkStickerEntry, entryLabel, normalizeSticker, parseKindFilter, stickerLogCsv, type EntryKind } from "../src/lib/sticker-log-rules";
 
 const pasted = (lines: string[]) => {
   const text = lines.join("\n");
   return parseCsv(text, detectDelimiter(text));
 };
 
-describe("the rules for a sticker", () => {
-  test("sticker numbers are tidied, so one typed two ways is one", () => {
+describe("the rules for a sticker or plate", () => {
+  test("numbers are tidied, so one typed two ways is one", () => {
     assert.equal(normalizeSticker(" #a 12-345 "), "A 12-345");
     assert.equal(normalizeSticker("No. 778812"), "778812");
     assert.equal(normalizeSticker("pa\t 00412"), "PA 00412");
     assert.equal(normalizeSticker(undefined), "");
   });
 
-  test("a sticker number and a class of 1 or 2 are needed", () => {
+  test("a number is needed, and what it is: a sticker, or a Class 1 or Class 2 plate", () => {
     assert.deepEqual(checkStickerEntry({ stickerNumber: "a-1001", plateClass: "2" }), { entry: { stickerNumber: "A-1001", plateClass: 2 } });
-    assert.deepEqual(checkStickerEntry({ stickerNumber: "  ", plateClass: "1" }), { error: "Enter the sticker number." });
+    assert.deepEqual(checkStickerEntry({ stickerNumber: "t280377", plateClass: "sticker" }), { entry: { stickerNumber: "T280377", plateClass: null } });
+    // An import sends null for a sticker.
+    assert.deepEqual(checkStickerEntry({ stickerNumber: "T280377", plateClass: null }), { entry: { stickerNumber: "T280377", plateClass: null } });
+    assert.deepEqual(checkStickerEntry({ stickerNumber: "  ", plateClass: "1" }), { error: "Enter the sticker or plate number." });
+    assert.deepEqual(checkStickerEntry({ stickerNumber: "1001", plateClass: "" }), { error: "Pick what it is: a sticker, or a Class 1 or Class 2 plate." });
     assert.ok("error" in checkStickerEntry({ stickerNumber: "1001", plateClass: "3" }));
-    assert.ok("error" in checkStickerEntry({ stickerNumber: "1001", plateClass: "" }));
+    assert.ok("error" in checkStickerEntry({ stickerNumber: "1001", plateClass: undefined }));
     assert.ok("error" in checkStickerEntry({ stickerNumber: "1001", plateClass: "1.5" }));
     assert.ok("error" in checkStickerEntry({ stickerNumber: "=1+1", plateClass: "1" }));
     assert.ok("error" in checkStickerEntry({ stickerNumber: "x".repeat(41), plateClass: "1" }));
   });
 
-  test("the class filter is 1, 2 or every class", () => {
-    assert.equal(parseClassFilter("1"), 1);
-    assert.equal(parseClassFilter("2"), 2);
-    assert.equal(parseClassFilter("3"), null);
-    assert.equal(parseClassFilter(undefined), null);
-    assert.equal(parseClassFilter(["1"]), null);
+  test("the filter is stickers, one class of plates, or everything", () => {
+    assert.equal(parseKindFilter("sticker"), "sticker");
+    assert.equal(parseKindFilter("1"), "1");
+    assert.equal(parseKindFilter("2"), "2");
+    assert.equal(parseKindFilter("3"), null);
+    assert.equal(parseKindFilter(undefined), null);
+    assert.equal(parseKindFilter(["1"]), null);
+    assert.deepEqual([entryLabel(null), entryLabel(1), entryLabel(2)], ["Sticker", "Class 1 plate", "Class 2 plate"]);
   });
 
-  test("the CSV has the log's headings, the shop's dates and nothing Excel would run", () => {
+  test("the CSV has the log's headings, what each is, the shop's dates and nothing Excel would run", () => {
     const csv = stickerLogCsv(
       [
-        { stickerNumber: "1001", customerName: "Whitfield, Dana", plateClass: 1, createdAt: new Date("2026-10-30T03:00:00Z"), createdBy: "Sam" },
-        { stickerNumber: "1002", customerName: "=HYPERLINK(\"x\")", plateClass: 2, createdAt: new Date("2026-10-30T15:00:00Z"), createdBy: null },
+        { stickerNumber: "T280377", customerName: "Henry, Michael", plateClass: null, createdAt: new Date("2026-10-30T03:00:00Z"), createdBy: "Sam" },
+        { stickerNumber: "90W14", customerName: "=HYPERLINK(\"x\")", plateClass: 1, createdAt: new Date("2026-10-30T15:00:00Z"), createdBy: null },
+        { stickerNumber: "93Y67", customerName: "Austin, Matt", plateClass: 2, createdAt: new Date("2026-10-30T15:00:00Z"), createdBy: null },
       ],
       "America/New_York",
     );
     assert.equal(
       csv,
-      '﻿Sticker #,Customer Name,Plate Classification,Logged,Logged by\r\n1001,"Whitfield, Dana",1,10/29/2026,Sam\r\n1002,"\'=HYPERLINK(""x"")",2,10/30/2026,\r\n',
+      "﻿Sticker / Plate #,Customer Name,Type,Logged,Logged by\r\n" +
+        'T280377,"Henry, Michael",Sticker,10/29/2026,Sam\r\n' +
+        '90W14,"\'=HYPERLINK(""x"")",Class 1 plate,10/30/2026,\r\n' +
+        '93Y67,"Austin, Matt",Class 2 plate,10/30/2026,\r\n',
     );
   });
 
@@ -94,95 +107,144 @@ describe("the rules for a sticker", () => {
   });
 });
 
+// The shop's own sheet, as Excel copies it: stickers, Class 1 plates and
+// Class 2 plates side by side, a blank column between each, a row's
+// sticker and plates nothing to do with each other.
+const SHEET = [
+  "Sticker #\tCustomer Name\t\tClass 1 Plate\tCustomer Name\t\tClass 2 Plate\tCustomer Name",
+  "\t\t\t\t\t\t\t",
+  "T280377\tHenry, Michael\t\t\t\t\t\t",
+  "T280391\tAustin, Matt\t\t90W14\tElkin, Tyler\t\t93Y67\tAustin, Matt",
+  "T280397\tShick, Jessica\t\t\t\t\t93Y73\tShick, Jessica",
+  "T280409\tHohman, Dennis\t\t4A774\tBenanti, Anthony - returned\t\t93Y39\tNeiderhiser, Charles",
+  "\t\t\t\t\t\t93Y83\tPowell & Associates",
+].join("\n");
+
 describe("importing a log: the rules", () => {
-  test("the log's own headings, and other names for them, map the columns", () => {
-    assert.deepEqual(stickerColumns(["Sticker #", "Customer Name", "Plate Classification", "Logged", "Logged by"]), [
-      "stickerNumber",
+  test("headings name the lists and their columns, side by side", () => {
+    assert.deepEqual(stickerColumns(["Sticker #", "Customer Name", "", "Class 1 Plate", "Customer Name", "", "Class 2 Plate", "Customer Name"]), [
+      "sticker",
       "customerName",
-      "plateClass",
       null,
+      "plate1",
+      "customerName",
       null,
+      "plate2",
+      "customerName",
     ]);
-    assert.deepEqual(stickerColumns(["Decal #", "Owner", "Cell Phone", "Class"]), ["stickerNumber", "customerName", "phone", "plateClass"]);
-    // Each field from one column: its best heading wins.
-    assert.deepEqual(stickerColumns(["Name", "Customer Name", "Sticker", "Sticker #"]), [null, "customerName", null, "stickerNumber"]);
-    assert.equal(findStickerHeader(pasted(["Stickers handed out, 2025", "", "Sticker #\tCustomer Name\tPlate Classification", "1001\tDana Whitfield\t1"])), 2);
+    // The log's own Download CSV.
+    assert.deepEqual(stickerColumns(["Sticker / Plate #", "Customer Name", "Type", "Logged", "Logged by"]), ["number", "customerName", "type", null, null]);
+    assert.deepEqual(stickerColumns(["Decal #", "Owner", "Cell Phone", "Class"]), ["sticker", "customerName", "phone", "type"]);
+    assert.equal(findStickerHeader(pasted(["Stickers handed out, 2025", "", "Sticker #\tCustomer Name", "1001\tDana Whitfield"])), 2);
     assert.equal(findStickerHeader(pasted(["1001\tDana Whitfield\t1"])), -1);
   });
 
-  test("a plate classification is 1 or 2, however it's written", () => {
+  test("each number column is a list, with the name, phone and type columns after it", () => {
+    // A name before every number column is the first list's; a second name
+    // in one list isn't read.
+    assert.deepEqual(stickerLists(stickerColumns(["Customer Name", "Sticker #", "Phone", "Class 1 Plate", "Customer Name", "Customer Name"])), [
+      { column: 1, field: "sticker", name: 0, phone: 2, type: null },
+      { column: 3, field: "plate1", name: 4, phone: null, type: null },
+    ]);
+    assert.deepEqual(stickerLists(stickerColumns(["Customer Name"])), []);
+  });
+
+  test("what an entry is, however it's written", () => {
     for (const [text, plateClass] of [["1", 1], ["2", 2], ["Class 1", 1], ["CLASS II", 2], ["I", 1], ["Plate class #2", 2], ["2.0", 2], ["one", 1]] as const) {
       assert.equal(parsePlateClass(text), plateClass, text);
     }
     for (const text of ["", "3", "1.5", "12", "Class 1 ATV", "x"]) assert.equal(parsePlateClass(text), null, text);
+    for (const [text, kind] of [["Sticker", "sticker"], ["decal", "sticker"], ["Class 1 Plate", "1"], ["class 2 plates", "2"], ["2", "2"], ["Class II", "2"]] as const) {
+      assert.equal(parseKind(text), kind, text);
+    }
+    for (const text of ["plate", "Class 3", "x"]) assert.equal(parseKind(text), null, text);
   });
 
-  test("a log is planned one sticker per row, the first of a number kept, with notes", () => {
+  test("the shop's sheet: its stickers and both classes of plates, each list with its own customers", () => {
+    const rows = parseCsv(SHEET, pastedDelimiter(SHEET));
+    const header = findStickerHeader(rows);
+    assert.equal(header, 0);
+    const plan = planStickerImport(rows, header, stickerColumns(rows[header]));
+    assert.equal(plan.rowsRead, 5, "the blank row isn't one");
+    assert.deepEqual(
+      plan.stickers.map((entry) => [entry.row, entryLabel(entry.plateClass), entry.stickerNumber, entry.customerName]),
+      [
+        [3, "Sticker", "T280377", "Henry, Michael"],
+        [4, "Sticker", "T280391", "Austin, Matt"],
+        [5, "Sticker", "T280397", "Shick, Jessica"],
+        [6, "Sticker", "T280409", "Hohman, Dennis"],
+        [4, "Class 1 plate", "90W14", "Elkin, Tyler"],
+        [4, "Class 2 plate", "93Y67", "Austin, Matt"],
+        [5, "Class 2 plate", "93Y73", "Shick, Jessica"],
+        [6, "Class 2 plate", "93Y39", "Neiderhiser, Charles"],
+        [7, "Class 2 plate", "93Y83", "Powell & Associates"],
+      ],
+    );
+    // A plate given back isn't anyone's; a row with nothing in a list is no note.
+    assert.deepEqual(plan.notes, [{ row: 6, message: "Class 1 plate 4A774 is marked returned: left out." }]);
+    assert.equal(countByKind(plan.stickers), "4 stickers, 1 Class 1 plate and 4 Class 2 plates");
+  });
+
+  test("a list is planned one entry per number, the first of a number kept, with notes", () => {
     const rows = pasted([
       "Sticker log",
-      "Sticker #\tCustomer Name\tPhone\tPlate Classification",
-      "pa-1001\tDana  Whitfield\t814.555.0199\t1",
-      "#PA-1001\tdana whitfield\t\tClass I",
-      "PA-1002\tRhett Carver\tcall his wife\t2",
-      "\t\t\t",
-      "PA-1003\t\t\t1",
-      "\tWalt Ostrowski\t\t1",
-      "PA-1004\tWalt Ostrowski\t\t3",
-      "PA-1005\tWalt Ostrowski\t\t",
-      "=1+1\tWalt Ostrowski\t\t1",
-      "PA-1001\tRhett Carver\t\t2",
-      "PA-1006\tWalt Ostrowski\t\tII",
+      "Sticker #\tCustomer Name\tPhone",
+      "t-1001\tDana  Whitfield\t814.555.0199",
+      "#T-1001\tdana whitfield\t",
+      "T-1002\tRhett Carver\tcall his wife",
+      "\t\t",
+      "T-1003\t\t",
+      "\tWalt Ostrowski\t",
+      "=1+1\tWalt Ostrowski\t",
+      "T-1001\tRhett Carver\t",
+      "T-1006\tWalt Ostrowski\t",
     ]);
     const header = findStickerHeader(rows);
     assert.equal(header, 1);
     const plan = planStickerImport(rows, header, stickerColumns(rows[header]));
-    assert.equal(plan.rowsRead, 10, "the blank row isn't one");
+    assert.equal(plan.rowsRead, 8, "the blank row isn't one");
     assert.deepEqual(plan.stickers, [
-      { row: 3, stickerNumber: "PA-1001", customerName: "Dana Whitfield", phone: "(814) 555-0199", plateClass: 1 },
-      { row: 5, stickerNumber: "PA-1002", customerName: "Rhett Carver", phone: null, plateClass: 2 },
-      { row: 13, stickerNumber: "PA-1006", customerName: "Walt Ostrowski", phone: null, plateClass: 2 },
+      { row: 3, stickerNumber: "T-1001", customerName: "Dana Whitfield", phone: "(814) 555-0199", plateClass: null },
+      { row: 5, stickerNumber: "T-1002", customerName: "Rhett Carver", phone: null, plateClass: null },
+      { row: 11, stickerNumber: "T-1006", customerName: "Walt Ostrowski", phone: null, plateClass: null },
     ]);
     assert.deepEqual(plan.notes, [
-      { row: 4, message: "Sticker PA-1001 is on row 3 too: logged once." },
+      { row: 4, message: "Sticker T-1001 is on row 3 too: logged once." },
       { row: 5, message: "Phone “call his wife” left out: A phone number is digits, with spaces, dashes or brackets if you like." },
-      { row: 7, message: "No Customer Name: row left out." },
-      { row: 8, message: "No Sticker #: row left out." },
-      { row: 9, message: "Plate Classification “3” isn't 1 or 2: row left out." },
-      { row: 10, message: "No Plate Classification: row left out." },
-      { row: 11, message: "Sticker # “=1+1”: A sticker number is letters and digits (dashes, dots and slashes are fine). Row left out." },
-      { row: 12, message: "Sticker PA-1001 is also on row 3, for Dana Whitfield (Class 1): only row 3 is logged." },
+      { row: 7, message: "No Customer Name for sticker T-1003: left out." },
+      { row: 8, message: "No Sticker # for “Walt Ostrowski”: left out." },
+      { row: 9, message: "Sticker “=1+1”: A sticker or plate number is letters and digits (dashes, dots and slashes are fine). Left out." },
+      { row: 10, message: "T-1001 is also on row 3, as a sticker for Dana Whitfield: only that one is logged." },
     ]);
   });
 
-  test("a list with no class column, pasted from Excel, takes the class picked for it, its names whole", () => {
-    // A list of one kind, as Excel copies it: a tab between the cells and
-    // each name written last name first.
-    const text = ["Sticker Number\tCustomer Name", "T280377\tHenry, Michael", "T715365\t", "T715366\tRudd, Benjamin"].join("\n");
+  test("a list that doesn't say what it is takes what's picked; a Type column says for each row", () => {
+    const text = ["Number\tCustomer Name", "90W14\tElkin, Tyler", "90W15\t", "90W16\tHenry, Ashley"].join("\n");
     const rows = parseCsv(text, pastedDelimiter(text));
-    const header = findStickerHeader(rows);
-    assert.equal(header, 0);
-    const mapping = stickerColumns(rows[header]);
-    assert.deepEqual(mapping, ["stickerNumber", "customerName"]);
-    // No class picked: no row has one.
-    assert.deepEqual(planStickerImport(rows, header, mapping).stickers, []);
-    const plan = planStickerImport(rows, header, mapping, { plateClass: 2 });
+    const mapping = stickerColumns(rows[0]);
+    assert.deepEqual(mapping, ["number", "customerName"]);
+    assert.deepEqual(planStickerImport(rows, 0, mapping).stickers, [], "nothing picked: nothing says what they are");
+    const plan = planStickerImport(rows, 0, mapping, { kind: "1" });
     assert.deepEqual(
-      plan.stickers.map((sticker) => [sticker.row, sticker.stickerNumber, sticker.customerName, sticker.plateClass]),
+      plan.stickers.map((entry) => [entry.row, entry.stickerNumber, entry.customerName, entry.plateClass]),
       [
-        [2, "T280377", "Henry, Michael", 2],
-        [4, "T715366", "Rudd, Benjamin", 2],
+        [2, "90W14", "Elkin, Tyler", 1],
+        [4, "90W16", "Henry, Ashley", 1],
       ],
     );
-    assert.deepEqual(plan.notes, [{ row: 3, message: "No Customer Name: row left out." }]);
-    // With a class column, the class picked is only for rows without one.
-    const mixed = pasted(["Sticker #\tCustomer Name\tPlate Classification", "A1\tDana Whitfield\t1", "A2\tDana Whitfield\t", "A3\tDana Whitfield\t3"]);
+    assert.deepEqual(plan.notes, [{ row: 3, message: "No Customer Name for Class 1 plate 90W15: left out." }]);
+    // A Type column says for each row; what's picked is for rows without one.
+    const typed = pasted(["Sticker / Plate #\tCustomer Name\tType", "A1\tDana Whitfield\tSticker", "A2\tDana Whitfield\tClass 2 plate", "A3\tDana Whitfield\t", "A4\tDana Whitfield\tClass 3"]);
+    const typedPlan = planStickerImport(typed, 0, stickerColumns(typed[0]), { kind: "1" });
     assert.deepEqual(
-      planStickerImport(mixed, 0, stickerColumns(mixed[0]), { plateClass: 2 }).stickers.map((sticker) => [sticker.stickerNumber, sticker.plateClass]),
+      typedPlan.stickers.map((entry) => [entry.stickerNumber, entry.plateClass]),
       [
-        ["A1", 1],
+        ["A1", null],
         ["A2", 2],
+        ["A3", 1],
       ],
     );
+    assert.deepEqual(typedPlan.notes, [{ row: 5, message: "Type “Class 3” isn't a sticker or a Class 1 or Class 2 plate: A4 left out." }]);
   });
 
   test("a name written last name first is the same person either way round", () => {
@@ -195,30 +257,34 @@ describe("importing a log: the rules", () => {
 
   test("the log's own Download CSV comes back in as it went out", async () => {
     const csv = stickerLogCsv([
-      { stickerNumber: "1001", customerName: "Whitfield, Dana", plateClass: 1, createdAt: new Date("2026-10-30T15:00:00Z"), createdBy: "Sam" },
-      { stickerNumber: "1002", customerName: "Rhett Carver", plateClass: 2, createdAt: new Date("2026-10-30T16:00:00Z"), createdBy: null },
+      { stickerNumber: "T280377", customerName: "Henry, Michael", plateClass: null, createdAt: new Date("2026-10-30T15:00:00Z"), createdBy: "Sam" },
+      { stickerNumber: "90W14", customerName: "Elkin, Tyler", plateClass: 1, createdAt: new Date("2026-10-30T16:00:00Z"), createdBy: null },
+      { stickerNumber: "93Y67", customerName: "Austin, Matt", plateClass: 2, createdAt: new Date("2026-10-30T17:00:00Z"), createdBy: null },
     ]);
     const read = await readSpreadsheet("sticker-plate-log-2026-10-30.csv", new TextEncoder().encode(csv));
     assert.ok("sheets" in read, JSON.stringify(read));
     const rows = read.sheets[0].rows;
     const plan = planStickerImport(rows, findStickerHeader(rows), stickerColumns(rows[0]));
     assert.deepEqual(
-      plan.stickers.map((sticker) => [sticker.stickerNumber, sticker.customerName, sticker.plateClass]),
+      plan.stickers.map((entry) => [entry.stickerNumber, entry.customerName, entry.plateClass]),
       [
-        ["1001", "Whitfield, Dana", 1],
-        ["1002", "Rhett Carver", 2],
+        ["T280377", "Henry, Michael", null],
+        ["90W14", "Elkin, Tyler", 1],
+        ["93Y67", "Austin, Matt", 2],
       ],
     );
     assert.deepEqual(plan.notes, []);
   });
 
-  test("the server checks each row again, as the form would", () => {
+  test("the server checks each entry again, as the form would", () => {
     const checked = checkStickerImport({ stickerNumber: " #pa-7 ", customerName: " Dana  Whitfield ", phone: "8145550199", plateClass: 2 });
     assert.ok("entry" in checked, JSON.stringify(checked));
     assert.deepEqual(
       [checked.entry.stickerNumber, checked.entry.plateClass, checked.entry.customer.name, checked.entry.customer.phone],
       ["PA-7", 2, "Dana Whitfield", "(814) 555-0199"],
     );
+    const sticker = checkStickerImport({ stickerNumber: "T280377", customerName: "Henry, Michael", plateClass: null });
+    assert.ok("entry" in sticker && sticker.entry.plateClass === null);
     assert.ok("error" in checkStickerImport({ stickerNumber: "PA-8", customerName: "", plateClass: 1 }));
     assert.ok("error" in checkStickerImport({ stickerNumber: "PA-8", customerName: "Dana Whitfield", plateClass: 3 }));
     assert.ok("error" in checkStickerImport({ stickerNumber: "PA-8", customerName: "Dana Whitfield", phone: "call me", plateClass: 1 }));
@@ -268,7 +334,7 @@ describe("the log", () => {
     await systemDb.$client.end();
   });
 
-  test("a sticker is logged for a customer, once", async () => {
+  test("a plate, or a sticker, is logged for a customer, once", async () => {
     const logged = await logSticker(writer, { stickerNumber: "pa-1001", plateClass: "1", customerId: dana });
     assert.ok("id" in logged, JSON.stringify(logged));
     const entry = await getStickerEntry(writer.shop.id, logged.id);
@@ -276,13 +342,20 @@ describe("the log", () => {
       entry && [entry.stickerNumber, entry.plateClass, entry.customerName, entry.createdBy],
       ["PA-1001", 1, "Dana Whitfield", "Sam"],
     );
-    // The same sticker again, however it's typed.
+    // The same number again, however it's typed.
     assert.deepEqual(await logSticker(writer, { stickerNumber: " #PA-1001", plateClass: "2", customerId: rhett }), {
-      error: "Sticker PA-1001 is already in the log, for Dana Whitfield.",
+      error: "PA-1001 is already in the log, as a Class 1 plate for Dana Whitfield.",
     });
     const [entryAudit] = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, logged.id));
     assert.equal(entryAudit.action, "sticker.logged");
     assert.deepEqual(entryAudit.details, { stickerNumber: "PA-1001", plateClass: 1, customerId: dana });
+    // A sticker has no class.
+    const sticker = await logSticker(writer, { stickerNumber: "t-5001", plateClass: "sticker", customerId: dana });
+    assert.ok("id" in sticker, JSON.stringify(sticker));
+    assert.equal((await getStickerEntry(writer.shop.id, sticker.id))?.plateClass, null);
+    assert.deepEqual(await logSticker(writer, { stickerNumber: "T-5001", plateClass: "1", customerId: rhett }), {
+      error: "T-5001 is already in the log, as a sticker for Dana Whitfield.",
+    });
   });
 
   test("a customer who isn't on file yet is added from the form", async () => {
@@ -311,8 +384,9 @@ describe("the log", () => {
     assert.deepEqual(await numbers({ query: "carver" }), ["2001", "2002"]);
     assert.deepEqual(await numbers({ query: "8145550123" }), ["2001", "2002"]);
     assert.deepEqual(await numbers({ query: "pa-10" }), ["PA-1001"]);
-    assert.deepEqual(await numbers({ query: "carver", plateClass: 2 }), ["2002"]);
-    assert.deepEqual(await numbers({ plateClass: 1 }), ["2001", "2003", "PA-1001"]);
+    assert.deepEqual(await numbers({ query: "carver", kind: "2" }), ["2002"]);
+    assert.deepEqual(await numbers({ kind: "1" }), ["2001", "2003", "PA-1001"]);
+    assert.deepEqual(await numbers({ kind: "sticker" }), ["T-5001"]);
     const page = await listStickerLog(writer.shop.id, { perPage: 2, page: 99 });
     assert.equal(page.page, page.pages, "a page past the end shows the last");
     // The download has the same entries, oldest first.
@@ -335,7 +409,7 @@ describe("the log", () => {
     assert.deepEqual(entry && [entry.stickerNumber, entry.plateClass, entry.customerName], ["3002", 2, "Rhett Carver"]);
     // Not to a number that's logged already.
     assert.deepEqual(await updateSticker(writer, logged.id, { stickerNumber: "2001", plateClass: "2", customerId: rhett }), {
-      error: "Sticker 2001 is already in the log, for Rhett Carver.",
+      error: "2001 is already in the log, as a Class 1 plate for Rhett Carver.",
     });
     // Saving it as it is changes nothing.
     assert.deepEqual(await updateSticker(writer, logged.id, { stickerNumber: "3002", plateClass: "2", customerId: rhett }), { ok: true });
@@ -351,7 +425,7 @@ describe("the log", () => {
 
   test("a customer with stickers logged stays on file", async () => {
     const result = await removeCustomer(writer, dana);
-    assert.ok("error" in result && result.error.includes("logged for Dana Whitfield"), JSON.stringify(result));
+    assert.ok("error" in result && result.error.includes("stickers and plates are logged for Dana Whitfield"), JSON.stringify(result));
     const spare = await customer(writer, "Spare Customer");
     assert.ok("ok" in (await removeCustomer(writer, spare)));
   });
@@ -383,7 +457,7 @@ describe("the log", () => {
     assert.ok(count >= 6);
   });
 
-  const row = (n: number, stickerNumber: string, customerName: string, plateClass: 1 | 2, phone: string | null = null): StickerImportRow => ({
+  const row = (n: number, stickerNumber: string, customerName: string, plateClass: 1 | 2 | null, phone: string | null = null): StickerImportRow => ({
     row: n,
     stickerNumber,
     customerName,
@@ -409,8 +483,8 @@ describe("the log", () => {
       { row: 3, result: "logged", customer: "added", message: null },
       { row: 4, result: "logged", customer: "found", message: null },
       { row: 5, result: "already", customer: null, message: null },
-      { row: 6, result: "already", customer: null, message: "Sticker 2001 is in the log already, for Rhett Carver (Class 1): left as it is." },
-      { row: 7, result: "failed", customer: null, message: "Enter the sticker number." },
+      { row: 6, result: "already", customer: null, message: "2001 is in the log already, as a Class 1 plate for Rhett Carver: left as it is." },
+      { row: 7, result: "failed", customer: null, message: "Enter the sticker or plate number." },
     ]);
     // The newest first: the file's last row, logged by whoever imported it.
     const imported = await listStickerLog(writer.shop.id, { query: "IMP" });
@@ -458,7 +532,7 @@ describe("the log", () => {
         row: 2,
         result: "failed",
         customer: null,
-        message: "2 customers are called Casey Morgan, and nothing in the file says which: log sticker IMP-20 on the log's form, picking them.",
+        message: "2 customers are called Casey Morgan, and nothing in the file says which: log Class 1 plate IMP-20 on the log's form, picking them.",
       },
       { row: 3, result: "logged", customer: "found", message: null },
       // A third phone number is a third Casey Morgan.
@@ -543,6 +617,35 @@ describe("the log", () => {
     assert.notEqual(theirs.customerId, dana, "a Dana of their own, not this shop's");
     const [mine] = (await listStickerLog(writer.shop.id, { query: "PA-1001" })).items;
     assert.deepEqual([mine.customerId, mine.plateClass], [dana, 1]);
+  });
+
+  test("an import logs the shop's sheet: each list's stickers or plates, with its own customers", async () => {
+    const rows = parseCsv(SHEET, pastedDelimiter(SHEET));
+    const plan = planStickerImport(rows, 0, stickerColumns(rows[0]));
+    const importId = randomUUID();
+    const result = await importStickers(writer, { importId, fileName: "Sticker & Plate log.xlsx", stickers: plan.stickers });
+    assert.ok("outcomes" in result, JSON.stringify(result));
+    assert.ok(result.outcomes.every((outcome) => outcome.result === "logged"), JSON.stringify(result.outcomes));
+    const of = async (kind: EntryKind, query: string) =>
+      (await listStickerLog(writer.shop.id, { kind, query, perPage: 100 })).items.map((entry) => [entry.stickerNumber, entry.customerName]).sort();
+    assert.deepEqual(await of("sticker", "T280"), [
+      ["T280377", "Henry, Michael"],
+      ["T280391", "Austin, Matt"],
+      ["T280397", "Shick, Jessica"],
+      ["T280409", "Hohman, Dennis"],
+    ]);
+    assert.deepEqual(await of("1", "90W"), [["90W14", "Elkin, Tyler"]]);
+    assert.deepEqual(await of("2", "93Y"), [
+      ["93Y39", "Neiderhiser, Charles"],
+      ["93Y67", "Austin, Matt"],
+      ["93Y73", "Shick, Jessica"],
+      ["93Y83", "Powell & Associates"],
+    ]);
+    // Matt Austin's sticker and plate are one customer's; nobody "returned".
+    assert.equal((await named(writer.shop.id, "Austin, Matt")).length, 1);
+    assert.deepEqual(await named(writer.shop.id, "Benanti, Anthony - returned"), []);
+    const [entry] = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, importId));
+    assert.deepEqual(entry.details, { fileName: "Sticker & Plate log.xlsx", logged: 9, already: 0, customersAdded: 7, failed: 0 });
   });
 
   test("an import batch that can't be read is refused", async () => {

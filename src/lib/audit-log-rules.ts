@@ -90,9 +90,12 @@ const VEHICLE_FIELD_WORDS: Record<string, string> = {
 
 const STICKER_FIELD_WORDS: Record<string, string> = {
   stickerNumber: "number",
-  plateClass: "classification",
+  plateClass: "type",
   customerId: "customer",
 };
+
+// What an entry was: "sticker" (no class) or "Class 1 plate".
+const stickerOrPlate = (plateClass: unknown) => (plateClass === 1 || plateClass === 2 ? `Class ${plateClass} plate` : "sticker");
 
 // The fields an edit changed, in words: the log names them, never what
 // they were or are.
@@ -187,20 +190,20 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
 
       // Sticker & Plate log
       case "sticker.logged":
-        return `Logged sticker ${str(d.stickerNumber)}, Class ${str(d.plateClass)}`;
+        return `Logged ${stickerOrPlate(d.plateClass)} ${str(d.stickerNumber)}`;
       case "sticker.updated": {
         const fields = fieldsInWords(d.fields, STICKER_FIELD_WORDS);
         const was = str(d.was);
-        return `Corrected sticker ${str(d.stickerNumber)}${fields ? `: its ${fields}` : ""}${was ? ` (it was ${was})` : ""}`;
+        return `Corrected ${str(d.stickerNumber)} in the Sticker & Plate log${fields ? `: its ${fields}` : ""}${was ? ` (it was ${was})` : ""}`;
       }
       case "sticker.removed":
-        return `Removed sticker ${str(d.stickerNumber)}, Class ${str(d.plateClass)}, from the log`;
+        return `Removed ${stickerOrPlate(d.plateClass)} ${str(d.stickerNumber)} from the log`;
       case "stickers.imported":
         fact("Logged", num(d.logged));
         fact("Already in the log", num(d.already));
         if (num(d.customersAdded) > 0) fact("Customers added", num(d.customersAdded));
         if (num(d.failed) > 0) fact("Left out", num(d.failed));
-        return `Imported stickers from ${str(d.fileName) || "a file"}`;
+        return `Imported stickers and plates from ${str(d.fileName) || "a file"}`;
 
       // Supplier
       case "supplier.created":

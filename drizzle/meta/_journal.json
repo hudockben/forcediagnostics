@@ -295,6 +295,13 @@
       "when": 1793496640787,
       "tag": "0041_unit_sales_import_row",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1793649137730,
+      "tag": "0042_sticker_plate_log_stickers",
+      "breakpoints": true
     }
   ]
 }

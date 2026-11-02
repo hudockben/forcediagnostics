@@ -7,7 +7,7 @@ import { requireCapability } from "@/lib/session";
 
 import { StickerImport } from "./sticker-import";
 
-export const metadata: Metadata = { title: "Import stickers" };
+export const metadata: Metadata = { title: "Import stickers and plates" };
 
 export default function ImportStickersPage() {
   return (
@@ -25,8 +25,8 @@ async function ImportStickers() {
         ‹ Sticker &amp; Plate log
       </Link>
       <PageHeading
-        title="Import stickers"
-        description="Bring in a sticker log kept in a spreadsheet: a CSV or Excel file, or the rows pasted from one. Stickers already in the log are left as they are, so importing the same file again adds nothing new."
+        title="Import stickers and plates"
+        description="Bring in the stickers and plates kept in a spreadsheet: a CSV or Excel file, or the rows pasted from one. Lists side by side (stickers, Class 1 plates, Class 2 plates) come in together, each number with the customer beside it. Numbers already in the log are left as they are, so importing the same file again adds nothing new."
       />
       <StickerImport />
     </div>

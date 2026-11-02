@@ -9,31 +9,36 @@ import { parseCsv } from "@/lib/csv";
 import { pastedDelimiter, readSpreadsheet, reportCsv, type Sheet } from "@/lib/customer-import-rules";
 import {
   MAX_STICKER_IMPORT_BATCH,
-  REQUIRED_STICKER_FIELDS,
   STICKER_IMPORT_FIELDS,
   STICKER_IMPORT_LABELS,
+  countByKind,
   findStickerHeader,
+  isNumberField,
+  listOf,
   planStickerImport,
   stickerColumns,
+  stickerLists,
   type StickerImportField,
   type StickerImportOutcome,
   type StickerImportRow,
 } from "@/lib/sticker-import-rules";
-import { PLATE_CLASSES, PLATE_CLASS_LABELS, type PlateClass } from "@/lib/sticker-log-rules";
+import { ENTRY_KINDS, ENTRY_KIND_PLURALS, entryLabel, kindOf, type EntryKind } from "@/lib/sticker-log-rules";
 
 import { importStickersAction } from "../actions";
 
-// Importing a sticker log, in the browser: a CSV or Excel file, or rows
-// pasted from a spreadsheet. Each column is matched to a field by its
-// heading (and can be changed), the preview shows what will be logged and
-// what's left out, and Import sends the stickers in batches. A sticker
-// already in the log is left as it is, so importing the file again adds
-// nothing new.
+// Importing the Sticker & Plate log, in the browser: a CSV or Excel file,
+// or rows pasted from a spreadsheet. Each column is matched to a field by
+// its heading (and can be changed); lists side by side (stickers, Class 1
+// plates, Class 2 plates) are read together, each number with the Customer
+// Name after it. The preview shows what will be logged and what's left
+// out, and Import sends them in batches. A number already in the log is
+// left as it is, so importing the file again adds nothing new.
 
 type Loaded = { name: string; sheets: Sheet[] };
+// entries: what was sent, in order, as the outcomes are.
 type Run =
-  | { state: "running"; sent: number; total: number; outcomes: StickerImportOutcome[] }
-  | { state: "done" | "stopped"; sent: number; total: number; outcomes: StickerImportOutcome[]; error?: string };
+  | { state: "running"; sent: number; total: number; entries: StickerImportRow[]; outcomes: StickerImportOutcome[] }
+  | { state: "done" | "stopped"; sent: number; total: number; entries: StickerImportRow[]; outcomes: StickerImportOutcome[]; error?: string };
 
 const selectClass = `${inputBaseClass} h-11 appearance-none pr-9 text-sm`;
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
@@ -68,9 +73,9 @@ export function StickerImport() {
   const [sheetIndex, setSheetIndex] = useState(0);
   const [headerRow, setHeaderRow] = useState(0);
   const [mapping, setMapping] = useState<(StickerImportField | null)[]>([]);
-  // The class for rows that don't have one: every row, for a list without
-  // a Plate Classification column (stickers on one list, plates on another).
-  const [plateClass, setPlateClass] = useState<PlateClass | null>(null);
+  // What a list's entries are when nothing on the sheet says (a "Sticker
+  // or plate #" column without a Type column).
+  const [kind, setKind] = useState<EntryKind | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const job = useRef<{ importId: string; name: string; batches: StickerImportRow[][]; next: number; sent: number; outcomes: StickerImportOutcome[] } | null>(null);
   const fileId = useId();
@@ -81,14 +86,23 @@ export function StickerImport() {
   const plannedHeader = useDeferredValue(headerRow);
   const planning = plannedMapping !== mapping || plannedHeader !== headerRow;
   const plan = useMemo(
-    () => (loaded ? planStickerImport(rows, plannedHeader, plannedMapping, { plateClass }) : null),
-    [loaded, rows, plannedHeader, plannedMapping, plateClass],
+    () => (loaded ? planStickerImport(rows, plannedHeader, plannedMapping, { kind }) : null),
+    [loaded, rows, plannedHeader, plannedMapping, kind],
   );
   const running = run?.state === "running";
-  const hasRequired = REQUIRED_STICKER_FIELDS.every((field) => mapping.includes(field));
-  const hasPhone = mapping.includes("phone");
-  const hasClassColumn = mapping.includes("plateClass");
-  const classReady = hasClassColumn || plateClass !== null;
+  const lists = useMemo(() => stickerLists(mapping), [mapping]);
+  const named = lists.filter((list) => list.name !== null);
+  const hasPhone = lists.some((list) => list.phone !== null);
+  // Lists whose column doesn't say what they are: a Type column does, or
+  // the choice on the page.
+  const open = lists.filter((list) => list.field === "number");
+  const needsKind = open.some((list) => list.type === null);
+  const ready = named.length > 0 && (!needsKind || kind !== null);
+  // A few of each, for the preview.
+  const preview = useMemo(
+    () => (plan ? ENTRY_KINDS.flatMap((each) => plan.stickers.filter((entry) => kindOf(entry.plateClass) === each).slice(0, 4)) : []),
+    [plan],
+  );
 
   useEffect(() => {
     if (!running) return;
@@ -107,9 +121,9 @@ export function StickerImport() {
     setSheetIndex(index);
     setHeaderRow(at);
     setMapping(stickerColumns(sheetRows[at] ?? []));
-    // Each list's class is picked for it: a list of plates after a list of
-    // stickers doesn't take the stickers' class.
-    setPlateClass(null);
+    // Picked for each file: a list of plates after a list of stickers
+    // doesn't take the stickers' choice.
+    setKind(null);
     setRun(null);
     setReadError(null);
   }
@@ -148,21 +162,22 @@ export function StickerImport() {
     const current = job.current;
     if (!current) return;
     const total = current.batches.reduce((sum, batch) => sum + batch.length, 0);
-    setRun({ state: "running", sent: current.sent, total, outcomes: [...current.outcomes] });
+    const entries = current.batches.flat();
+    setRun({ state: "running", sent: current.sent, total, entries, outcomes: [...current.outcomes] });
     while (current.next < current.batches.length) {
       const batch = current.batches[current.next];
       const result = await importStickersAction({ importId: current.importId, fileName: current.name, stickers: batch }).catch(() => ({ error: "The connection dropped." }));
       if ("error" in result) {
-        setRun({ state: "stopped", sent: current.sent, total, outcomes: [...current.outcomes], error: result.error });
+        setRun({ state: "stopped", sent: current.sent, total, entries, outcomes: [...current.outcomes], error: result.error });
         return;
       }
       current.outcomes.push(...result.outcomes);
       current.sent += batch.length;
       current.next++;
-      setRun({ state: "running", sent: current.sent, total, outcomes: [...current.outcomes] });
+      setRun({ state: "running", sent: current.sent, total, entries, outcomes: [...current.outcomes] });
     }
     job.current = null;
-    setRun({ state: "done", sent: total, total, outcomes: current.outcomes });
+    setRun({ state: "done", sent: total, total, entries, outcomes: current.outcomes });
   }
 
   function start() {
@@ -173,8 +188,7 @@ export function StickerImport() {
     void send();
   }
 
-  // Each column's heading and two examples; the first column with a field
-  // is the one read.
+  // Each column's heading and two examples.
   const columns = useMemo(() => {
     const width = Math.max(rows[headerRow]?.length ?? 0, ...rows.slice(headerRow + 1, headerRow + 21).map((row) => row.length));
     return Array.from({ length: width }, (_, column) => {
@@ -186,16 +200,26 @@ export function StickerImport() {
       return { label: rows[headerRow]?.[column]?.trim() || `Column ${columnLetter(column)}`, examples };
     });
   }, [rows, headerRow]);
-  const firstColumn = useMemo(() => {
-    const first = new Map<StickerImportField, number>();
-    mapping.forEach((field, column) => {
-      if (field && !first.has(field)) first.set(field, column);
-    });
-    return first;
-  }, [mapping]);
+  // Under a column's choice: which list a name, phone or type column goes
+  // with (when there are several), or what's wrong.
+  function columnHint(column: number): { text: string; warn: boolean } | null {
+    const field = mapping[column] ?? null;
+    if (!field) return null;
+    const label = (at: number) => columns[at]?.label ?? `Column ${columnLetter(at)}`;
+    if (isNumberField(field)) {
+      const list = lists.find((each) => each.column === column);
+      return list && list.name === null ? { text: "No Customer Name column after this one: its numbers are left out.", warn: true } : null;
+    }
+    const owner = listOf(mapping, column);
+    if (owner === null) return { text: "Pick the number column this goes with.", warn: true };
+    const list = lists.find((each) => each.column === owner)!;
+    const first = field === "customerName" ? list.name : field === "phone" ? list.phone : list.type;
+    if (first !== null && first !== column) return { text: `${label(first)} has this for ${label(owner)}: only that one is read.`, warn: true };
+    return lists.length > 1 ? { text: `With ${label(owner)}`, warn: false } : null;
+  }
 
-  // The plan's notes, then what the server said: a row it left out, or a
-  // sticker the log has for someone else.
+  // The plan's notes, then what the server said: one it left out, or a
+  // number the log has for someone else.
   const notes = useMemo(() => {
     const all = (plan?.notes ?? []).map((note) => ({ ...note, skipped: false }));
     for (const outcome of run?.outcomes ?? []) {
@@ -208,6 +232,7 @@ export function StickerImport() {
   if (run && run.state !== "running") {
     const count = (result: StickerImportOutcome["result"]) => run.outcomes.filter((outcome) => outcome.result === result).length;
     const customersAdded = run.outcomes.filter((outcome) => outcome.customer === "added").length;
+    const logged = run.outcomes.flatMap((outcome, index) => (outcome.result === "logged" && run.entries[index] ? [run.entries[index]] : []));
     return (
       <section className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" data-sticker-import-finished={run.state}>
         <h2 ref={finished} tabIndex={-1} className="text-base font-semibold text-ink focus:outline-none">
@@ -215,13 +240,13 @@ export function StickerImport() {
         </h2>
         {run.state === "stopped" && (
           <Notice tone="trail">
-            Stopped after {run.sent.toLocaleString("en-US")} of {plural(run.total, "sticker", "stickers")}: {run.error} Carry on sends the rest;
+            Stopped after {run.sent.toLocaleString("en-US")} of {run.total.toLocaleString("en-US")}: {run.error} Carry on sends the rest;
             nothing already saved is logged twice.
           </Notice>
         )}
         <ul className="flex flex-wrap gap-2" data-sticker-import-result>
           <li>
-            <Badge tone="glow">{plural(count("logged"), "sticker logged", "stickers logged")}</Badge>
+            <Badge tone="glow">{logged.length > 0 ? `${countByKind(logged)} logged` : "Nothing new logged"}</Badge>
           </li>
           <li>
             <Badge>{plural(count("already"), "already in the log", "already in the log")}</Badge>
@@ -275,7 +300,7 @@ export function StickerImport() {
             className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-white/20 px-4 py-6 text-center transition hover:border-white/30 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-glow/40"
           >
             <span className="text-sm font-medium text-ink">{reading ? "Reading…" : loaded && loaded.name !== "pasted rows" ? `${loaded.name}: choose another` : "Choose a CSV or Excel file"}</span>
-            <span className="text-xs text-ink-muted">With a headings row: Sticker # and Customer Name, and Plate Classification and Phone if you have them.</span>
+            <span className="text-xs text-ink-muted">With a headings row: Sticker #, Class 1 Plate or Class 2 Plate, each with its Customer Name beside it. Lists side by side come in together.</span>
             <input
               id={fileId}
               type="file"
@@ -360,29 +385,31 @@ export function StickerImport() {
                 <Chevron />
               </div>
             </div>
-            <div className="min-w-56">
-              <label htmlFor="sticker-class" className={labelClass}>
-                {hasClassColumn ? "Rows with no Plate Classification" : "Plate Classification for these rows"}
-              </label>
-              <div className="relative mt-1.5">
-                <select
-                  id="sticker-class"
-                  value={plateClass ?? ""}
-                  disabled={running}
-                  onChange={(event) => setPlateClass(event.target.value ? (Number(event.target.value) as PlateClass) : null)}
-                  className={`${selectClass} ${classReady ? "text-ink" : "border-trail/50 text-ink-muted"}`}
-                  data-sticker-class
-                >
-                  <option value="">{hasClassColumn ? "Leave them out" : "Pick one"}</option>
-                  {PLATE_CLASSES.map((option) => (
-                    <option key={option} value={option}>
-                      {PLATE_CLASS_LABELS[option]}
-                    </option>
-                  ))}
-                </select>
-                <Chevron />
+            {open.length > 0 && (
+              <div className="min-w-56">
+                <label htmlFor="sticker-kind" className={labelClass}>
+                  {needsKind ? "What's on this list" : "Rows with no Type"}
+                </label>
+                <div className="relative mt-1.5">
+                  <select
+                    id="sticker-kind"
+                    value={kind ?? ""}
+                    disabled={running}
+                    onChange={(event) => setKind((event.target.value || null) as EntryKind | null)}
+                    className={`${selectClass} ${!needsKind || kind ? "text-ink" : "border-trail/50 text-ink-muted"}`}
+                    data-sticker-kind
+                  >
+                    <option value="">{needsKind ? "Pick one" : "Leave them out"}</option>
+                    {ENTRY_KINDS.map((option) => (
+                      <option key={option} value={option}>
+                        {ENTRY_KIND_PLURALS[option]}
+                      </option>
+                    ))}
+                  </select>
+                  <Chevron />
+                </div>
               </div>
-            </div>
+            )}
           </div>
           <div className="-mx-5 mt-4 overflow-x-auto sm:-mx-6">
             <table className="w-full min-w-[32rem] text-sm" data-sticker-columns>
@@ -402,7 +429,7 @@ export function StickerImport() {
               <tbody className="divide-y divide-white/10">
                 {columns.map(({ label, examples }, column) => {
                   const field = mapping[column] ?? null;
-                  const first = field ? (firstColumn.get(field) ?? column) : column;
+                  const hint = columnHint(column);
                   return (
                     <tr key={column}>
                       <th scope="row" className="px-5 py-2 text-left font-medium break-words text-ink sm:px-6">
@@ -435,9 +462,7 @@ export function StickerImport() {
                           </select>
                           <Chevron />
                         </div>
-                        {first !== column && (
-                          <p className="mt-1 text-xs text-trail">{columns[first]?.label ?? "Another column"} has this too: only that column is read.</p>
-                        )}
+                        {hint && <p className={`mt-1 text-xs ${hint.warn ? "text-trail" : "text-ink-muted"}`}>{hint.text}</p>}
                       </td>
                     </tr>
                   );
@@ -445,72 +470,88 @@ export function StickerImport() {
               </tbody>
             </table>
           </div>
-          {!hasRequired ? (
+          {lists.length === 0 ? (
             <div className="mt-4">
-              <Notice tone="trail">Pick the columns with the Sticker # and the Customer Name to import.</Notice>
+              <Notice tone="trail">Pick the column with the numbers: Sticker #, Class 1 Plate # or Class 2 Plate #, with its Customer Name after it.</Notice>
+            </div>
+          ) : named.length === 0 ? (
+            <div className="mt-4">
+              <Notice tone="trail">Pick the Customer Name column that goes with the numbers, after them.</Notice>
             </div>
           ) : (
-            !classReady && (
+            needsKind &&
+            !kind && (
               <div className="mt-4">
-                <Notice tone="trail">
-                  This list has no Plate Classification column: pick the class for its rows above. A list of stickers and a list of plates can
-                  each be imported with its own.
-                </Notice>
+                <Notice tone="trail">Nothing on this list says whether it&apos;s stickers or plates: pick what&apos;s on it above.</Notice>
               </div>
             )
           )}
         </section>
       )}
 
-      {loaded && plan && hasRequired && classReady && (
+      {loaded && plan && ready && (
         <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6">
           <h2 className="text-base font-semibold text-ink">3. Import</h2>
           <div aria-busy={planning} className={`mt-4 space-y-4 ${planning ? "opacity-60" : ""}`}>
             <p className="text-sm leading-6 text-ink" data-sticker-import-summary>
-              {plural(plan.rowsRead, "row", "rows")} read: {plural(plan.stickers.length, "sticker", "stickers")}. A sticker already in the log is left
-              as it is. Each customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.
-              {plateClass && (hasClassColumn ? ` Rows with no class are logged as ${PLATE_CLASS_LABELS[plateClass]}.` : ` Every row is logged as ${PLATE_CLASS_LABELS[plateClass]}.`)}
+              {plural(plan.rowsRead, "row", "rows")} read: {countByKind(plan.stickers)} to log. A number already in the log is left as it is. Each
+              customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.
             </p>
             {plan.stickers.length > 0 && (
               <div className="-mx-5 overflow-x-auto sm:-mx-6">
                 <table className="w-full min-w-[32rem] text-sm" data-sticker-preview>
-                  <caption className="sr-only">The first stickers to be imported</caption>
+                  <caption className="sr-only">The first of each to be imported</caption>
                   <thead>
                     <tr className="border-y border-white/10 text-left text-xs text-ink-muted">
-                      {STICKER_IMPORT_FIELDS.filter((field) => field !== "phone" || hasPhone).map((field) => (
-                        <th key={field} scope="col" className="px-3 py-2 font-medium first:pl-5 sm:first:pl-6">
-                          {STICKER_IMPORT_LABELS[field]}
+                      <th scope="col" className="px-3 py-2 pl-5 font-medium sm:pl-6">
+                        Type
+                      </th>
+                      <th scope="col" className="px-3 py-2 font-medium">
+                        Sticker / Plate #
+                      </th>
+                      <th scope="col" className="px-3 py-2 font-medium">
+                        Customer Name
+                      </th>
+                      {hasPhone && (
+                        <th scope="col" className="px-3 py-2 font-medium">
+                          Phone
                         </th>
-                      ))}
+                      )}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/10">
-                    {plan.stickers.slice(0, 8).map((sticker) => (
-                      <tr key={sticker.row}>
-                        <td className="px-3 py-2 pl-5 font-mono break-words text-ink sm:pl-6">{sticker.stickerNumber}</td>
+                    {preview.map((sticker) => (
+                      <tr key={`${sticker.row}-${sticker.stickerNumber}`}>
+                        <td className="px-3 py-2 pl-5 text-ink-muted sm:pl-6">{entryLabel(sticker.plateClass)}</td>
+                        <td className="px-3 py-2 font-mono break-words text-ink">{sticker.stickerNumber}</td>
                         <td className="px-3 py-2 break-words text-ink">{sticker.customerName}</td>
                         {hasPhone && <td className="px-3 py-2 break-words text-ink">{sticker.phone ?? <span className="text-ink-muted">—</span>}</td>}
-                        <td className="px-3 py-2 text-ink">{sticker.plateClass}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                {plan.stickers.length > 8 && <p className="mt-2 px-5 text-xs text-ink-muted sm:px-6">…and {plural(plan.stickers.length - 8, "more", "more")}.</p>}
+                {plan.stickers.length > preview.length && (
+                  <p className="mt-2 px-5 text-xs text-ink-muted sm:px-6">…and {plural(plan.stickers.length - preview.length, "more", "more")}.</p>
+                )}
               </div>
             )}
             <Notes notes={notes} />
           </div>
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-3">
             <button type="button" onClick={start} disabled={running || planning || plan.stickers.length === 0} className={primaryLinkClass} data-sticker-import-start>
-              {running ? "Importing…" : planning ? "Updating…" : `Import ${plural(plan.stickers.length, "sticker", "stickers")}`}
+              {running
+                ? "Importing…"
+                : planning
+                  ? "Updating…"
+                  : `Import ${new Set(plan.stickers.map((entry) => entry.plateClass)).size > 1 ? `${plan.stickers.length.toLocaleString("en-US")} stickers and plates` : countByKind(plan.stickers)}`}
             </button>
             {run?.state === "running" && (
               <div className="min-w-56 flex-1" role="status">
-                <div role="progressbar" aria-label="Stickers saved" aria-valuemin={0} aria-valuemax={run.total} aria-valuenow={run.sent} className="h-2 overflow-hidden rounded-full bg-white/10">
+                <div role="progressbar" aria-label="Stickers and plates saved" aria-valuemin={0} aria-valuemax={run.total} aria-valuenow={run.sent} className="h-2 overflow-hidden rounded-full bg-white/10">
                   <div className="h-full bg-glow transition-[width]" style={{ width: `${run.total ? (run.sent / run.total) * 100 : 0}%` }} />
                 </div>
                 <p className="mt-1.5 text-xs text-ink-muted">
-                  Saved {run.sent.toLocaleString("en-US")} of {plural(run.total, "sticker", "stickers")}. Keep this tab open.
+                  Saved {run.sent.toLocaleString("en-US")} of {run.total.toLocaleString("en-US")}. Keep this tab open.
                 </p>
               </div>
             )}

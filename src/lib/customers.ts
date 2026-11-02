@@ -355,8 +355,9 @@ export async function updateCustomer(
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 // Removes a customer and their vehicles, unless a diagnosis is tied to one
-// of the vehicles, or a sticker or a sale is logged for them: diagnoses,
-// the sticker log and the NUSR are the shop's records, and they keep theirs.
+// of the vehicles, or a sticker, plate or sale is logged for them:
+// diagnoses, the Sticker & Plate log and the NUSR are the shop's records,
+// and they keep theirs.
 export async function removeCustomer(actor: CurrentUser, id: string): Promise<Result & { name?: string }> {
   if (!isUuid(id)) return NOT_HERE;
   try {
@@ -388,7 +389,7 @@ export async function removeCustomer(actor: CurrentUser, id: string): Promise<Re
         .where(eq(stickerPlateLog.customerId, id));
       if (stickers > 0) {
         return {
-          error: `${plural(stickers, "sticker is", "stickers are")} logged for ${customer.name}, so the record stays. Move ${stickers === 1 ? "it" : "them"} to the right customer in the Sticker & Plate log first if this customer was added by mistake.`,
+          error: `${plural(stickers, "sticker or plate is", "stickers and plates are")} logged for ${customer.name}, so the record stays. Move ${stickers === 1 ? "it" : "them"} to the right customer in the Sticker & Plate log first if this customer was added by mistake.`,
         };
       }
       const [{ sales }] = await tx.select({ sales: sql<number>`count(*)::int` }).from(unitSales).where(eq(unitSales.customerId, id));

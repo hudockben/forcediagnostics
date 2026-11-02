@@ -2,7 +2,7 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { DrizzleQueryError, and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { DrizzleQueryError, and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
 import { auditLog, customers, stickerPlateLog, users } from "@/db/schema";
@@ -16,20 +16,23 @@ import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, personKey, type StickerIm
 import {
   STICKER_LOG_PAGE_SIZE,
   checkStickerEntry,
+  classOf,
+  entryWords,
+  type EntryKind,
   type PlateClass,
   type StickerLogRow,
 } from "@/lib/sticker-log-rules";
 
-// The Sticker & Plate log tab: each registration sticker the shop
-// hands out, tied to the customer it went to, with the plate's
-// classification (1 or 2). Callers check repair_orders.intake first;
+// The Sticker & Plate log tab: each registration sticker and plate the
+// shop hands out, tied to the customer it went to; a plate is Class 1 or
+// Class 2, a sticker has no class. Callers check repair_orders.intake first;
 // everything here runs inside withShop for the user's own shop, and every
 // change is written to audit_log.
 
 export type StickerEntry = {
   id: string;
   stickerNumber: string;
-  plateClass: PlateClass;
+  plateClass: PlateClass | null;
   customerId: string;
   customerName: string;
   createdAt: Date;
@@ -71,8 +74,14 @@ function logSearch(query: string): SQL | undefined {
   )}]::text[])`;
 }
 
-const filters = (query: string, plateClass: PlateClass | null) =>
-  and(logSearch(query), plateClass ? eq(stickerPlateLog.plateClass, plateClass) : undefined);
+// Stickers (no class), one class of plates, or everything.
+const ofKind = (kind: EntryKind | null) => {
+  if (kind === null) return undefined;
+  const plateClass = classOf(kind);
+  return plateClass === null ? isNull(stickerPlateLog.plateClass) : eq(stickerPlateLog.plateClass, plateClass);
+};
+
+const filters = (query: string, kind: EntryKind | null) => and(logSearch(query), ofKind(kind));
 
 // One page of the log, the newest first, or of what a search (and a class)
 // finds. A page past the end gives the last one.
@@ -80,12 +89,12 @@ export async function listStickerLog(
   shopId: string,
   {
     query = "",
-    plateClass = null,
+    kind = null,
     page = 1,
     perPage = STICKER_LOG_PAGE_SIZE,
-  }: { query?: string; plateClass?: PlateClass | null; page?: number; perPage?: number } = {},
+  }: { query?: string; kind?: EntryKind | null; page?: number; perPage?: number } = {},
 ): Promise<StickerLog> {
-  const where = filters(query, plateClass);
+  const where = filters(query, kind);
   return withShop(shopId, async (tx) => {
     const [{ total }] = await tx
       .select({ total: sql<number>`count(*)::int` })
@@ -115,7 +124,7 @@ export const MAX_EXPORT_ROWS = 100_000;
 // oldest first, as a log is read.
 export async function exportStickerLog(
   shopId: string,
-  { query = "", plateClass = null }: { query?: string; plateClass?: PlateClass | null } = {},
+  { query = "", kind = null }: { query?: string; kind?: EntryKind | null } = {},
 ): Promise<StickerLogRow[]> {
   return withShop(shopId, (tx) =>
     tx
@@ -129,7 +138,7 @@ export async function exportStickerLog(
       .from(stickerPlateLog)
       .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
       .leftJoin(users, eq(users.id, stickerPlateLog.createdByUserId))
-      .where(filters(query, plateClass))
+      .where(filters(query, kind))
       .orderBy(stickerPlateLog.createdAt, stickerPlateLog.id)
       .limit(MAX_EXPORT_ROWS),
   );
@@ -223,17 +232,19 @@ async function customerFor(
     });
     return made;
   }
-  return { error: "Pick the customer the sticker went to, or add them." };
+  return { error: "Pick the customer it went to, or add them." };
 }
 
-// Another entry with this sticker number, said by whom it went to.
+// Another entry with this number, said what it is and whom it went to.
 async function alreadyLogged(tx: ShopTransaction, stickerNumber: string, except?: string) {
   const [other] = await tx
-    .select({ id: stickerPlateLog.id, customerName: customers.name })
+    .select({ id: stickerPlateLog.id, plateClass: stickerPlateLog.plateClass, customerName: customers.name })
     .from(stickerPlateLog)
     .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
     .where(eq(stickerPlateLog.stickerNumber, stickerNumber));
-  return other && other.id !== except ? { error: `Sticker ${stickerNumber} is already in the log, for ${other.customerName}.` } : null;
+  return other && other.id !== except
+    ? { error: `${stickerNumber} is already in the log, as a ${entryWords(other.plateClass)} for ${other.customerName}.` }
+    : null;
 }
 
 export type StickerInput = { stickerNumber: unknown; plateClass: unknown; customerId?: unknown; newCustomerName?: unknown };
@@ -257,12 +268,12 @@ export async function logSticker(actor: CurrentUser, input: StickerInput): Promi
     });
   } catch (error) {
     // Logged by someone else a moment ago.
-    if (unique(error)) return { error: `Sticker ${stickerNumber} is already in the log.` };
+    if (unique(error)) return { error: `${stickerNumber} is already in the log.` };
     throw error;
   }
 }
 
-// Corrects an entry: its sticker number, classification or customer.
+// Corrects an entry: its number, what it is (a sticker or a plate's class) or its customer.
 export async function updateSticker(actor: CurrentUser, id: string, input: StickerInput): Promise<{ ok: true } | { error: string }> {
   if (!isUuid(id)) return NOT_HERE;
   const checked = checkStickerEntry(input);
@@ -288,7 +299,7 @@ export async function updateSticker(actor: CurrentUser, id: string, input: Stick
       return { ok: true as const };
     });
   } catch (error) {
-    if (unique(error)) return { error: `Sticker ${stickerNumber} is already in the log.` };
+    if (unique(error)) return { error: `${stickerNumber} is already in the log.` };
     throw error;
   }
 }
@@ -321,10 +332,11 @@ const rowOf = (entry: unknown) => {
   return Number.isInteger(row) ? Number(row) : 0;
 };
 
-// Saves one batch of an imported sticker log, each row checked as the
-// form checks it. A sticker already in the log is left as it is (and said
-// so when the file has it for someone else, or in the other class), so
-// importing the same file again adds nothing. Each sticker's customer is
+// Saves one batch of an imported Sticker & Plate log, each sticker and
+// plate checked as the form checks it. A number already in the log is left
+// as it is (and said so when the log has it for someone else, or as
+// something else), so importing the same file again adds nothing. Each
+// one's customer is
 // found on Customers by name, either way round ("Rudd, Benjamin" finds
 // Benjamin Rudd), and by phone number when the file has one, the way the
 // customer import finds them; anyone not there is added as written, once
@@ -380,7 +392,7 @@ export async function importStickers(
 
     const outcomes: StickerImportOutcome[] = [];
     const newCustomers: (typeof customers.$inferInsert & { id: string })[] = [];
-    const newStickers: { customerId: string; stickerNumber: string; plateClass: PlateClass; outcome: StickerImportOutcome }[] = [];
+    const newStickers: { customerId: string; stickerNumber: string; plateClass: PlateClass | null; outcome: StickerImportOutcome }[] = [];
     for (const { row, entry } of checked) {
       if ("error" in entry) {
         outcomes.push({ row, result: "failed", customer: null, message: entry.error });
@@ -394,7 +406,7 @@ export async function importStickers(
           row,
           result: "already",
           customer: null,
-          message: same ? null : `Sticker ${stickerNumber} is in the log already, for ${already.customerName} (Class ${already.plateClass}): left as it is.`,
+          message: same ? null : `${stickerNumber} is in the log already, as a ${entryWords(already.plateClass)} for ${already.customerName}: left as it is.`,
         });
         continue;
       }
@@ -410,7 +422,7 @@ export async function importStickers(
           row,
           result: "failed",
           customer: null,
-          message: `${found.ambiguous} customers are called ${customer.name}, and nothing in the file says which: log sticker ${stickerNumber} on the log's form, picking them.`,
+          message: `${found.ambiguous} customers are called ${customer.name}, and nothing in the file says which: log ${entryWords(plateClass)} ${stickerNumber} on the log's form, picking them.`,
         });
         continue;
       }
@@ -453,7 +465,7 @@ export async function importStickers(
     const credited = new Set<string>();
     for (const { customerId, stickerNumber, outcome } of newStickers) {
       if (!saved.has(stickerNumber)) {
-        Object.assign(outcome, { result: "already", message: `Sticker ${stickerNumber} was logged on the form while this import ran: left as it is.` });
+        Object.assign(outcome, { result: "already", message: `${stickerNumber} was logged on the form while this import ran: left as it is.` });
         continue;
       }
       const isNew = added.has(customerId) && !credited.has(customerId);
