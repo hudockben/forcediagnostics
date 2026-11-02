@@ -64,7 +64,10 @@ export function decodeText(bytes: Uint8Array): string {
 
 // Commas, or semicolons or tabs when a line has more of those (outside
 // quotes): the most of each in any of the first ten lines, so a title line
-// above the headings ("Supplier list") doesn't decide it.
+// above the headings ("Supplier list") doesn't decide it. As many tabs as
+// commas is tabs: a tab-separated list with a comma in each row
+// ("T715366<tab>Rudd, Benjamin"), as a comma-separated one hardly ever has
+// a tab outside quotes.
 export function detectDelimiter(text: string): "," | ";" | "\t" {
   const most = { ",": 0, ";": 0, "\t": 0 };
   let counts = { ",": 0, ";": 0, "\t": 0 };
@@ -81,10 +84,16 @@ export function detectDelimiter(text: string): "," | ";" | "\t" {
     }
   }
   for (const key of [",", ";", "\t"] as const) most[key] = Math.max(most[key], counts[key]);
-  if (most["\t"] > most[","] && most["\t"] >= most[";"]) return "\t";
+  if (most["\t"] > 0 && most["\t"] >= most[","] && most["\t"] >= most[";"]) return "\t";
   if (most[";"] > most[","]) return ";";
   return ",";
 }
+
+// Rows pasted from a spreadsheet: Excel, Google Sheets and Numbers copy
+// cells with a tab between them and leave a comma in a cell as it is
+// ("Rudd, Benjamin"), so tabs whenever there are any; otherwise the rows
+// are read as a CSV file would be.
+export const pastedDelimiter = (text: string): "," | ";" | "\t" => (text.includes("\t") ? "\t" : detectDelimiter(text));
 
 const isOldExcel = (bytes: Uint8Array) => bytes[0] === 0xd0 && bytes[1] === 0xcf && bytes[2] === 0x11 && bytes[3] === 0xe0;
 

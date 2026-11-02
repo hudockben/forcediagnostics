@@ -30,6 +30,7 @@ import {
   matchCustomer,
   padZip,
   parseRelation,
+  pastedDelimiter,
   planImport,
   readHeading,
   readSpreadsheet,
@@ -77,6 +78,13 @@ describe("reading the file", () => {
     // A title line above the headings doesn't decide it.
     assert.equal(detectDelimiter("Supplier list\nSupplier ID\tSupplier Name\n1\tPolaris"), "\t");
     assert.equal(detectDelimiter("Customer list, printed 10/30/2026\nName;Phone;Email\nJo;1;x"), ";");
+    // As many tabs as commas: tab-separated, with a comma in each row.
+    assert.equal(detectDelimiter("Sticker Number\tCustomer Name\nT280377\tHenry, Michael\nT280391\tAustin, Matt"), "\t");
+    // Rows pasted from a spreadsheet have tabs between their cells,
+    // whatever commas are in them.
+    assert.equal(pastedDelimiter("Sticker #\tCustomer Name\nT1\tSmith, John, Jr."), "\t");
+    assert.equal(pastedDelimiter("Name,Phone\nA,1"), ",");
+    assert.equal(pastedDelimiter("Name;Phone;Email\nA;1;x"), ";");
   });
 
   test("CSV, semicolon CSV and tab-separated text all read", async () => {
