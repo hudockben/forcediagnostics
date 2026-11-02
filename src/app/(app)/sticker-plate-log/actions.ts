@@ -5,7 +5,8 @@ import { refresh } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { requireCapability } from "@/lib/session";
-import { logSticker, removeSticker, searchCustomersForLog, updateSticker, type CustomerChoice } from "@/lib/sticker-log";
+import type { StickerImportOutcome } from "@/lib/sticker-import-rules";
+import { importStickers, logSticker, removeSticker, searchCustomersForLog, updateSticker, type CustomerChoice } from "@/lib/sticker-log";
 
 export type FormState = { error?: string; success?: string; logged?: string };
 
@@ -59,6 +60,25 @@ export async function removeStickerAction(_previous: FormState, form: FormData):
     if ("error" in result) return { error: result.error };
     redirect(`/sticker-plate-log?removed=${encodeURIComponent(result.stickerNumber)}`);
   });
+}
+
+// One batch of an import (see src/lib/sticker-import-rules.ts); the browser
+// sends them one after another.
+export async function importStickersAction(input: {
+  importId: string;
+  fileName: string;
+  stickers: unknown;
+}): Promise<{ outcomes: StickerImportOutcome[] } | { error: string }> {
+  try {
+    const user = await requireCapability("repair_orders.intake");
+    return await importStickers(user, { importId: input?.importId, fileName: input?.fileName, stickers: input?.stickers });
+  } catch (error) {
+    unstable_rethrow(error);
+    // The query parameters are customers' names: only the database's own
+    // error goes in the log.
+    console.error("Couldn't import stickers", error instanceof DrizzleQueryError ? error.cause : error);
+    return { error: "Couldn't save that batch. Check the connection and try again." };
+  }
 }
 
 // Customers for the form's customer box.

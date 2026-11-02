@@ -195,6 +195,12 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
       }
       case "sticker.removed":
         return `Removed sticker ${str(d.stickerNumber)}, Class ${str(d.plateClass)}, from the log`;
+      case "stickers.imported":
+        fact("Logged", num(d.logged));
+        fact("Already in the log", num(d.already));
+        if (num(d.customersAdded) > 0) fact("Customers added", num(d.customersAdded));
+        if (num(d.failed) > 0) fact("Left out", num(d.failed));
+        return `Imported stickers from ${str(d.fileName) || "a file"}`;
 
       // Supplier
       case "supplier.created":

@@ -17,6 +17,9 @@ export const metadata: Metadata = { title: "Sticker & Plate log" };
 
 const PATH = "/sticker-plate-log";
 
+const buttonClass =
+  "inline-flex h-12 items-center rounded-lg border border-glow/30 px-5 text-base font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
+
 export default function StickerLogPage(props: PageProps<"/sticker-plate-log">) {
   return (
     <Suspense fallback={<LoadingLine />}>
@@ -47,6 +50,11 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/st
       <PageHeading
         title="Sticker & Plate log"
         description="Every registration sticker the shop hands out: its number, the customer it went to, and the plate's classification."
+        action={
+          <Link href={`${PATH}/import`} className={buttonClass}>
+            Import
+          </Link>
+        }
       />
 
       {typeof params.removed === "string" && <Notice>Sticker {params.removed} removed from the log.</Notice>}
@@ -75,7 +83,13 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/st
         </div>
         <div className="mt-4">
           {log.total === 0 && !searching ? (
-            <p className="text-sm leading-6 text-ink-muted">Nothing logged yet. Log the first sticker above.</p>
+            <p className="text-sm leading-6 text-ink-muted">
+              Nothing logged yet. Log the first sticker above, or{" "}
+              <Link href={`${PATH}/import`} className="text-glow hover:underline">
+                import your log
+              </Link>{" "}
+              from a CSV or Excel file.
+            </p>
           ) : (
             <ListSearch query={query} path={pathFor(plateClass)} label="Search the log" placeholder="Sticker #, customer's name or phone">
               <Results log={log} query={query} plateClass={plateClass} searching={searching} />

@@ -98,6 +98,14 @@ describe("what the log says", () => {
       facts: [{ label: "Deal", value: "Bought from us" }],
     });
     assert.equal(entry("sticker.updated", { stickerNumber: "PA-1002", fields: ["stickerNumber", "plateClass"], was: "PA-1001" }).summary, "Corrected sticker PA-1002: its number and classification (it was PA-1001)");
+    assert.deepEqual(entry("stickers.imported", { fileName: "sticker log.xlsx", logged: 12, already: 3, customersAdded: 2, failed: 0 }), {
+      summary: "Imported stickers from sticker log.xlsx",
+      facts: [
+        { label: "Logged", value: "12" },
+        { label: "Already in the log", value: "3" },
+        { label: "Customers added", value: "2" },
+      ],
+    });
     assert.equal(entry("supplier.updated", { supplierId: "V100", fields: ["supplierName", "categoryCode"] }).summary, "Changed supplier V100: Supplier Name and Category Code");
     assert.equal(entry("manual.ocr", { title: "RZR XP 1000 Service Manual", pages: [3, 4, 5], pagesGainedText: 2 }).summary, "Read 3 scanned pages of RZR XP 1000 Service Manual");
   });
