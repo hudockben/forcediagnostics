@@ -12,7 +12,7 @@ import { RemoveStickerForm, StickerForm } from "../forms";
 
 export const metadata: Metadata = { title: "Sticker" };
 
-export default function StickerPage(props: PageProps<"/admin/sticker-plate-log/[id]">) {
+export default function StickerPage(props: PageProps<"/sticker-plate-log/[id]">) {
   return (
     <Suspense fallback={<LoadingLine />}>
       <Sticker params={props.params} />
@@ -20,7 +20,7 @@ export default function StickerPage(props: PageProps<"/admin/sticker-plate-log/[
   );
 }
 
-async function Sticker({ params }: { params: PageProps<"/admin/sticker-plate-log/[id]">["params"] }) {
+async function Sticker({ params }: { params: PageProps<"/sticker-plate-log/[id]">["params"] }) {
   const user = await requireCapability("repair_orders.intake");
   const { id } = await params;
   // Only finds entries in the user's own shop.
@@ -30,7 +30,7 @@ async function Sticker({ params }: { params: PageProps<"/admin/sticker-plate-log
 
   return (
     <div className="max-w-2xl space-y-6">
-      <Link href="/admin/sticker-plate-log" className="text-sm text-glow/90 hover:text-glow hover:underline">
+      <Link href="/sticker-plate-log" className="text-sm text-glow/90 hover:text-glow hover:underline">
         ‹ Sticker &amp; Plate log
       </Link>
       <PageHeading
@@ -39,7 +39,7 @@ async function Sticker({ params }: { params: PageProps<"/admin/sticker-plate-log
           <>
             Logged <LocalTime value={entry.createdAt.toISOString()} />
             {entry.createdBy ? ` by ${entry.createdBy}` : ""}, for{" "}
-            <Link href={`/admin/customers/${entry.customerId}`} className="text-glow/90 hover:text-glow hover:underline">
+            <Link href={`/customers/${entry.customerId}`} className="text-glow/90 hover:text-glow hover:underline">
               {entry.customerName}
             </Link>
             .

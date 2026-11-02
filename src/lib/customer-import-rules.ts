@@ -1,10 +1,10 @@
-// Importing customers from a spreadsheet (System Admin > Customers >
-// Import): reading a CSV or Excel file, working out which column is which,
-// checking every row with the same rules as the customer and vehicle forms,
-// and grouping rows into customers and their vehicles. No server imports:
-// the browser does all of this to show what will happen before anything is
-// saved, and the server checks every customer again as it saves them
-// (importCustomers in src/lib/customers.ts).
+// Importing customers from a spreadsheet (Customers > Import): reading a
+// CSV or Excel file, working out which column is which, checking every row
+// with the same rules as the customer and vehicle forms, and grouping rows
+// into customers and their vehicles. No server imports: the browser does
+// all of this to show what will happen before anything is saved, and the
+// server checks every customer again as it saves them (importCustomers in
+// src/lib/customers.ts).
 
 import { CsvError, parseCsv } from "@/lib/csv";
 import {

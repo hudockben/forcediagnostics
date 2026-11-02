@@ -1,4 +1,4 @@
-// System Admin > Sticker & Plate log: what an entry holds and how what's
+// The Sticker & Plate log tab: what an entry holds and how what's
 // typed is checked. No server imports, so the form checks a sticker number
 // the way the server does.
 

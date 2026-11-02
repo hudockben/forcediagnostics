@@ -61,7 +61,7 @@ const vehicleFields = (form: FormData): Record<keyof VehicleFields, string> => (
   notes: field(form, "notes"),
 });
 
-const customerHref = (id: string) => `/admin/customers/${encodeURIComponent(id)}`;
+const customerHref = (id: string) => `/customers/${encodeURIComponent(id)}`;
 
 export async function addCustomer(_previous: FormState, form: FormData): Promise<FormState> {
   return attempt("add a customer", async () => {
@@ -87,7 +87,7 @@ export async function removeCustomerAction(_previous: FormState, form: FormData)
     const user = await requireCapability("repair_orders.intake");
     const result = await removeCustomer(user, field(form, "id"));
     if ("error" in result) return { error: result.error };
-    redirect("/admin/customers?removed=1");
+    redirect("/customers?removed=1");
   });
 }
 

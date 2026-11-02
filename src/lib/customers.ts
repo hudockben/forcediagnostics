@@ -33,7 +33,7 @@ import { cutText } from "@/lib/manual-rules";
 import { allows } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/session";
 
-// The shop's customers and their vehicles, for System Admin > Customers, and
+// The shop's customers and their vehicles, for the Customers tab, and
 // the little of them Diagnose sees (a customer's name and vehicles, to say
 // whose unit a diagnosis is for). Callers check repair_orders.intake (or
 // diagnostics.work, for the Diagnose parts) first; everything here runs

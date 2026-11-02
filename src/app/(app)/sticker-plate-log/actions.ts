@@ -57,7 +57,7 @@ export async function removeStickerAction(_previous: FormState, form: FormData):
     const user = await requireCapability("repair_orders.intake");
     const result = await removeSticker(user, field(form, "id"));
     if ("error" in result) return { error: result.error };
-    redirect(`/admin/sticker-plate-log?removed=${encodeURIComponent(result.stickerNumber)}`);
+    redirect(`/sticker-plate-log?removed=${encodeURIComponent(result.stickerNumber)}`);
   });
 }
 

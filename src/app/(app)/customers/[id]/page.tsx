@@ -17,7 +17,7 @@ import { DiagnosisHistory, RelationBadge } from "../history";
 
 export const metadata: Metadata = { title: "Customer" };
 
-export default function CustomerPage(props: PageProps<"/admin/customers/[id]">) {
+export default function CustomerPage(props: PageProps<"/customers/[id]">) {
   return (
     <Suspense fallback={<LoadingLine />}>
       <Customer params={props.params} searchParams={props.searchParams} />
@@ -38,8 +38,8 @@ async function Customer({
   params,
   searchParams,
 }: {
-  params: PageProps<"/admin/customers/[id]">["params"];
-  searchParams: PageProps<"/admin/customers/[id]">["searchParams"];
+  params: PageProps<"/customers/[id]">["params"];
+  searchParams: PageProps<"/customers/[id]">["searchParams"];
 }) {
   const user = await requireCapability("repair_orders.intake");
   const [{ id }, query] = await Promise.all([params, searchParams]);
@@ -60,7 +60,7 @@ async function Customer({
 
   return (
     <div className="max-w-3xl space-y-6">
-      <Link href="/admin/customers" className="text-sm text-glow/90 hover:text-glow hover:underline">
+      <Link href="/customers" className="text-sm text-glow/90 hover:text-glow hover:underline">
         ‹ Customers
       </Link>
       <PageHeading
@@ -99,7 +99,7 @@ async function Customer({
           <h2 id="vehicles-heading" className="text-base font-semibold text-ink">
             Vehicles{vehicles.length > 0 && <span className="ml-2 font-mono text-sm font-normal text-ink-muted">{vehicles.length}</span>}
           </h2>
-          <Link href={`/admin/customers/${customer.id}/vehicles/new`} className={smallLinkClass}>
+          <Link href={`/customers/${customer.id}/vehicles/new`} className={smallLinkClass}>
             Add vehicle
           </Link>
         </div>
@@ -135,7 +135,7 @@ async function Customer({
 }
 
 function VehicleBlock({ customerId, vehicle, canDiagnose }: { customerId: string; vehicle: VehicleRecord; canDiagnose: boolean }) {
-  const href = `/admin/customers/${customerId}/vehicles/${vehicle.id}`;
+  const href = `/customers/${customerId}/vehicles/${vehicle.id}`;
   const facts = [
     vehicle.modelNumber && { label: "Model number", value: vehicle.modelNumber, mono: true },
     vehicle.vin && { label: "VIN", value: vehicle.vin, mono: true },
@@ -225,7 +225,7 @@ function Stickers({ customerId, stickers }: { customerId: string; stickers: Stic
         <h2 id="stickers-heading" className="text-base font-semibold text-ink">
           Stickers &amp; plates{stickers.length > 0 && <span className="ml-2 font-mono text-sm font-normal text-ink-muted">{stickers.length}</span>}
         </h2>
-        <Link href={`/admin/sticker-plate-log?customer=${customerId}`} className={smallLinkClass}>
+        <Link href={`/sticker-plate-log?customer=${customerId}`} className={smallLinkClass}>
           Log a sticker
         </Link>
       </div>
@@ -236,7 +236,7 @@ function Stickers({ customerId, stickers }: { customerId: string; stickers: Stic
           {stickers.map((entry) => (
             <li key={entry.id}>
               <Link
-                href={`/admin/sticker-plate-log/${entry.id}`}
+                href={`/sticker-plate-log/${entry.id}`}
                 className="flex min-h-12 flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset"
               >
                 <span className="font-mono text-sm font-medium tracking-wide text-ink">{entry.stickerNumber}</span>

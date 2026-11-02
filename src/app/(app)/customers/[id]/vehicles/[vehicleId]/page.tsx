@@ -15,7 +15,7 @@ import { DiagnosisHistory, RelationBadge } from "../../../history";
 
 export const metadata: Metadata = { title: "Vehicle" };
 
-type Props = PageProps<"/admin/customers/[id]/vehicles/[vehicleId]">;
+type Props = PageProps<"/customers/[id]/vehicles/[vehicleId]">;
 
 export default function VehiclePage(props: Props) {
   return (
@@ -37,7 +37,7 @@ async function Vehicle({ params }: { params: Props["params"] }) {
 
   return (
     <div className="max-w-3xl space-y-6">
-      <Link href={`/admin/customers/${customer.id}`} className="text-sm break-words text-glow/90 hover:text-glow hover:underline">
+      <Link href={`/customers/${customer.id}`} className="text-sm break-words text-glow/90 hover:text-glow hover:underline">
         ‹ {customer.name}
       </Link>
       <PageHeading
@@ -78,7 +78,7 @@ async function Vehicle({ params }: { params: Props["params"] }) {
             {sameVin.map((other) => (
               <li key={other.vehicleId}>
                 <Link
-                  href={`/admin/customers/${other.customerId}/vehicles/${other.vehicleId}`}
+                  href={`/customers/${other.customerId}/vehicles/${other.vehicleId}`}
                   className="text-glow/90 hover:text-glow hover:underline"
                 >
                   {other.customerName}

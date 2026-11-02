@@ -51,7 +51,7 @@ async function SaleScreen({ params, searchParams }: { params: PageProps<"/nusr/[
               {sale.customerId && (
                 <>
                   {" · "}
-                  <Link href={`/admin/customers/${sale.customerId}`} className="text-glow/90 hover:text-glow hover:underline">
+                  <Link href={`/customers/${sale.customerId}`} className="text-glow/90 hover:text-glow hover:underline">
                     Their customer record
                   </Link>
                 </>

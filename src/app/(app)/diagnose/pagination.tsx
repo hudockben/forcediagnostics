@@ -10,7 +10,7 @@ const pageLink = `${pageControl} text-ink-muted hover:bg-white/5 hover:text-ink`
 
 // Previous, the page numbers and Next, 44px to tap. On a phone only the
 // first, last and current page numbers show; wider, one either side too.
-// The Diagnose list's, and System Admin > Customers' at its own path.
+// The Diagnose list's, and the Customers tab's at its own path.
 export function Pagination({
   query,
   page,

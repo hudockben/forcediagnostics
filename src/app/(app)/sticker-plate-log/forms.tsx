@@ -360,7 +360,7 @@ export function ExportLink({ query, plateClass }: { query: string; plateClass: P
   const search = params.toString();
   return (
     <a
-      href={`/admin/sticker-plate-log/export${search ? `?${search}` : ""}`}
+      href={`/sticker-plate-log/export${search ? `?${search}` : ""}`}
       className="inline-flex min-h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
       data-sticker-export
     >

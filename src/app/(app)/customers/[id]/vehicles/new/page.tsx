@@ -11,7 +11,7 @@ import { VehicleForm } from "../../../forms";
 
 export const metadata: Metadata = { title: "Add vehicle" };
 
-export default function NewVehiclePage(props: PageProps<"/admin/customers/[id]/vehicles/new">) {
+export default function NewVehiclePage(props: PageProps<"/customers/[id]/vehicles/new">) {
   return (
     <Suspense fallback={<LoadingLine />}>
       <NewVehicle params={props.params} />
@@ -19,14 +19,14 @@ export default function NewVehiclePage(props: PageProps<"/admin/customers/[id]/v
   );
 }
 
-async function NewVehicle({ params }: { params: PageProps<"/admin/customers/[id]/vehicles/new">["params"] }) {
+async function NewVehicle({ params }: { params: PageProps<"/customers/[id]/vehicles/new">["params"] }) {
   const user = await requireCapability("repair_orders.intake");
   const { id } = await params;
   const detail = await getCustomer(user.shop.id, id);
   if (!detail) notFound();
   return (
     <div className="max-w-2xl space-y-6">
-      <Link href={`/admin/customers/${id}`} className="text-sm break-words text-glow/90 hover:text-glow hover:underline">
+      <Link href={`/customers/${id}`} className="text-sm break-words text-glow/90 hover:text-glow hover:underline">
         ‹ {detail.customer.name}
       </Link>
       <PageHeading

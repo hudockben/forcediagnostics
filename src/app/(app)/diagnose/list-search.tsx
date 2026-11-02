@@ -16,8 +16,8 @@ const TYPING_PAUSE_MS = 300;
 // from the server). The search lives in the address (/diagnose?q=…), so
 // Back and shared links keep it, and a new search starts on page 1. Without
 // JavaScript it's a plain GET form (Enter searches, × is a link to the
-// whole list); with it, the list follows as you type. System Admin >
-// Customers uses it too, at its own path.
+// whole list); with it, the list follows as you type. The Customers tab
+// uses it too, at its own path.
 export function ListSearch({
   query,
   children,

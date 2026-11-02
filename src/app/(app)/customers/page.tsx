@@ -8,14 +8,14 @@ import { listCustomers, type CustomerList, type CustomerSummary } from "@/lib/cu
 import { MAX_LIST_WORDS, cleanListQuery, listHref, listSearchIsCut, listSearchWords, parsePage } from "@/lib/diagnose-list-rules";
 import { requireCapability } from "@/lib/session";
 
-import { ListSearch } from "../../diagnose/list-search";
-import { Pagination } from "../../diagnose/pagination";
+import { ListSearch } from "../diagnose/list-search";
+import { Pagination } from "../diagnose/pagination";
 
 export const metadata: Metadata = { title: "Customers" };
 
-const PATH = "/admin/customers";
+const PATH = "/customers";
 
-export default function CustomersPage(props: PageProps<"/admin/customers">) {
+export default function CustomersPage(props: PageProps<"/customers">) {
   return (
     <Suspense fallback={<LoadingLine />}>
       <Customers searchParams={props.searchParams} />
@@ -26,7 +26,7 @@ export default function CustomersPage(props: PageProps<"/admin/customers">) {
 const plural = (count: number, one: string, many: string) =>
   `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 
-async function Customers({ searchParams }: { searchParams: PageProps<"/admin/customers">["searchParams"] }) {
+async function Customers({ searchParams }: { searchParams: PageProps<"/customers">["searchParams"] }) {
   const user = await requireCapability("repair_orders.intake");
   const params = await searchParams;
   const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
@@ -42,12 +42,12 @@ async function Customers({ searchParams }: { searchParams: PageProps<"/admin/cus
         action={
           <div className="flex flex-wrap items-center gap-2">
             <Link
-              href="/admin/customers/import"
+              href="/customers/import"
               className="inline-flex h-12 items-center rounded-lg border border-glow/30 px-5 text-base font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
             >
               Import
             </Link>
-            <Link href="/admin/customers/new" className={primaryLinkClass}>
+            <Link href="/customers/new" className={primaryLinkClass}>
               Add customer
             </Link>
           </div>
@@ -60,7 +60,7 @@ async function Customers({ searchParams }: { searchParams: PageProps<"/admin/cus
         {list.total === 0 && !searching ? (
           <p className="text-sm leading-6 text-ink-muted">
             No customers yet. Add the first with Add customer, or{" "}
-            <Link href="/admin/customers/import" className="text-glow hover:underline">
+            <Link href="/customers/import" className="text-glow hover:underline">
               import a list
             </Link>{" "}
             from a CSV or Excel file.
@@ -127,7 +127,7 @@ function CustomerRow({ customer }: { customer: CustomerSummary }) {
   return (
     <li data-customer-row>
       <Link
-        href={`/admin/customers/${customer.id}`}
+        href={`/customers/${customer.id}`}
         className="flex min-h-16 flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3 transition hover:bg-white/[0.03] focus-visible:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-glow/60 focus-visible:outline-none focus-visible:ring-inset sm:px-6"
       >
         <span className="min-w-0">

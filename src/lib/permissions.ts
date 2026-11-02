@@ -156,10 +156,9 @@ export function mayDeleteDiagnosis(user: { id: string; role: Role; bay: object |
 }
 
 // The System Admin sections, in menu order. The tab opens the first one the
-// user may use.
+// user may use. Customers and the Sticker & Plate log are tabs of their own
+// (see the app header).
 export const ADMIN_SECTIONS: { href: string; label: string; capability: Capability }[] = [
-  { href: "/admin/customers", label: "Customers", capability: "repair_orders.intake" },
-  { href: "/admin/sticker-plate-log", label: "Sticker & Plate log", capability: "repair_orders.intake" },
   { href: "/admin/suppliers", label: "Supplier", capability: "parts.manage" },
   { href: "/admin/accounts", label: "Accounts", capability: "accounts.manage" },
   { href: "/admin/bay-tablets", label: "Bay tablets", capability: "bay_tablets.manage" },

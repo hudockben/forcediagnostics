@@ -9,7 +9,7 @@ import { RELATION_LABELS, type ConversationCustomer, type CustomerVehicleChoice 
 import { linkCustomerAction, searchCustomerVehiclesAction } from "./actions";
 import { PersonIcon } from "./icons";
 
-// Diagnose's link to System Admin > Customers: which customer's vehicle a
+// Diagnose's link to the Customers tab: which customer's vehicle a
 // diagnosis is for. Only the customer's name and the vehicle show here,
 // never how to reach them; those with access to Customers can open the
 // record from the name.
@@ -78,7 +78,7 @@ export function CustomerVehiclePicker({
         >
           {shown.length === 0 ? (
             <li className="px-3.5 py-3 text-sm text-ink-muted" role="option" aria-selected={false} aria-disabled>
-              No customer&apos;s vehicle matches. Customers and their vehicles are added under System Admin.
+              No customer&apos;s vehicle matches. Customers and their vehicles are added on the Customers tab.
             </li>
           ) : (
             shown.map((item) => (
@@ -119,7 +119,7 @@ export function CustomerName({ customer, canOpen }: { customer: ConversationCust
     <>
       {canOpen ? (
         <Link
-          href={`/admin/customers/${customer.customerId}/vehicles/${customer.vehicleId}`}
+          href={`/customers/${customer.customerId}/vehicles/${customer.vehicleId}`}
           className="font-medium text-glow/90 hover:text-glow hover:underline"
         >
           {customer.customerName}
