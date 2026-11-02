@@ -1547,7 +1547,9 @@ describe("saving an import", () => {
     );
     assert.equal(await tally("Osric Pemberton"), 2);
     // Removed, a sale saved without its row as the key isn't brought back.
-    const gone = (await salesOf(shop.shop.id)).find((row) => row.customerName === "Ignatius Fallowmere")!;
+    // The one from row 2, picked by that row: the two were saved at once,
+    // so which of them the list gives first is up to Postgres.
+    const gone = (await salesOf(shop.shop.id)).find((row) => row.customerName === "Ignatius Fallowmere" && row.importRow === "2024!2")!;
     assert.equal(gone.importRef, null);
     assert.ok("ok" in (await removeSale(shop, gone.id)));
     assert.deepEqual(
