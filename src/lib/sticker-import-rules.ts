@@ -20,8 +20,20 @@ export const STICKER_IMPORT_LABELS: Record<StickerImportField, string> = {
   plateClass: "Plate Classification",
 };
 
-// What a row needs; a phone number only helps find the customer.
-export const REQUIRED_STICKER_FIELDS: StickerImportField[] = ["stickerNumber", "customerName", "plateClass"];
+// The columns a list needs. Its Plate Classification comes from a column
+// or, for a list of one class (the stickers on one list, the plates on
+// another), is picked on the page; a phone number only helps find the
+// customer.
+export const REQUIRED_STICKER_FIELDS: StickerImportField[] = ["stickerNumber", "customerName"];
+
+// Whom a name is, either way round: "Rudd, Benjamin" (last name first, one
+// comma) is Benjamin Rudd. Without case or extra spaces, as nameKey.
+// importStickers works the same out in SQL to find customers on file.
+export function personKey(name: string): string {
+  const key = nameKey(name);
+  const parts = key.split(",").map((part) => part.trim());
+  return parts.length === 2 && parts[0] && parts[1] ? `${parts[1]} ${parts[0]}` : key;
+}
 
 // The headings each field goes by, best first ("Sticker #" is
 // "stickernumber" to headingKey).
@@ -127,11 +139,17 @@ export const MAX_STICKER_IMPORT_ROWS = 20_000;
 const quoted = (text: string) => `“${text.length > 40 ? `${text.slice(0, 40)}…` : text}”`;
 
 // What importing the rows would do: one sticker per row, in the file's
-// order. A row without a Sticker #, a Customer Name or a class of 1 or 2 is
-// left out, with a note, and so is a sticker number already on an earlier
-// row (only the first is logged). A phone number that isn't one is left
-// out, keeping the row.
-export function planStickerImport(rows: string[][], headerRow: number, mapping: (StickerImportField | null)[]): StickerImportPlan {
+// order. A row with no class takes the one picked on the page, if any. A
+// row without a Sticker #, a Customer Name or a class of 1 or 2 is left
+// out, with a note, and so is a sticker number already on an earlier row
+// (only the first is logged). A phone number that isn't one is left out,
+// keeping the row.
+export function planStickerImport(
+  rows: string[][],
+  headerRow: number,
+  mapping: (StickerImportField | null)[],
+  { plateClass: picked = null }: { plateClass?: PlateClass | null } = {},
+): StickerImportPlan {
   const columns = new Map<StickerImportField, number>();
   mapping.forEach((field, column) => {
     if (field && !columns.has(field)) columns.set(field, column);
@@ -160,7 +178,7 @@ export function planStickerImport(rows: string[][], headerRow: number, mapping: 
       note("No Customer Name: row left out.");
       continue;
     }
-    const plateClass = parsePlateClass(plate);
+    const plateClass = plate ? parsePlateClass(plate) : picked;
     if (plateClass === null) {
       note(plate ? `Plate Classification ${quoted(plate)} isn't 1 or 2: row left out.` : "No Plate Classification: row left out.");
       continue;
@@ -181,7 +199,7 @@ export function planStickerImport(rows: string[][], headerRow: number, mapping: 
     const earlier = byNumber.get(stickerNumber);
     if (earlier) {
       note(
-        nameKey(earlier.customerName) === nameKey(customer.name) && earlier.plateClass === plateClass
+        personKey(earlier.customerName) === personKey(customer.name) && earlier.plateClass === plateClass
           ? `Sticker ${stickerNumber} is on row ${earlier.row} too: logged once.`
           : `Sticker ${stickerNumber} is also on row ${earlier.row}, for ${earlier.customerName} (Class ${earlier.plateClass}): only row ${earlier.row} is logged.`,
       );

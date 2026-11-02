@@ -6,7 +6,7 @@ import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "r
 import { Badge, Notice } from "@/components/app/ui";
 import { inputBaseClass, labelClass, primaryLinkClass, secondaryButtonClass } from "@/components/hud";
 import { parseCsv } from "@/lib/csv";
-import { detectDelimiter, readSpreadsheet, reportCsv, type Sheet } from "@/lib/customer-import-rules";
+import { pastedDelimiter, readSpreadsheet, reportCsv, type Sheet } from "@/lib/customer-import-rules";
 import {
   MAX_STICKER_IMPORT_BATCH,
   REQUIRED_STICKER_FIELDS,
@@ -19,6 +19,7 @@ import {
   type StickerImportOutcome,
   type StickerImportRow,
 } from "@/lib/sticker-import-rules";
+import { PLATE_CLASSES, PLATE_CLASS_LABELS, type PlateClass } from "@/lib/sticker-log-rules";
 
 import { importStickersAction } from "../actions";
 
@@ -67,6 +68,9 @@ export function StickerImport() {
   const [sheetIndex, setSheetIndex] = useState(0);
   const [headerRow, setHeaderRow] = useState(0);
   const [mapping, setMapping] = useState<(StickerImportField | null)[]>([]);
+  // The class for rows that don't have one: every row, for a list without
+  // a Plate Classification column (stickers on one list, plates on another).
+  const [plateClass, setPlateClass] = useState<PlateClass | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const job = useRef<{ importId: string; name: string; batches: StickerImportRow[][]; next: number; sent: number; outcomes: StickerImportOutcome[] } | null>(null);
   const fileId = useId();
@@ -76,10 +80,15 @@ export function StickerImport() {
   const plannedMapping = useDeferredValue(mapping);
   const plannedHeader = useDeferredValue(headerRow);
   const planning = plannedMapping !== mapping || plannedHeader !== headerRow;
-  const plan = useMemo(() => (loaded ? planStickerImport(rows, plannedHeader, plannedMapping) : null), [loaded, rows, plannedHeader, plannedMapping]);
+  const plan = useMemo(
+    () => (loaded ? planStickerImport(rows, plannedHeader, plannedMapping, { plateClass }) : null),
+    [loaded, rows, plannedHeader, plannedMapping, plateClass],
+  );
   const running = run?.state === "running";
   const hasRequired = REQUIRED_STICKER_FIELDS.every((field) => mapping.includes(field));
   const hasPhone = mapping.includes("phone");
+  const hasClassColumn = mapping.includes("plateClass");
+  const classReady = hasClassColumn || plateClass !== null;
 
   useEffect(() => {
     if (!running) return;
@@ -98,6 +107,9 @@ export function StickerImport() {
     setSheetIndex(index);
     setHeaderRow(at);
     setMapping(stickerColumns(sheetRows[at] ?? []));
+    // Each list's class is picked for it: a list of plates after a list of
+    // stickers doesn't take the stickers' class.
+    setPlateClass(null);
     setRun(null);
     setReadError(null);
   }
@@ -126,7 +138,7 @@ export function StickerImport() {
     const text = pasted.replace(/\r\n?/g, "\n");
     if (!text.trim()) return;
     try {
-      show({ name: "pasted rows", sheets: [{ name: "Pasted", rows: parseCsv(text, detectDelimiter(text)) }] }, 0);
+      show({ name: "pasted rows", sheets: [{ name: "Pasted", rows: parseCsv(text, pastedDelimiter(text)) }] }, 0);
     } catch {
       setReadError("Those rows couldn't be read. Copy them from the spreadsheet again, headings and all.");
     }
@@ -263,7 +275,7 @@ export function StickerImport() {
             className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-white/20 px-4 py-6 text-center transition hover:border-white/30 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-glow/40"
           >
             <span className="text-sm font-medium text-ink">{reading ? "Reading…" : loaded && loaded.name !== "pasted rows" ? `${loaded.name}: choose another` : "Choose a CSV or Excel file"}</span>
-            <span className="text-xs text-ink-muted">With a headings row: Sticker #, Customer Name and Plate Classification, and a phone number if you have one.</span>
+            <span className="text-xs text-ink-muted">With a headings row: Sticker # and Customer Name, and Plate Classification and Phone if you have them.</span>
             <input
               id={fileId}
               type="file"
@@ -348,6 +360,29 @@ export function StickerImport() {
                 <Chevron />
               </div>
             </div>
+            <div className="min-w-56">
+              <label htmlFor="sticker-class" className={labelClass}>
+                {hasClassColumn ? "Rows with no Plate Classification" : "Plate Classification for these rows"}
+              </label>
+              <div className="relative mt-1.5">
+                <select
+                  id="sticker-class"
+                  value={plateClass ?? ""}
+                  disabled={running}
+                  onChange={(event) => setPlateClass(event.target.value ? (Number(event.target.value) as PlateClass) : null)}
+                  className={`${selectClass} ${classReady ? "text-ink" : "border-trail/50 text-ink-muted"}`}
+                  data-sticker-class
+                >
+                  <option value="">{hasClassColumn ? "Leave them out" : "Pick one"}</option>
+                  {PLATE_CLASSES.map((option) => (
+                    <option key={option} value={option}>
+                      {PLATE_CLASS_LABELS[option]}
+                    </option>
+                  ))}
+                </select>
+                <Chevron />
+              </div>
+            </div>
           </div>
           <div className="-mx-5 mt-4 overflow-x-auto sm:-mx-6">
             <table className="w-full min-w-[32rem] text-sm" data-sticker-columns>
@@ -410,21 +445,31 @@ export function StickerImport() {
               </tbody>
             </table>
           </div>
-          {!hasRequired && (
+          {!hasRequired ? (
             <div className="mt-4">
-              <Notice tone="trail">Pick the columns with the Sticker #, the Customer Name and the Plate Classification to import.</Notice>
+              <Notice tone="trail">Pick the columns with the Sticker # and the Customer Name to import.</Notice>
             </div>
+          ) : (
+            !classReady && (
+              <div className="mt-4">
+                <Notice tone="trail">
+                  This list has no Plate Classification column: pick the class for its rows above. A list of stickers and a list of plates can
+                  each be imported with its own.
+                </Notice>
+              </div>
+            )
           )}
         </section>
       )}
 
-      {loaded && plan && hasRequired && (
+      {loaded && plan && hasRequired && classReady && (
         <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6">
           <h2 className="text-base font-semibold text-ink">3. Import</h2>
           <div aria-busy={planning} className={`mt-4 space-y-4 ${planning ? "opacity-60" : ""}`}>
             <p className="text-sm leading-6 text-ink" data-sticker-import-summary>
               {plural(plan.rowsRead, "row", "rows")} read: {plural(plan.stickers.length, "sticker", "stickers")}. A sticker already in the log is left
               as it is. Each customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.
+              {plateClass && (hasClassColumn ? ` Rows with no class are logged as ${PLATE_CLASS_LABELS[plateClass]}.` : ` Every row is logged as ${PLATE_CLASS_LABELS[plateClass]}.`)}
             </p>
             {plan.stickers.length > 0 && (
               <div className="-mx-5 overflow-x-auto sm:-mx-6">

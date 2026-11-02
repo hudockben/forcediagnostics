@@ -6,7 +6,7 @@ import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "r
 import { Badge, Notice } from "@/components/app/ui";
 import { inputBaseClass, labelClass, primaryLinkClass, secondaryButtonClass } from "@/components/hud";
 import { parseCsv } from "@/lib/csv";
-import { detectDelimiter, readSpreadsheet, reportCsv, type Sheet } from "@/lib/customer-import-rules";
+import { pastedDelimiter, readSpreadsheet, reportCsv, type Sheet } from "@/lib/customer-import-rules";
 import {
   MAX_SUPPLIER_BATCH,
   SUPPLIER_FIELDS,
@@ -123,7 +123,7 @@ export function SupplierImport() {
     const text = pasted.replace(/\r\n?/g, "\n");
     if (!text.trim()) return;
     try {
-      show({ name: "pasted rows", sheets: [{ name: "Pasted", rows: parseCsv(text, detectDelimiter(text)) }] }, 0);
+      show({ name: "pasted rows", sheets: [{ name: "Pasted", rows: parseCsv(text, pastedDelimiter(text)) }] }, 0);
     } catch {
       setReadError("Those rows couldn't be read. Copy them from the spreadsheet again, headings and all.");
     }

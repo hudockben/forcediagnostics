@@ -6,13 +6,13 @@ import { DrizzleQueryError, and, asc, desc, eq, inArray, sql, type SQL } from "d
 
 import { withShop, type ShopTransaction } from "@/db";
 import { auditLog, customers, stickerPlateLog, users } from "@/db/schema";
-import { matchCustomer, nameKey } from "@/lib/customer-import-rules";
+import { matchCustomer } from "@/lib/customer-import-rules";
 import { checkCustomer } from "@/lib/customer-rules";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid } from "@/lib/diagnose-rules";
 import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
-import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, type StickerImportOutcome } from "@/lib/sticker-import-rules";
+import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, personKey, type StickerImportOutcome } from "@/lib/sticker-import-rules";
 import {
   STICKER_LOG_PAGE_SIZE,
   checkStickerEntry,
@@ -311,6 +311,11 @@ export async function removeSticker(actor: CurrentUser, id: string): Promise<{ o
 
 type Person = { id: string; name: string; phone: string | null; email: string | null };
 
+// personKey (src/lib/sticker-import-rules.ts) in SQL: a name with one comma
+// read last name first ("Rudd, Benjamin" is "benjamin rudd"), lower-cased.
+const personKeySql = (name: SQL) =>
+  sql`case when ${name} ~ '^[^,]+,[^,]+$' then btrim(split_part(lower(${name}), ',', 2)) || ' ' || btrim(split_part(lower(${name}), ',', 1)) else lower(${name}) end`;
+
 const rowOf = (entry: unknown) => {
   const row = (entry as { row?: unknown } | null)?.row;
   return Number.isInteger(row) ? Number(row) : 0;
@@ -320,8 +325,9 @@ const rowOf = (entry: unknown) => {
 // form checks it. A sticker already in the log is left as it is (and said
 // so when the file has it for someone else, or in the other class), so
 // importing the same file again adds nothing. Each sticker's customer is
-// found on Customers by name, and by phone number when the file has one,
-// the way the customer import finds them; anyone not there is added, once
+// found on Customers by name, either way round ("Rudd, Benjamin" finds
+// Benjamin Rudd), and by phone number when the file has one, the way the
+// customer import finds them; anyone not there is added as written, once
 // however many stickers they have. A name that several customers share,
 // with nothing in the file to say which, is left out with a note: that
 // sticker is logged on the form, picking them. Stickers are logged in the
@@ -353,15 +359,16 @@ export async function importStickers(
           .where(inArray(stickerPlateLog.stickerNumber, numbers))
       : [];
     const inLog = new Map(logged.map((entry) => [entry.stickerNumber, entry]));
-    // Customers on file by name, lower-cased by Postgres on both sides, then
-    // matched by nameKey; oldest first, so the same file finds the same one.
+    // Customers on file by name either way round, worked out by Postgres on
+    // both sides, then matched by personKey; oldest first, so the same file
+    // finds the same one.
     const names = [...new Set(valid.map((entry) => entry.customer.name))];
     const onFile: Person[] = names.length
       ? await tx
           .select({ id: customers.id, name: customers.name, phone: customers.phone, email: customers.email })
           .from(customers)
           .where(
-            sql`lower(${customers.name}) in (select lower(n) from unnest(array[${sql.join(
+            sql`${personKeySql(sql`${customers.name}`)} in (select ${personKeySql(sql`n`)} from unnest(array[${sql.join(
               names.map((name) => sql`${name}`),
               sql`, `,
             )}]::text[]) n)`,
@@ -369,7 +376,7 @@ export async function importStickers(
           .orderBy(asc(customers.createdAt), asc(customers.id))
       : [];
     const byName = new Map<string, Person[]>();
-    for (const person of onFile) byName.set(nameKey(person.name), [...(byName.get(nameKey(person.name)) ?? []), person]);
+    for (const person of onFile) byName.set(personKey(person.name), [...(byName.get(personKey(person.name)) ?? []), person]);
 
     const outcomes: StickerImportOutcome[] = [];
     const newCustomers: (typeof customers.$inferInsert & { id: string })[] = [];
@@ -382,7 +389,7 @@ export async function importStickers(
       const { stickerNumber, plateClass, customer } = entry.entry;
       const already = inLog.get(stickerNumber);
       if (already) {
-        const same = nameKey(already.customerName) === nameKey(customer.name) && already.plateClass === plateClass;
+        const same = personKey(already.customerName) === personKey(customer.name) && already.plateClass === plateClass;
         outcomes.push({
           row,
           result: "already",
@@ -391,8 +398,13 @@ export async function importStickers(
         });
         continue;
       }
-      const people = byName.get(nameKey(customer.name)) ?? [];
-      const found = matchCustomer(people, { name: customer.name, phone: customer.phone, email: null });
+      const key = personKey(customer.name);
+      const people = byName.get(key) ?? [];
+      // Matched under the one name, however each is written.
+      const found = matchCustomer(
+        people.map((person) => ({ ...person, name: key })),
+        { name: key, phone: customer.phone, email: null },
+      );
       if (!found.match && found.ambiguous > 1) {
         outcomes.push({
           row,
@@ -405,7 +417,7 @@ export async function importStickers(
       let person = found.match;
       if (!person) {
         person = { id: randomUUID(), name: customer.name, phone: customer.phone, email: null };
-        byName.set(nameKey(customer.name), [...people, person]);
+        byName.set(key, [...people, person]);
         newCustomers.push({ id: person.id, shopId: actor.shop.id, name: customer.name, phone: customer.phone, createdByUserId: actor.id });
       }
       inLog.set(stickerNumber, { stickerNumber, plateClass, customerName: customer.name });

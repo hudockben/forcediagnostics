@@ -17,7 +17,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { systemDb, withShop } from "../src/db";
 import { auditLog, customers, shops, stickerPlateLog, users } from "../src/db/schema";
 import { parseCsv } from "../src/lib/csv";
-import { detectDelimiter, readSpreadsheet } from "../src/lib/customer-import-rules";
+import { detectDelimiter, pastedDelimiter, readSpreadsheet } from "../src/lib/customer-import-rules";
 import { createCustomer, removeCustomer } from "../src/lib/customers";
 import { ADMIN_SECTIONS, needsPasswordSession } from "../src/lib/permissions";
 import type { CurrentUser } from "../src/lib/session";
@@ -25,6 +25,7 @@ import {
   checkStickerImport,
   findStickerHeader,
   parsePlateClass,
+  personKey,
   planStickerImport,
   stickerColumns,
   type StickerImportRow,
@@ -151,6 +152,45 @@ describe("importing a log: the rules", () => {
       { row: 11, message: "Sticker # “=1+1”: A sticker number is letters and digits (dashes, dots and slashes are fine). Row left out." },
       { row: 12, message: "Sticker PA-1001 is also on row 3, for Dana Whitfield (Class 1): only row 3 is logged." },
     ]);
+  });
+
+  test("a list with no class column, pasted from Excel, takes the class picked for it, its names whole", () => {
+    // A list of one kind, as Excel copies it: a tab between the cells and
+    // each name written last name first.
+    const text = ["Sticker Number\tCustomer Name", "T280377\tHenry, Michael", "T715365\t", "T715366\tRudd, Benjamin"].join("\n");
+    const rows = parseCsv(text, pastedDelimiter(text));
+    const header = findStickerHeader(rows);
+    assert.equal(header, 0);
+    const mapping = stickerColumns(rows[header]);
+    assert.deepEqual(mapping, ["stickerNumber", "customerName"]);
+    // No class picked: no row has one.
+    assert.deepEqual(planStickerImport(rows, header, mapping).stickers, []);
+    const plan = planStickerImport(rows, header, mapping, { plateClass: 2 });
+    assert.deepEqual(
+      plan.stickers.map((sticker) => [sticker.row, sticker.stickerNumber, sticker.customerName, sticker.plateClass]),
+      [
+        [2, "T280377", "Henry, Michael", 2],
+        [4, "T715366", "Rudd, Benjamin", 2],
+      ],
+    );
+    assert.deepEqual(plan.notes, [{ row: 3, message: "No Customer Name: row left out." }]);
+    // With a class column, the class picked is only for rows without one.
+    const mixed = pasted(["Sticker #\tCustomer Name\tPlate Classification", "A1\tDana Whitfield\t1", "A2\tDana Whitfield\t", "A3\tDana Whitfield\t3"]);
+    assert.deepEqual(
+      planStickerImport(mixed, 0, stickerColumns(mixed[0]), { plateClass: 2 }).stickers.map((sticker) => [sticker.stickerNumber, sticker.plateClass]),
+      [
+        ["A1", 1],
+        ["A2", 2],
+      ],
+    );
+  });
+
+  test("a name written last name first is the same person either way round", () => {
+    assert.equal(personKey("Rudd, Benjamin"), "benjamin rudd");
+    assert.equal(personKey("  Benjamin   RUDD "), "benjamin rudd");
+    assert.equal(personKey("Van Dyke, Ann Marie"), "ann marie van dyke");
+    assert.equal(personKey("Smith, John, Jr."), "smith, john, jr.", "two commas: as written");
+    assert.equal(personKey("Rudd,"), "rudd,");
   });
 
   test("the log's own Download CSV comes back in as it went out", async () => {
@@ -426,6 +466,37 @@ describe("the log", () => {
     ]);
     assert.equal((await listStickerLog(writer.shop.id, { query: "IMP-21" })).items[0].customerId, first);
     assert.equal((await named(writer.shop.id, "Casey Morgan")).length, 3);
+  });
+
+  test("an import finds a customer on file whichever way round the name is written", async () => {
+    const benjamin = await customer(writer, "Benjamin Rudd");
+    const colin = await customer(writer, "Kirkpatrick, Colin");
+    const result = await importStickers(writer, {
+      importId: randomUUID(),
+      fileName: "stickers.txt",
+      stickers: [row(2, "IMP-40", "Rudd, Benjamin", 1), row(3, "IMP-41", "Colin Kirkpatrick", 1), row(4, "IMP-42", "Mahlon, John", 2), row(5, "IMP-43", "John Mahlon", 2)],
+    });
+    assert.ok("outcomes" in result, JSON.stringify(result));
+    assert.deepEqual(
+      result.outcomes.map((outcome) => [outcome.row, outcome.result, outcome.customer]),
+      [
+        [2, "logged", "found"],
+        [3, "logged", "found"],
+        [4, "logged", "added"],
+        [5, "logged", "found"],
+      ],
+    );
+    const entry = async (number: string) => (await listStickerLog(writer.shop.id, { query: number })).items[0];
+    assert.equal((await entry("IMP-40")).customerId, benjamin);
+    assert.equal((await entry("IMP-41")).customerId, colin);
+    // Someone new is added once, as the file writes them.
+    assert.equal((await named(writer.shop.id, "Mahlon, John")).length, 1);
+    assert.deepEqual(await named(writer.shop.id, "John Mahlon"), []);
+    assert.equal((await entry("IMP-43")).customerName, "Mahlon, John");
+    // In the log for Benjamin Rudd, the file's "Rudd, Benjamin" is him: no note.
+    const again = await importStickers(writer, { importId: randomUUID(), fileName: "stickers.txt", stickers: [row(2, "IMP-40", "Rudd, Benjamin", 1)] });
+    assert.ok("outcomes" in again);
+    assert.deepEqual(again.outcomes, [{ row: 2, result: "already", customer: null, message: null }]);
   });
 
   test("a sticker logged on the form while an import runs is left as it is, and nobody is added for it", async () => {
