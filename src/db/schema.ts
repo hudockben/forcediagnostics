@@ -848,10 +848,11 @@ export const customerVehicles = pgTable(
   ],
 );
 
-// The Sticker & Plate log tab: each registration sticker the shop
-// hands out, the customer it went to and the plate's classification (1 or
-// 2); see src/lib/sticker-log.ts. A sticker number is logged once per shop,
-// and a customer with stickers logged can't be removed: the log is the
+// The Sticker & Plate log tab: each registration sticker and plate the
+// shop hands out, with its number and the customer it went to; see
+// src/lib/sticker-log.ts. A plate is Class 1 or Class 2 (plate_class); a
+// sticker has no class (null). A number is logged once per shop, and a
+// customer with stickers or plates logged can't be removed: the log is the
 // shop's record of them.
 export const stickerPlateLog = pgTable(
   "sticker_plate_log",
@@ -864,7 +865,8 @@ export const stickerPlateLog = pgTable(
     // Upper-cased, with spaces tidied (see normalizeSticker in
     // src/lib/sticker-log-rules.ts).
     stickerNumber: text("sticker_number").notNull(),
-    plateClass: integer("plate_class").notNull().$type<PlateClass>(),
+    // 1 or 2 for a Class 1 or Class 2 plate; null for a sticker.
+    plateClass: integer("plate_class").$type<PlateClass>(),
     createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

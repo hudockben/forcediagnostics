@@ -11,6 +11,7 @@ import { salesForCustomer, type Sale } from "@/lib/nusr";
 import { formatDay, formatMoney, unitLabel } from "@/lib/nusr-rules";
 import { allows, requireCapability } from "@/lib/session";
 import { stickersForCustomer, type StickerEntry } from "@/lib/sticker-log";
+import { entryLabel } from "@/lib/sticker-log-rules";
 
 import { CustomerForm, RemoveCustomerForm } from "../forms";
 import { DiagnosisHistory, RelationBadge } from "../history";
@@ -217,7 +218,7 @@ function Sales({ customerId, sales }: { customerId: string; sales: Sale[] }) {
   );
 }
 
-// Their stickers from the Sticker & Plate log, the newest first.
+// Their stickers and plates from the Sticker & Plate log, the newest first.
 function Stickers({ customerId, stickers }: { customerId: string; stickers: StickerEntry[] }) {
   return (
     <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" aria-labelledby="stickers-heading" data-customer-stickers>
@@ -226,7 +227,7 @@ function Stickers({ customerId, stickers }: { customerId: string; stickers: Stic
           Stickers &amp; plates{stickers.length > 0 && <span className="ml-2 font-mono text-sm font-normal text-ink-muted">{stickers.length}</span>}
         </h2>
         <Link href={`/sticker-plate-log?customer=${customerId}`} className={smallLinkClass}>
-          Log a sticker
+          Log a sticker or plate
         </Link>
       </div>
       {stickers.length === 0 ? (
@@ -242,7 +243,7 @@ function Stickers({ customerId, stickers }: { customerId: string; stickers: Stic
                 <span className="font-mono text-sm font-medium tracking-wide text-ink">{entry.stickerNumber}</span>
                 <span className="flex items-center gap-3 text-xs text-ink-muted">
                   <LocalTime value={entry.createdAt.toISOString()} />
-                  <Badge tone={entry.plateClass === 1 ? "glow" : "neutral"}>Class {entry.plateClass}</Badge>
+                  <Badge tone={entry.plateClass === null ? "neutral" : "glow"}>{entryLabel(entry.plateClass)}</Badge>
                 </span>
               </Link>
             </li>

@@ -97,9 +97,15 @@ describe("what the log says", () => {
       summary: "Added the 2021 Polaris Sportsman 850 to a customer's record",
       facts: [{ label: "Deal", value: "Bought from us" }],
     });
-    assert.equal(entry("sticker.updated", { stickerNumber: "PA-1002", fields: ["stickerNumber", "plateClass"], was: "PA-1001" }).summary, "Corrected sticker PA-1002: its number and classification (it was PA-1001)");
+    assert.equal(
+      entry("sticker.updated", { stickerNumber: "PA-1002", fields: ["stickerNumber", "plateClass"], was: "PA-1001" }).summary,
+      "Corrected PA-1002 in the Sticker & Plate log: its number and type (it was PA-1001)",
+    );
+    assert.equal(entry("sticker.logged", { stickerNumber: "T280377", plateClass: null }).summary, "Logged sticker T280377");
+    assert.equal(entry("sticker.logged", { stickerNumber: "90W14", plateClass: 1 }).summary, "Logged Class 1 plate 90W14");
+    assert.equal(entry("sticker.removed", { stickerNumber: "93Y67", plateClass: 2 }).summary, "Removed Class 2 plate 93Y67 from the log");
     assert.deepEqual(entry("stickers.imported", { fileName: "sticker log.xlsx", logged: 12, already: 3, customersAdded: 2, failed: 0 }), {
-      summary: "Imported stickers from sticker log.xlsx",
+      summary: "Imported stickers and plates from sticker log.xlsx",
       facts: [
         { label: "Logged", value: "12" },
         { label: "Already in the log", value: "3" },

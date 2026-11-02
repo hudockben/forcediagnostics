@@ -7,10 +7,11 @@ import { LocalTime } from "@/components/app/local-time";
 import { Card, LoadingLine, PageHeading } from "@/components/app/ui";
 import { requireCapability } from "@/lib/session";
 import { getCustomerChoice, getStickerEntry } from "@/lib/sticker-log";
+import { entryLabel } from "@/lib/sticker-log-rules";
 
 import { RemoveStickerForm, StickerForm } from "../forms";
 
-export const metadata: Metadata = { title: "Sticker" };
+export const metadata: Metadata = { title: "Sticker or plate" };
 
 export default function StickerPage(props: PageProps<"/sticker-plate-log/[id]">) {
   return (
@@ -34,7 +35,11 @@ async function Sticker({ params }: { params: PageProps<"/sticker-plate-log/[id]"
         ‹ Sticker &amp; Plate log
       </Link>
       <PageHeading
-        title={<span className="font-mono tracking-wide">Sticker {entry.stickerNumber}</span>}
+        title={
+          <>
+            {entryLabel(entry.plateClass)} <span className="font-mono tracking-wide">{entry.stickerNumber}</span>
+          </>
+        }
         description={
           <>
             Logged <LocalTime value={entry.createdAt.toISOString()} />
@@ -46,10 +51,10 @@ async function Sticker({ params }: { params: PageProps<"/sticker-plate-log/[id]"
           </>
         }
       />
-      <Card title="Correct it" description="A wrong number, classification or customer. Every change is kept in the audit log.">
+      <Card title="Correct it" description="A wrong number, type or customer. Every change is kept in the audit log.">
         <StickerForm entry={{ id: entry.id, stickerNumber: entry.stickerNumber, plateClass: entry.plateClass, customer }} />
       </Card>
-      <Card title="Remove" description="For a sticker logged by mistake.">
+      <Card title="Remove" description="For one logged by mistake.">
         <RemoveStickerForm entry={entry} />
       </Card>
     </div>

@@ -4,7 +4,17 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react"
 
 import { Notice } from "@/components/app/ui";
 import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "@/components/hud";
-import { MAX_STICKER_LENGTH, PLATE_CLASSES, PLATE_CLASS_LABELS, normalizeSticker, type PlateClass } from "@/lib/sticker-log-rules";
+import {
+  ENTRY_KINDS,
+  ENTRY_KIND_LABELS,
+  MAX_STICKER_LENGTH,
+  classOf,
+  entryWords,
+  kindOf,
+  normalizeSticker,
+  type EntryKind,
+  type PlateClass,
+} from "@/lib/sticker-log-rules";
 import { useFormAction } from "@/lib/use-form-action";
 
 import { logStickerAction, removeStickerAction, saveStickerAction, searchLogCustomersAction, type FormState } from "./actions";
@@ -31,7 +41,7 @@ function Feedback({ state }: { state: FormState }) {
   );
 }
 
-// The customer the sticker went to: found by name or phone number as it's
+// The customer it went to: found by name or phone number as it's
 // typed (arrow keys and Enter, or a tap), or added as a new customer by the
 // name typed.
 function CustomerBox({ picked, onPick }: { picked: Picked; onPick: (picked: Picked) => void }) {
@@ -185,28 +195,21 @@ function CustomerBox({ picked, onPick }: { picked: Picked; onPick: (picked: Pick
   );
 }
 
-function ClassChoice({ value, onChange }: { value: PlateClass | null; onChange: (value: PlateClass) => void }) {
+// A sticker, or a Class 1 or Class 2 plate.
+function KindChoice({ value, onChange }: { value: EntryKind | null; onChange: (value: EntryKind) => void }) {
   return (
     <fieldset>
-      <legend className={labelClass}>Plate classification</legend>
-      <div className="mt-1.5 grid grid-cols-2 gap-2">
-        {PLATE_CLASSES.map((plateClass) => (
+      <legend className={labelClass}>What it is</legend>
+      <div className="mt-1.5 grid grid-cols-3 gap-2">
+        {ENTRY_KINDS.map((kind) => (
           <label
-            key={plateClass}
+            key={kind}
             className={`flex min-h-12 cursor-pointer items-center gap-2.5 rounded-lg border px-3.5 text-sm font-medium transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-glow/40 ${
-              value === plateClass ? "border-glow/50 bg-glow/10 text-ink" : "border-white/10 text-ink-muted hover:border-white/20"
+              value === kind ? "border-glow/50 bg-glow/10 text-ink" : "border-white/10 text-ink-muted hover:border-white/20"
             }`}
           >
-            <input
-              type="radio"
-              name="plateClass"
-              value={plateClass}
-              checked={value === plateClass}
-              onChange={() => onChange(plateClass)}
-              required
-              className="accent-glow"
-            />
-            {PLATE_CLASS_LABELS[plateClass]}
+            <input type="radio" name="plateClass" value={kind} checked={value === kind} onChange={() => onChange(kind)} required className="accent-glow" />
+            {ENTRY_KIND_LABELS[kind]}
           </label>
         ))}
       </div>
@@ -214,15 +217,15 @@ function ClassChoice({ value, onChange }: { value: PlateClass | null; onChange: 
   );
 }
 
-type SavedEntry = { id: string; stickerNumber: string; plateClass: PlateClass; customer: CustomerChoice };
+type SavedEntry = { id: string; stickerNumber: string; plateClass: PlateClass | null; customer: CustomerChoice };
 
-// Logs a sticker, or corrects one. After logging, the form is ready for
-// the next sticker: the number and customer are cleared and the class
-// stays, as a run of stickers is often all one class.
+// Logs a sticker or plate, or corrects one. After logging, the form is
+// ready for the next: the number and customer are cleared and what it is
+// stays, as a run is often all stickers or all one class of plate.
 export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; initialCustomer?: CustomerChoice | null }) {
   const { state, pending, formProps } = useFormAction<FormState>(entry ? saveStickerAction : logStickerAction, {});
   const [sticker, setSticker] = useState(entry?.stickerNumber ?? "");
-  const [plateClass, setPlateClass] = useState<PlateClass | null>(entry?.plateClass ?? null);
+  const [kind, setKind] = useState<EntryKind | null>(entry ? kindOf(entry.plateClass) : null);
   const [picked, setPicked] = useState<Picked>(
     entry ? { kind: "existing", customer: entry.customer } : initialCustomer ? { kind: "existing", customer: initialCustomer } : null,
   );
@@ -254,10 +257,10 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
       {...formProps}
       onSubmit={(event) => {
         const name = picked?.kind === "existing" ? picked.customer.name : picked?.kind === "new" ? picked.name : "";
-        setSent(`sticker ${normalizeSticker(sticker)} for ${name}`);
+        setSent(`${kind ? entryWords(classOf(kind)) : "sticker"} ${normalizeSticker(sticker)} for ${name}`);
         if (!picked) {
           event.preventDefault();
-          setMessage({ error: "Pick the customer the sticker went to, or add them." });
+          setMessage({ error: "Pick the customer it went to, or add them." });
           return;
         }
         formProps.onSubmit(event);
@@ -271,7 +274,7 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
       <div className="grid gap-4 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)]">
         <div>
           <label htmlFor={stickerId} className={labelClass}>
-            Sticker #
+            Sticker or plate #
           </label>
           <input
             ref={stickerInput}
@@ -293,12 +296,12 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
           <CustomerBox picked={picked} onPick={setPicked} />
         </div>
       </div>
-      <div className="max-w-sm">
-        <ClassChoice value={plateClass} onChange={setPlateClass} />
+      <div className="max-w-lg">
+        <KindChoice value={kind} onChange={setKind} />
       </div>
       <Feedback state={message} />
       <button type="submit" disabled={pending} className={entry ? secondaryButtonClass : primaryButtonClass}>
-        {entry ? (pending ? "Saving…" : "Save changes") : pending ? "Logging…" : "Log sticker"}
+        {entry ? (pending ? "Saving…" : "Save changes") : pending ? "Logging…" : "Log it"}
       </button>
     </form>
   );
@@ -318,7 +321,7 @@ export function RemoveStickerForm({ entry }: { entry: { id: string; stickerNumbe
       {confirming ? (
         <div className="space-y-3">
           <p id="remove-question" className="text-sm text-ink">
-            Remove sticker {entry.stickerNumber} from the log? The audit log keeps a record that it was removed.
+            Remove {entry.stickerNumber} from the log? The audit log keeps a record that it was removed.
           </p>
           <div className="flex gap-3">
             <button type="submit" disabled={pending} autoFocus aria-describedby="remove-question" className={`${removeButtonClass} flex-1`}>
@@ -347,7 +350,7 @@ const subscribe = () => () => {};
 
 // Download the log (as searched and filtered) as CSV, its dates in the
 // viewer's own time zone.
-export function ExportLink({ query, plateClass }: { query: string; plateClass: PlateClass | null }) {
+export function ExportLink({ query, kind }: { query: string; kind: EntryKind | null }) {
   const timeZone = useSyncExternalStore(
     subscribe,
     () => Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -355,7 +358,7 @@ export function ExportLink({ query, plateClass }: { query: string; plateClass: P
   );
   const params = new URLSearchParams();
   if (query) params.set("q", query);
-  if (plateClass) params.set("class", String(plateClass));
+  if (kind) params.set("type", kind);
   if (timeZone) params.set("tz", timeZone);
   const search = params.toString();
   return (

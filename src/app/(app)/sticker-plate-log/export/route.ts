@@ -1,7 +1,7 @@
 import { cleanListQuery } from "@/lib/diagnose-list-rules";
 import { allows, lookupCurrentUser } from "@/lib/session";
 import { exportStickerLog } from "@/lib/sticker-log";
-import { parseClassFilter, stickerLogCsv } from "@/lib/sticker-log-rules";
+import { parseKindFilter, stickerLogCsv } from "@/lib/sticker-log-rules";
 
 // The Sticker & Plate log as CSV (Download CSV on the log), as searched
 // and filtered there, with its dates in the viewer's time zone.
@@ -12,7 +12,7 @@ export async function GET(request: Request) {
 
   const params = new URL(request.url).searchParams;
   const query = cleanListQuery(params.get("q") ?? "");
-  const plateClass = parseClassFilter(params.get("class") ?? undefined);
+  const kind = parseKindFilter(params.get("type") ?? undefined);
   // A time zone the browser named, if it's a real one.
   let timeZone = "America/New_York";
   try {
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
     // Not a time zone: the default stays.
   }
 
-  const rows = await exportStickerLog(lookup.user.shop.id, { query, plateClass });
+  const rows = await exportStickerLog(lookup.user.shop.id, { query, kind });
   const today = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   return new Response(stickerLogCsv(rows, timeZone), {
     headers: {
