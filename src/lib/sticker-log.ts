@@ -1,13 +1,18 @@
 import "server-only";
 
-import { DrizzleQueryError, and, desc, eq, sql, type SQL } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+
+import { DrizzleQueryError, and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
 import { auditLog, customers, stickerPlateLog, users } from "@/db/schema";
+import { matchCustomer, nameKey } from "@/lib/customer-import-rules";
 import { checkCustomer } from "@/lib/customer-rules";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid } from "@/lib/diagnose-rules";
+import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
+import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, type StickerImportOutcome } from "@/lib/sticker-import-rules";
 import {
   STICKER_LOG_PAGE_SIZE,
   checkStickerEntry,
@@ -299,5 +304,161 @@ export async function removeSticker(actor: CurrentUser, id: string): Promise<{ o
     if (!removed) return NOT_HERE;
     await audit(tx, actor, "sticker.removed", id, removed);
     return { ok: true as const, stickerNumber: removed.stickerNumber };
+  });
+}
+
+// --- Importing a log ------------------------------------------------------------
+
+type Person = { id: string; name: string; phone: string | null; email: string | null };
+
+const rowOf = (entry: unknown) => {
+  const row = (entry as { row?: unknown } | null)?.row;
+  return Number.isInteger(row) ? Number(row) : 0;
+};
+
+// Saves one batch of an imported sticker log, each row checked as the
+// form checks it. A sticker already in the log is left as it is (and said
+// so when the file has it for someone else, or in the other class), so
+// importing the same file again adds nothing. Each sticker's customer is
+// found on Customers by name, and by phone number when the file has one,
+// the way the customer import finds them; anyone not there is added, once
+// however many stickers they have. A name that several customers share,
+// with nothing in the file to say which, is left out with a note: that
+// sticker is logged on the form, picking them. Stickers are logged in the
+// file's order, so the log (newest first) lists the file's last row first.
+// One import at a time per shop (a lock to the end of the batch); the batch
+// is recorded in audit_log as stickers.imported, with its counts.
+export async function importStickers(
+  actor: CurrentUser,
+  input: { importId: unknown; fileName: unknown; stickers: unknown },
+): Promise<{ outcomes: StickerImportOutcome[] } | { error: string }> {
+  if (!isUuid(input.importId)) return { error: "That import couldn't be read. Choose the file again." };
+  const list = Array.isArray(input.stickers) ? (input.stickers as unknown[]) : null;
+  if (!list || list.length === 0) return { error: "There were no stickers in that batch." };
+  if (list.length > MAX_STICKER_IMPORT_BATCH) return { error: "That batch is too big. Reload the page and try again." };
+  // Kept in the audit log, which can't hold a NUL or half an emoji.
+  const fileName = cutText(typeof input.fileName === "string" ? input.fileName.replace(/\u0000/g, "") : "", 255);
+  const checked = list.map((entry) => ({ row: rowOf(entry), entry: checkStickerImport(entry) }));
+  const valid = checked.flatMap(({ entry }) => ("entry" in entry ? [entry.entry] : []));
+
+  return withShop(actor.shop.id, async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('sticker-import'), hashtext(${actor.shop.id}))`);
+    // The batch's stickers that are in the log already, and whose they are.
+    const numbers = [...new Set(valid.map((entry) => entry.stickerNumber))];
+    const logged = numbers.length
+      ? await tx
+          .select({ stickerNumber: stickerPlateLog.stickerNumber, plateClass: stickerPlateLog.plateClass, customerName: customers.name })
+          .from(stickerPlateLog)
+          .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+          .where(inArray(stickerPlateLog.stickerNumber, numbers))
+      : [];
+    const inLog = new Map(logged.map((entry) => [entry.stickerNumber, entry]));
+    // Customers on file by name, lower-cased by Postgres on both sides, then
+    // matched by nameKey; oldest first, so the same file finds the same one.
+    const names = [...new Set(valid.map((entry) => entry.customer.name))];
+    const onFile: Person[] = names.length
+      ? await tx
+          .select({ id: customers.id, name: customers.name, phone: customers.phone, email: customers.email })
+          .from(customers)
+          .where(
+            sql`lower(${customers.name}) in (select lower(n) from unnest(array[${sql.join(
+              names.map((name) => sql`${name}`),
+              sql`, `,
+            )}]::text[]) n)`,
+          )
+          .orderBy(asc(customers.createdAt), asc(customers.id))
+      : [];
+    const byName = new Map<string, Person[]>();
+    for (const person of onFile) byName.set(nameKey(person.name), [...(byName.get(nameKey(person.name)) ?? []), person]);
+
+    const outcomes: StickerImportOutcome[] = [];
+    const newCustomers: (typeof customers.$inferInsert & { id: string })[] = [];
+    const newStickers: { customerId: string; stickerNumber: string; plateClass: PlateClass; outcome: StickerImportOutcome }[] = [];
+    for (const { row, entry } of checked) {
+      if ("error" in entry) {
+        outcomes.push({ row, result: "failed", customer: null, message: entry.error });
+        continue;
+      }
+      const { stickerNumber, plateClass, customer } = entry.entry;
+      const already = inLog.get(stickerNumber);
+      if (already) {
+        const same = nameKey(already.customerName) === nameKey(customer.name) && already.plateClass === plateClass;
+        outcomes.push({
+          row,
+          result: "already",
+          customer: null,
+          message: same ? null : `Sticker ${stickerNumber} is in the log already, for ${already.customerName} (Class ${already.plateClass}): left as it is.`,
+        });
+        continue;
+      }
+      const people = byName.get(nameKey(customer.name)) ?? [];
+      const found = matchCustomer(people, { name: customer.name, phone: customer.phone, email: null });
+      if (!found.match && found.ambiguous > 1) {
+        outcomes.push({
+          row,
+          result: "failed",
+          customer: null,
+          message: `${found.ambiguous} customers are called ${customer.name}, and nothing in the file says which: log sticker ${stickerNumber} on the log's form, picking them.`,
+        });
+        continue;
+      }
+      let person = found.match;
+      if (!person) {
+        person = { id: randomUUID(), name: customer.name, phone: customer.phone, email: null };
+        byName.set(nameKey(customer.name), [...people, person]);
+        newCustomers.push({ id: person.id, shopId: actor.shop.id, name: customer.name, phone: customer.phone, createdByUserId: actor.id });
+      }
+      inLog.set(stickerNumber, { stickerNumber, plateClass, customerName: customer.name });
+      const outcome: StickerImportOutcome = { row, result: "logged", customer: null, message: null };
+      newStickers.push({ customerId: person.id, stickerNumber, plateClass, outcome });
+      outcomes.push(outcome);
+    }
+
+    if (newCustomers.length > 0) await tx.insert(customers).values(newCustomers);
+    // A sticker logged on the form while this ran is left as it is.
+    const saved = new Set<string>();
+    if (newStickers.length > 0) {
+      const rows = await tx
+        .insert(stickerPlateLog)
+        .values(
+          newStickers.map(({ customerId, stickerNumber, plateClass }, index) => ({
+            shopId: actor.shop.id,
+            customerId,
+            stickerNumber,
+            plateClass,
+            createdByUserId: actor.id,
+            // A microsecond apart, in the file's order.
+            createdAt: sql`now() + ${index} * interval '1 microsecond'`,
+          })),
+        )
+        .onConflictDoNothing()
+        .returning({ stickerNumber: stickerPlateLog.stickerNumber });
+      for (const { stickerNumber } of rows) saved.add(stickerNumber);
+    }
+    // Each customer added is counted on the first sticker of theirs logged;
+    // one added only for a sticker that wasn't is taken off again.
+    const added = new Set(newCustomers.map((customer) => customer.id));
+    const credited = new Set<string>();
+    for (const { customerId, stickerNumber, outcome } of newStickers) {
+      if (!saved.has(stickerNumber)) {
+        Object.assign(outcome, { result: "already", message: `Sticker ${stickerNumber} was logged on the form while this import ran: left as it is.` });
+        continue;
+      }
+      const isNew = added.has(customerId) && !credited.has(customerId);
+      if (isNew) credited.add(customerId);
+      outcome.customer = isNew ? "added" : "found";
+    }
+    const unused = newCustomers.filter((customer) => !credited.has(customer.id));
+    if (unused.length > 0) await tx.delete(customers).where(inArray(customers.id, unused.map((customer) => customer.id)));
+
+    const count = (result: StickerImportOutcome["result"]) => outcomes.filter((outcome) => outcome.result === result).length;
+    await audit(tx, actor, "stickers.imported", String(input.importId), {
+      fileName,
+      logged: count("logged"),
+      already: count("already"),
+      customersAdded: credited.size,
+      failed: count("failed"),
+    });
+    return { outcomes };
   });
 }
