@@ -753,7 +753,7 @@ export const manualCatalogModels = pgTable(
   ],
 );
 
-// The shop's customers (System Admin > Customers, src/lib/customers.ts):
+// The shop's customers (the Customers tab, src/lib/customers.ts):
 // how to reach them, and through customer_vehicles what they've bought,
 // sold and brought in. Contact details stay on these screens; Diagnose only
 // ever sees a customer's name and vehicles.
@@ -848,7 +848,7 @@ export const customerVehicles = pgTable(
   ],
 );
 
-// System Admin > Sticker & Plate log: each registration sticker the shop
+// The Sticker & Plate log tab: each registration sticker the shop
 // hands out, the customer it went to and the plate's classification (1 or
 // 2); see src/lib/sticker-log.ts. A sticker number is logged once per shop,
 // and a customer with stickers logged can't be removed: the log is the

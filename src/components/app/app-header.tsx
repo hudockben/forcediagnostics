@@ -34,6 +34,12 @@ export async function AppHeader() {
     ...(allows(user, "diagnostics.work") ? [{ href: "/diagnose", label: "Diagnose", section: "/diagnose" }] : []),
     ...(allows(user, "library.read") ? [{ href: "/library", label: "Library", section: "/library" }] : []),
     ...(allows(user, "sales.log") ? [{ href: "/nusr", label: "NUSR", section: "/nusr" }] : []),
+    ...(allows(user, "repair_orders.intake")
+      ? [
+          { href: "/customers", label: "Customers", section: "/customers" },
+          { href: "/sticker-plate-log", label: "Sticker & Plate log", section: "/sticker-plate-log" },
+        ]
+      : []),
     ...(firstAdminSection
       ? [{ href: firstAdminSection.href, label: "System Admin", section: "/admin" }]
       : []),

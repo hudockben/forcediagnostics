@@ -89,9 +89,9 @@ export function pageItems(page: number, pages: number, around = 1): (number | nu
 }
 
 // The list's address for a search and a page; no search and page 1 are
-// left out, so the plain list stays /diagnose. System Admin's lists page
-// the same way, at their own path, which can carry a filter of its own
-// ("/admin/sticker-plate-log?class=1").
+// left out, so the plain list stays /diagnose. The other lists page the
+// same way, at their own path, which can carry a filter of its own
+// ("/sticker-plate-log?class=1").
 export function listHref(query: string, page = 1, path = "/diagnose") {
   const params = new URLSearchParams();
   if (query) params.set("q", query);

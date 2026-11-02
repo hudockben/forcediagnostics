@@ -1,4 +1,4 @@
-// System Admin > Sticker & Plate log: the rules for a sticker number and the
+// The Sticker & Plate log tab: the rules for a sticker number and the
 // CSV (src/lib/sticker-log-rules.ts), and the log itself (src/lib/sticker-
 // log.ts): each entry tied to one of the shop's customers (or a new one
 // added from the form), a sticker logged once, searching and filtering,
@@ -69,10 +69,8 @@ describe("the rules for a sticker", () => {
     );
   });
 
-  test("it's a System Admin section for those who handle customers, signed in with a password", () => {
-    const section = ADMIN_SECTIONS.find((entry) => entry.href === "/admin/sticker-plate-log");
-    assert.equal(section?.label, "Sticker & Plate log");
-    assert.equal(section?.capability, "repair_orders.intake");
+  test("it's its own tab, for those who handle customers, signed in with a password", () => {
+    assert.ok(!ADMIN_SECTIONS.some((section) => section.capability === "repair_orders.intake"));
     assert.ok(needsPasswordSession("repair_orders.intake"));
   });
 });

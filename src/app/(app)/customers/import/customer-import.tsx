@@ -779,7 +779,7 @@ function Finished({
             Carry on
           </button>
         ) : (
-          <Link href="/admin/customers" className={primaryLinkClass}>
+          <Link href="/customers" className={primaryLinkClass}>
             View customers
           </Link>
         )}

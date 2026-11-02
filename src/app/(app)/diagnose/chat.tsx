@@ -997,8 +997,8 @@ export function DiagnoseChat({
 }: {
   initial: Detail | null;
   starter: StarterOptions | null;
-  // Whether the viewer can open customers' records (System Admin >
-  // Customers), so the customer's name links to theirs.
+  // Whether the viewer can open customers' records (the Customers tab),
+  // so the customer's name links to theirs.
   customerLinks: boolean;
   // Whether the viewer may delete this diagnosis: one they started, or
   // anyone's for a manager or admin signed in with a password.

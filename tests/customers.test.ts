@@ -1,4 +1,4 @@
-// System Admin > Customers: the rules for what a customer and a vehicle
+// The Customers tab: the rules for what a customer and a vehicle
 // hold (src/lib/customer-rules.ts), the records themselves
 // (src/lib/customers.ts) staying inside their shop, and Diagnose's link to a
 // customer's vehicle: starting a diagnosis on one, linking one later, the
@@ -270,7 +270,8 @@ describe("who can use Customers", () => {
     assert.ok(needsPasswordSession("repair_orders.intake"));
     const bay = { deviceId: "d", deviceName: "Bay 1", sessionId: "s" };
     assert.ok(!allows({ role: "manager", bay }, "repair_orders.intake"));
-    assert.equal(ADMIN_SECTIONS.find((section) => section.href === "/admin/customers")?.capability, "repair_orders.intake");
+    // A tab of its own, with the Sticker & Plate log, not a System Admin section.
+    assert.ok(!ADMIN_SECTIONS.some((section) => section.capability === "repair_orders.intake"));
   });
 });
 

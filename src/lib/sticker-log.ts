@@ -15,7 +15,7 @@ import {
   type StickerLogRow,
 } from "@/lib/sticker-log-rules";
 
-// System Admin > Sticker & Plate log: each registration sticker the shop
+// The Sticker & Plate log tab: each registration sticker the shop
 // hands out, tied to the customer it went to, with the plate's
 // classification (1 or 2). Callers check repair_orders.intake first;
 // everything here runs inside withShop for the user's own shop, and every

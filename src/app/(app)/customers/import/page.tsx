@@ -21,7 +21,7 @@ async function ImportCustomers() {
   await requireCapability("repair_orders.intake");
   return (
     <div className="space-y-6">
-      <Link href="/admin/customers" className="text-sm text-glow/90 hover:text-glow hover:underline">
+      <Link href="/customers" className="text-sm text-glow/90 hover:text-glow hover:underline">
         ‹ Customers
       </Link>
       <PageHeading

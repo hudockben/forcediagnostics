@@ -1,4 +1,4 @@
-// The shop's customers and their vehicles (System Admin > Customers): what a
+// The shop's customers and their vehicles (the Customers tab): what a
 // record holds and how what's typed is checked. No server imports, so the
 // forms use the same labels and limits the server checks against.
 

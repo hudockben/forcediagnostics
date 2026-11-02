@@ -9,15 +9,15 @@ import { requireCapability } from "@/lib/session";
 import { getCustomerChoice, listStickerLog, type StickerLog } from "@/lib/sticker-log";
 import { PLATE_CLASSES, PLATE_CLASS_LABELS, parseClassFilter, type PlateClass } from "@/lib/sticker-log-rules";
 
-import { ListSearch } from "../../diagnose/list-search";
-import { Pagination } from "../../diagnose/pagination";
+import { ListSearch } from "../diagnose/list-search";
+import { Pagination } from "../diagnose/pagination";
 import { ExportLink, StickerForm } from "./forms";
 
 export const metadata: Metadata = { title: "Sticker & Plate log" };
 
-const PATH = "/admin/sticker-plate-log";
+const PATH = "/sticker-plate-log";
 
-export default function StickerLogPage(props: PageProps<"/admin/sticker-plate-log">) {
+export default function StickerLogPage(props: PageProps<"/sticker-plate-log">) {
   return (
     <Suspense fallback={<LoadingLine />}>
       <StickerLogScreen searchParams={props.searchParams} />
@@ -30,7 +30,7 @@ const plural = (count: number, one: string, many: string) => `${count.toLocaleSt
 // The list's own path with its class filter, which searches and pages keep.
 const pathFor = (plateClass: PlateClass | null) => (plateClass ? `${PATH}?class=${plateClass}` : PATH);
 
-async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/admin/sticker-plate-log">["searchParams"] }) {
+async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/sticker-plate-log">["searchParams"] }) {
   const user = await requireCapability("repair_orders.intake");
   const params = await searchParams;
   const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
@@ -134,7 +134,7 @@ function Results({ log, query, plateClass, searching }: { log: StickerLog; query
                       </Link>
                     </th>
                     <td className="px-3 py-2.5 break-words">
-                      <Link href={`/admin/customers/${entry.customerId}`} className="text-ink hover:text-glow hover:underline">
+                      <Link href={`/customers/${entry.customerId}`} className="text-ink hover:text-glow hover:underline">
                         {entry.customerName}
                       </Link>
                     </td>
