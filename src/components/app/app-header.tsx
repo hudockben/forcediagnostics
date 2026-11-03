@@ -32,7 +32,6 @@ export async function AppHeader() {
   const tabs: NavItem[] = [
     { href: "/home", label: "Home", section: "/home" },
     ...(allows(user, "diagnostics.work") ? [{ href: "/diagnose", label: "Diagnose", section: "/diagnose" }] : []),
-    ...(allows(user, "library.read") ? [{ href: "/library", label: "Library", section: "/library" }] : []),
     ...(allows(user, "sales.log") ? [{ href: "/nusr", label: "NUSR", section: "/nusr" }] : []),
     ...(allows(user, "repair_orders.intake")
       ? [
@@ -40,6 +39,7 @@ export async function AppHeader() {
           { href: "/sticker-plate-log", label: "Sticker & Plate log", section: "/sticker-plate-log" },
         ]
       : []),
+    ...(allows(user, "library.read") ? [{ href: "/library", label: "Library", section: "/library" }] : []),
     ...(firstAdminSection
       ? [{ href: firstAdminSection.href, label: "System Admin", section: "/admin" }]
       : []),
