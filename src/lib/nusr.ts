@@ -1,6 +1,6 @@
 import "server-only";
 
-import { DrizzleQueryError, and, desc, eq, gte, inArray, isNull, lt, sql, type SQL } from "drizzle-orm";
+import { DrizzleQueryError, and, asc, desc, eq, gte, inArray, isNull, lt, lte, sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 
 import { withShop, type ShopTransaction } from "@/db";
@@ -207,6 +207,34 @@ export async function findSales(shopId: string, filters: SaleFilters, order: "ne
   );
   const sales = rows.map(toSale);
   return order === "newest" ? sales : sales.reverse();
+}
+
+// Every sale counted from `from` to `to` (days, both included) by the day
+// it was sold, or by the day its funding came in (a sale not funded yet
+// has none), the oldest first: for Reports.
+export async function salesBetween(shopId: string, from: string, to: string, by: "sold" | "funded" = "sold"): Promise<Sale[]> {
+  const day = by === "funded" ? unitSales.fundingReceivedOn : unitSales.soldOn;
+  const rows = await withShop(shopId, (tx) =>
+    tx
+      .select(saleColumns)
+      .from(unitSales)
+      .leftJoin(users, eq(users.id, unitSales.createdByUserId))
+      .where(and(gte(day, from), lte(day, to)))
+      .orderBy(asc(day), asc(unitSales.soldOn), asc(unitSales.createdAt), asc(unitSales.id))
+      .limit(MAX_LOG_ROWS),
+  );
+  return rows.map(toSale);
+}
+
+// How many sales sold from `from` to `to` have no Funding Rec'd yet.
+export async function unfundedBetween(shopId: string, from: string, to: string): Promise<number> {
+  const [row] = await withShop(shopId, (tx) =>
+    tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(unitSales)
+      .where(and(gte(unitSales.soldOn, from), lte(unitSales.soldOn, to), isNull(unitSales.fundingReceivedOn))),
+  );
+  return row?.count ?? 0;
 }
 
 export const LOG_PAGE_SIZE = 50;

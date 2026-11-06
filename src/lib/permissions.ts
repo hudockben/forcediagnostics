@@ -71,8 +71,8 @@ export const CAPABILITIES = [
   },
   {
     key: "sales.log",
-    label: "NUSR (unit sales log)",
-    detail: "Every unit sold: the customer, price, cost, profit, holdback, bonuses and financing",
+    label: "NUSR, Rebates and Reports",
+    detail: "Every unit sold: the customer, price, cost, profit, holdback, bonuses and financing; Polaris's rebate invoices matched to the sales; the salesmen's bonus reports",
     roles: ["manager", "admin"],
   },
   {

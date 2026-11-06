@@ -37,6 +37,8 @@ export async function AppHeader() {
           { href: "/nusr", label: "NUSR", section: "/nusr" },
           // Polaris's rebate invoices, read and matched to the NUSR's sales.
           { href: "/rebates", label: "Rebates", section: "/rebates" },
+          // The salesmen's bonuses by week, month, quarter and year.
+          { href: "/reports", label: "Reports", section: "/reports" },
         ]
       : []),
     ...(allows(user, "repair_orders.intake")
