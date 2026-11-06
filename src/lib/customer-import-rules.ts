@@ -587,6 +587,16 @@ function checkImportVehicle(raw: Record<keyof VehicleFields, string>, note: (mes
 
 // Names are compared without case or extra spaces.
 export const nameKey = (name: string) => name.trim().replace(/\s+/g, " ").toLowerCase();
+
+// Whom a name is, as the imports find customers: as nameKey, without full
+// stops ("Matthew J. Austin" is Matthew J Austin), and either way round
+// ("Rudd, Benjamin", last name first with one comma, is Benjamin Rudd).
+// personKeySql in src/lib/customers.ts works the same out in Postgres.
+export function personKey(name: string): string {
+  const key = nameKey(name.replace(/\./g, ""));
+  const parts = key.split(",").map((part) => part.trim());
+  return parts.length === 2 && parts[0] && parts[1] ? `${parts[1]} ${parts[0]}` : key;
+}
 export const phoneKey = (phone: string | null) => (phone ? phone.replace(/x.*$/i, "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "") : "");
 const emailKey = (email: string | null) => (email ? email.toLowerCase() : "");
 
@@ -610,7 +620,7 @@ const shares = (a: Set<string>, b: Set<string>) => [...a].some((key) => b.has(ke
 // often leave it out); "no" when their numbers (or emails) all differ,
 // which says they're two people.
 function relate(a: Who, b: Who): "sure" | "bare" | "could" | "no" {
-  if (nameKey(a.name) !== nameKey(b.name)) return "no";
+  if (personKey(a.name) !== personKey(b.name)) return "no";
   const [phonesA, phonesB, emailsA, emailsB] = [phoneKeys(a), phoneKeys(b), emailKeys(a), emailKeys(b)];
   if ((phonesA.size && phonesB.size && !shares(phonesA, phonesB)) || (emailsA.size && emailsB.size && !shares(emailsA, emailsB))) return "no";
   if (shares(phonesA, phonesB) || shares(emailsA, emailsB)) return "sure";
@@ -639,8 +649,8 @@ export function matchCustomer<T extends Who>(candidates: readonly T[], record: W
   return { match: null, ambiguous: could.length };
 }
 
-export const ambiguousNote = (name: string, count: number, where: string) =>
-  `${count} customers ${where} are called ${name}, and nothing here says which this is: added as another customer.`;
+export const ambiguousNote = (name: string, count: number, where: string, then = "added as another customer") =>
+  `${count} customers ${where} are called ${name}, and nothing here says which this is: ${then}.`;
 
 // Whether two vehicles of one customer are one: the same VIN, or with no
 // VIN on either, the same deal, year, make, model and model number, and no
@@ -791,7 +801,7 @@ export function planImport(rows: string[][], options: ImportOptions): ImportPlan
       // Matched by what this row itself says, not by details other rows
       // filled in, so the order of the rows doesn't decide who is who.
       const record: Who = { name: checked.name, phone: null, email: null, phones: contacts.phone, emails: contacts.email };
-      const key = nameKey(checked.name);
+      const key = personKey(checked.name);
       const sameName = (byName.get(key) ?? []).map((entry) => ({ name: entry.customer.name, phone: null, email: null, phones: entry.phones, emails: entry.emails, entry }));
       const found = matchCustomer(sameName, record, sameName.find((candidate) => candidate.entry === previous));
       customer = found.match?.entry ?? null;
@@ -893,8 +903,10 @@ export function importBatches(customers: ImportCustomer[]): ImportCustomer[][] {
 export type ImportOutcome = {
   rows: number[];
   // created: a new customer; matched: already on file (see matchCustomer),
-  // their blank details filled in; failed: left out, with why.
-  result: "created" | "matched" | "failed";
+  // their blank details filled in; failed: left out, with why; skipped:
+  // not on file, and the import only fills in customers who are (its note
+  // says why).
+  result: "created" | "matched" | "failed" | "skipped";
   customerId: string | null;
   filled: (keyof CustomerFields)[];
   vehiclesAdded: number;

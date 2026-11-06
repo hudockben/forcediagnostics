@@ -251,8 +251,11 @@ describe("importing a log: the rules", () => {
     assert.equal(personKey("Rudd, Benjamin"), "benjamin rudd");
     assert.equal(personKey("  Benjamin   RUDD "), "benjamin rudd");
     assert.equal(personKey("Van Dyke, Ann Marie"), "ann marie van dyke");
-    assert.equal(personKey("Smith, John, Jr."), "smith, john, jr.", "two commas: as written");
+    assert.equal(personKey("Smith, John, Jr."), "smith, john, jr", "two commas: as written, without its full stop");
     assert.equal(personKey("Rudd,"), "rudd,");
+    // Full stops don't count: an initial is the same with or without one.
+    assert.equal(personKey("Austin, Matthew J"), personKey("Matthew J. Austin"));
+    assert.equal(personKey("W.J. Young"), "wj young");
   });
 
   test("the log's own Download CSV comes back in as it went out", async () => {
@@ -545,10 +548,17 @@ describe("the log", () => {
   test("an import finds a customer on file whichever way round the name is written", async () => {
     const benjamin = await customer(writer, "Benjamin Rudd");
     const colin = await customer(writer, "Kirkpatrick, Colin");
+    const matthew = await customer(writer, "Matthew J. Austin");
     const result = await importStickers(writer, {
       importId: randomUUID(),
       fileName: "stickers.txt",
-      stickers: [row(2, "IMP-40", "Rudd, Benjamin", 1), row(3, "IMP-41", "Colin Kirkpatrick", 1), row(4, "IMP-42", "Mahlon, John", 2), row(5, "IMP-43", "John Mahlon", 2)],
+      stickers: [
+        row(2, "IMP-40", "Rudd, Benjamin", 1),
+        row(3, "IMP-41", "Colin Kirkpatrick", 1),
+        row(4, "IMP-42", "Mahlon, John", 2),
+        row(5, "IMP-43", "John Mahlon", 2),
+        row(6, "IMP-44", "Austin, Matthew J", 1),
+      ],
     });
     assert.ok("outcomes" in result, JSON.stringify(result));
     assert.deepEqual(
@@ -558,11 +568,14 @@ describe("the log", () => {
         [3, "logged", "found"],
         [4, "logged", "added"],
         [5, "logged", "found"],
+        [6, "logged", "found"],
       ],
     );
     const entry = async (number: string) => (await listStickerLog(writer.shop.id, { query: number })).items[0];
     assert.equal((await entry("IMP-40")).customerId, benjamin);
     assert.equal((await entry("IMP-41")).customerId, colin);
+    // An initial with or without its full stop.
+    assert.equal((await entry("IMP-44")).customerId, matthew);
     // Someone new is added once, as the file writes them.
     assert.equal((await named(writer.shop.id, "Mahlon, John")).length, 1);
     assert.deepEqual(await named(writer.shop.id, "John Mahlon"), []);

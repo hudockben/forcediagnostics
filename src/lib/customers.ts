@@ -24,6 +24,7 @@ import {
   ambiguousNote,
   fillBlanks,
   matchCustomer,
+  personKey,
   sameVehicle,
   type ImportOutcome,
 } from "@/lib/customer-import-rules";
@@ -505,6 +506,15 @@ export async function removeVehicle(actor: CurrentUser, customerId: string, vehi
 
 // --- Importing ----------------------------------------------------------------
 
+// personKey (src/lib/customer-import-rules.ts) in SQL, for finding customers
+// on file by name: lower-cased, without full stops or runs of spaces, and a
+// name with one comma read last name first ("Rudd, Benjamin" is "benjamin
+// rudd"). Customers' import and the Sticker & Plate log's both use it.
+export function personKeySql(name: SQL): SQL {
+  const key = sql`regexp_replace(btrim(replace(lower(${name}), '.', '')), '\\s+', ' ', 'g')`;
+  return sql`case when ${key} ~ '^[^,]+,[^,]+$' then btrim(split_part(${key}, ',', 2)) || ' ' || btrim(split_part(${key}, ',', 1)) else ${key} end`;
+}
+
 // One customer from an import, as the browser sends it (checked again here).
 export type ImportCustomerInput = {
   rows: unknown;
@@ -536,19 +546,25 @@ const rowNumbers = (value: unknown) =>
   (Array.isArray(value) ? value : []).filter((row): row is number => Number.isInteger(row) && row >= 1).slice(0, 1000);
 
 // Saves one batch of an import: each customer is checked as the forms check
-// them, matched with one already on file (the same name, and nothing that
-// tells them apart; see matchCustomer), whose blank details are filled in
-// but never changed, or added; then their vehicles, leaving out any they
-// already have on record. One that could be any of several customers of
-// that name is added as another, with a note, rather than guessed. Importing the same file again adds nothing.
-// One import at a time per shop (a lock held to the end of the batch), so
-// two at once can't add the same customer twice. The batch is recorded in
-// audit_log as customers.imported, with its counts.
+// them, matched with one already on file (the same name, any case and either
+// way round, and nothing that tells them apart; see matchCustomer), whose
+// blank details are filled in but never changed, or added; then their
+// vehicles, leaving out any they already have on record. One that could be
+// any of several customers of that name is added as another, with a note,
+// rather than guessed. Importing the same file again adds nothing. With
+// onlyOnFile, nobody is added: a customer who isn't on file, or could be
+// any of several, is left out (skipped, with a note saying why), so a list
+// of the shop's own customers fills in their details without adding anyone
+// whose name it writes another way. One import at a time per shop (a lock
+// held to the end of the batch), so two at once can't add the same customer
+// twice. The batch is recorded in audit_log as customers.imported, with its
+// counts.
 export async function importCustomers(
   actor: CurrentUser,
-  input: { importId: unknown; fileName: unknown; customers: unknown },
+  input: { importId: unknown; fileName: unknown; customers: unknown; onlyOnFile?: unknown },
 ): Promise<{ outcomes: ImportOutcome[] } | { error: string }> {
   if (!isUuid(input.importId)) return { error: "That import couldn't be read. Choose the file again." };
+  const onlyOnFile = input.onlyOnFile === true;
   const list = Array.isArray(input.customers) ? (input.customers as ImportCustomerInput[]) : null;
   if (!list || list.length === 0) return { error: "There were no customers in that batch." };
   const vehicleCount = list.reduce((sum, entry) => sum + (Array.isArray(entry?.vehicles) ? entry.vehicles.length : 0), 0);
@@ -568,17 +584,17 @@ export async function importCustomers(
 
   return withShop(actor.shop.id, async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext('customer-import'), hashtext(${actor.shop.id}))`);
-    // Customers on file by name, lower-cased by Postgres on both sides (it
-    // and JavaScript don't lower-case every letter alike: a Greek final
-    // sigma, a Turkish dotted I), then matched by nameKey below. Oldest
-    // first, so the same file always finds the same customer.
+    // Customers on file by name either way round, worked out by Postgres on
+    // both sides (it and JavaScript don't lower-case every letter alike: a
+    // Greek final sigma, a Turkish dotted I), then matched by personKey
+    // below. Oldest first, so the same file always finds the same customer.
     const names = [...new Set(checked.flatMap(({ customer }) => ("customer" in customer ? [customer.customer.name] : [])))];
     const onFile = names.length
       ? await tx
           .select(customerColumns)
           .from(customers)
           .where(
-            sql`lower(${customers.name}) in (select lower(n) from unnest(array[${sql.join(
+            sql`${personKeySql(sql`${customers.name}`)} in (select ${personKeySql(sql`n`)} from unnest(array[${sql.join(
               names.map((name) => sql`${name}`),
               sql`, `,
             )}]::text[]) n)`,
@@ -611,6 +627,25 @@ export async function importCustomers(
       const incoming = entry.customer.customer;
       const found = matchCustomer(known, { ...incoming, phones: entry.phones, emails: entry.emails });
       let match = found.match ?? undefined;
+      if (!match && onlyOnFile) {
+        const sameName = known.some((customer) => personKey(customer.name) === personKey(incoming.name));
+        outcomes.push({
+          rows: entry.rows,
+          result: "skipped",
+          customerId: null,
+          filled: [],
+          vehiclesAdded: 0,
+          vehiclesOnFile: 0,
+          error: null,
+          note:
+            found.ambiguous > 1
+              ? ambiguousNote(incoming.name, found.ambiguous, "on file", "left out")
+              : sameName
+                ? `${incoming.name} is on Customers with another phone number or email, so this may be someone else: left out.`
+                : `${incoming.name} isn't on Customers: left out.`,
+        });
+        continue;
+      }
       const note = found.ambiguous > 1 ? ambiguousNote(incoming.name, found.ambiguous, "on file") : null;
       let filled: (keyof CustomerFields)[] = [];
       if (match) {
@@ -672,6 +707,7 @@ export async function importCustomers(
         filled: filledCustomers.size,
         failed: count("failed"),
         vehiclesAdded: newVehicles.length,
+        ...(onlyOnFile ? { onlyOnFile, skipped: count("skipped") } : {}),
       },
     );
     return { outcomes };

@@ -2,9 +2,10 @@
 // (src/lib/customer-import-rules.ts), matching columns by their headings,
 // checking each row like the forms do and grouping rows into customers and
 // vehicles; then saving (importCustomers in src/lib/customers.ts): matching
-// customers already on file, filling in only their blanks, never adding a
-// vehicle twice, staying inside the shop, and two imports at once not adding
-// the same customer twice.
+// customers already on file (by name either way round), filling in only
+// their blanks, adding nobody when only filling in, never adding a vehicle
+// twice, staying inside the shop, and two imports at once not adding the
+// same customer twice.
 // Needs DATABASE_URL pointing at a disposable Postgres database; run with
 // `npm test`, which migrates it first.
 import assert from "node:assert/strict";
@@ -31,6 +32,7 @@ import {
   padZip,
   parseRelation,
   pastedDelimiter,
+  personKey,
   planImport,
   readHeading,
   readSpreadsheet,
@@ -303,9 +305,35 @@ describe("values", () => {
     // A customer with no number on file is the sure match for a row with none.
     assert.equal(matchCustomer([one, two, bare], { ...bare }).match, bare);
   });
+
+  test("a name is the same person either way round, and with or without its full stops", () => {
+    const person = (name: string, phone: string | null = null) => ({ name, phone, email: null });
+    assert.ok(sameCustomer(person("Rudd, Benjamin"), person("Benjamin Rudd", "814-555-0100")));
+    assert.ok(sameCustomer(person("RUDD,  Benjamin"), person("benjamin rudd")));
+    assert.ok(sameCustomer(person("Austin, Matthew J"), person("Matthew J. Austin")));
+    assert.ok(sameCustomer(person("W.J. Young"), person("WJ Young")));
+    assert.ok(!sameCustomer(person("Rudd, Benjamin"), person("Benjamin Ruddy")));
+    assert.ok(!sameCustomer(person("Rudd, Benjamin", "814-555-0100"), person("Benjamin Rudd", "814-555-0199")), "two numbers: two people");
+    assert.equal(personKey("Rudd, Benjamin"), "benjamin rudd");
+    assert.equal(personKey("Smith, John, Jr."), "smith, john, jr", "two commas: not turned round");
+    // A one-comma business name turns round too, the same on both sides.
+    assert.equal(personKey("East American, Inc."), personKey("East American, Inc"));
+  });
 });
 
 describe("planning the import", () => {
+  test("rows of one person, the name written either way round, are one customer", () => {
+    const planned = plan(csv(["Name|Phone|City", "Rudd, Benjamin|814-555-0300|", "Benjamin Rudd|814-555-0300|Brookville", "Ben Rudd|814-555-0300|"]));
+    assert.deepEqual(
+      planned.customers.map((customer) => [customer.rows, customer.customer.name, customer.customer.city]),
+      [
+        [[2, 3], "Rudd, Benjamin", "Brookville"],
+        // Another name, if the same number: not guessed to be him.
+        [[4], "Ben Rudd", null],
+      ],
+    );
+  });
+
   test("a customer's several units, however the file lays them out", () => {
     const layouts: [string, string[]][] = [
       ["contact on every row", ["Name|Phone|Model", "Jo Smith|814-555-0100|RZR", "Jo Smith|814-555-0100|Sportsman", "Jo Smith|814-555-0100|Ranger"]],
@@ -832,6 +860,64 @@ describe("saving an import", () => {
     assert.ok("outcomes" in first && "outcomes" in second);
     assert.equal(first.outcomes[0].customerId, second.outcomes[0].customerId);
     assert.equal(second.outcomes[0].vehiclesAdded, 0);
+  });
+
+  const blank = { phone: "", email: "", addressLine1: "", addressLine2: "", city: "", state: "", postalCode: "", notes: "" };
+
+  test("a customer on file written last name first is found by the name written first name first", async () => {
+    const made = await createCustomer(writer, { ...blank, name: "Hollow, Benjamin" });
+    assert.ok("id" in made);
+    const result = await send(writer, plan(csv(["Name|Phone|Street address|City|State", "Benjamin Hollow|814-555-0301|12 Elm St|Punxsutawney|PA"])).customers);
+    assert.ok("outcomes" in result);
+    assert.deepEqual([result.outcomes[0].result, result.outcomes[0].customerId], ["matched", made.id]);
+    const ben = await getCustomer(writer.shop.id, made.id);
+    assert.deepEqual(
+      [ben?.customer.name, ben?.customer.phone, ben?.customer.addressLine1, ben?.customer.city, ben?.customer.state],
+      ["Hollow, Benjamin", "(814) 555-0301", "12 Elm St", "Punxsutawney", "PA"],
+      "the name stays as it was; the blanks are filled in",
+    );
+  });
+
+  test("only filling in: customers on file get their blanks, nobody is added, and each left out says why", async () => {
+    const della = await createCustomer(writer, { ...blank, name: "Lantz, Della" });
+    for (let i = 0; i < 2; i++) assert.ok("id" in (await createCustomer(writer, { ...blank, name: "Ora Twill" })));
+    const hal = await createCustomer(writer, { ...blank, name: "Hal Pruett", phone: "8145550401" });
+    assert.ok("id" in della && "id" in hal);
+    const rows = csv([
+      "Name|Phone|Other phone|Street address|City|State|Model",
+      "Della Lantz|814-555-0400|814-555-0499|9 Oak Ln|Rossiter|PA|Ranger 570",
+      "Ora Twill|814-555-0402||1 Main St|Home|PA|",
+      "Hal Pruett|814-555-0403||2 Main St|Home|PA|",
+      "Ivy Newcomb|814-555-0404||3 Main St|Home|PA|",
+    ]);
+    const importId = randomUUID();
+    const result = await importCustomers(writer, { importId, fileName: "nusr.xlsx", customers: plan(rows).customers, onlyOnFile: true });
+    assert.ok("outcomes" in result, JSON.stringify(result));
+    assert.deepEqual(
+      result.outcomes.map((outcome) => [outcome.rows, outcome.result, outcome.customerId, outcome.vehiclesAdded, outcome.note]),
+      [
+        [[2], "matched", della.id, 1, null],
+        [[3], "skipped", null, 0, "2 customers on file are called Ora Twill, and nothing here says which this is: left out."],
+        [[4], "skipped", null, 0, "Hal Pruett is on Customers with another phone number or email, so this may be someone else: left out."],
+        [[5], "skipped", null, 0, "Ivy Newcomb isn't on Customers: left out."],
+      ],
+    );
+    const filled = await getCustomer(writer.shop.id, della.id);
+    assert.deepEqual(
+      [filled?.customer.name, filled?.customer.phone, filled?.customer.addressLine1, filled?.customer.city, filled?.customer.state, filled?.customer.notes],
+      ["Lantz, Della", "(814) 555-0400", "9 Oak Ln", "Rossiter", "PA", "Other phone: (814) 555-0499"],
+    );
+    assert.equal(filled?.vehicles.length, 1, "a customer on file still gets the units they don't have");
+    assert.equal((await getCustomer(writer.shop.id, hal.id))?.customer.addressLine1, null, "someone with another number isn't filled in");
+    assert.equal((await listCustomers(writer.shop.id, { query: "ora twill" })).total, 2);
+    assert.equal((await listCustomers(writer.shop.id, { query: "ivy newcomb" })).total, 0);
+    const [entry] = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, importId));
+    assert.deepEqual(entry.details, { fileName: "nusr.xlsx", created: 0, matched: 1, filled: 1, failed: 0, vehiclesAdded: 1, onlyOnFile: true, skipped: 3 });
+
+    // Only true holds back: anything else adds them, as before.
+    const loose = await importCustomers(writer, { importId: randomUUID(), fileName: "x.csv", customers: plan(csv(["Name", "Ivy Newcomb"])).customers, onlyOnFile: "true" });
+    assert.ok("outcomes" in loose);
+    assert.equal(loose.outcomes[0].result, "created");
   });
 
   test("names Postgres and JavaScript lower-case differently are still found", async () => {
