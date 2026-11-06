@@ -11,7 +11,7 @@
 // every entry again as it saves them (importStickers in
 // src/lib/sticker-log.ts).
 
-import { HEADER_SEARCH_ROWS, headingKey, nameKey } from "@/lib/customer-import-rules";
+import { HEADER_SEARCH_ROWS, headingKey, personKey } from "@/lib/customer-import-rules";
 import { checkCustomer, normalizePhone, type CustomerFields } from "@/lib/customer-rules";
 import {
   ENTRY_KINDS,
@@ -131,14 +131,10 @@ export function parseKind(text: string): EntryKind | null {
   return plateClass === null ? null : plateClass === 1 ? "1" : "2";
 }
 
-// Whom a name is, either way round: "Rudd, Benjamin" (last name first, one
-// comma) is Benjamin Rudd. Without case or extra spaces, as nameKey.
-// importStickers works the same out in SQL to find customers on file.
-export function personKey(name: string): string {
-  const key = nameKey(name);
-  const parts = key.split(",").map((part) => part.trim());
-  return parts.length === 2 && parts[0] && parts[1] ? `${parts[1]} ${parts[0]}` : key;
-}
+// Whom a name is, either way round ("Rudd, Benjamin" is Benjamin Rudd), as
+// Customers' import finds them; importStickers works the same out in SQL
+// to find customers on file.
+export { personKey } from "@/lib/customer-import-rules";
 
 // One sticker or plate of an import, as the browser sends it: the number
 // as the log keeps it, what it is (a plate's class, or null for a

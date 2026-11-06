@@ -26,7 +26,7 @@ async function ImportCustomers() {
       </Link>
       <PageHeading
         title="Import customers"
-        description="Add customers and their vehicles from a CSV or Excel file: an export from your dealer system or a list kept by hand. You'll see what each column is read as, and what will be added, before anything is saved. Customers already on file aren't added twice."
+        description="Add customers and their vehicles from a CSV or Excel file: an export from your dealer system or a list kept by hand. Or fill in the phone numbers and addresses of customers you already have. You'll see what each column is read as, and what will be added, before anything is saved. Customers already on file aren't added twice."
       />
       <CustomerImport />
     </div>

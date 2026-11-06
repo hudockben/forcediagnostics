@@ -8,6 +8,7 @@ import { withShop, type ShopTransaction } from "@/db";
 import { auditLog, customers, stickerPlateLog, users } from "@/db/schema";
 import { matchCustomer } from "@/lib/customer-import-rules";
 import { checkCustomer } from "@/lib/customer-rules";
+import { personKeySql } from "@/lib/customers";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid } from "@/lib/diagnose-rules";
 import { cutText } from "@/lib/manual-rules";
@@ -321,11 +322,6 @@ export async function removeSticker(actor: CurrentUser, id: string): Promise<{ o
 // --- Importing a log ------------------------------------------------------------
 
 type Person = { id: string; name: string; phone: string | null; email: string | null };
-
-// personKey (src/lib/sticker-import-rules.ts) in SQL: a name with one comma
-// read last name first ("Rudd, Benjamin" is "benjamin rudd"), lower-cased.
-const personKeySql = (name: SQL) =>
-  sql`case when ${name} ~ '^[^,]+,[^,]+$' then btrim(split_part(lower(${name}), ',', 2)) || ' ' || btrim(split_part(lower(${name}), ',', 1)) else lower(${name}) end`;
 
 const rowOf = (entry: unknown) => {
   const row = (entry as { row?: unknown } | null)?.row;

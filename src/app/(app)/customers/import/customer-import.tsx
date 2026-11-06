@@ -53,6 +53,8 @@ type Run =
 type Job = {
   importId: string;
   fileName: string;
+  // Fill in customers on file and add nobody, as ticked when it started.
+  onlyOnFile: boolean;
   batches: ImportCustomer[][];
   // How many customers each batch starts (one with more units than a batch
   // takes goes in parts, and counts once).
@@ -128,6 +130,7 @@ export function CustomerImport() {
   const [headerRow, setHeaderRow] = useState(0);
   const [mapping, setMapping] = useState<(ColumnTarget | null)[]>([]);
   const [defaultRelation, setDefaultRelation] = useState<VehicleRelation>("bought");
+  const [onlyOnFile, setOnlyOnFile] = useState(false);
   const [run, setRun] = useState<Run | null>(null);
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
@@ -234,7 +237,12 @@ export function CustomerImport() {
     setRun({ state: "running", sent: current.sent, total: current.total, outcomes: [...current.outcomes] });
     while (current.next < current.batches.length) {
       const batch = current.batches[current.next];
-      const result = await importCustomersAction({ importId: current.importId, fileName: current.fileName, customers: batch }).catch(() => ({
+      const result = await importCustomersAction({
+        importId: current.importId,
+        fileName: current.fileName,
+        customers: batch,
+        onlyOnFile: current.onlyOnFile,
+      }).catch(() => ({
         error: "The connection dropped.",
       }));
       if ("error" in result) {
@@ -267,6 +275,7 @@ export function CustomerImport() {
     job.current = {
       importId: crypto.randomUUID(),
       fileName: loaded.fileName,
+      onlyOnFile,
       batches,
       counts,
       next: 0,
@@ -314,7 +323,7 @@ export function CustomerImport() {
     const all = [...(plan?.notes ?? [])];
     for (const outcome of run?.outcomes ?? []) {
       if (outcome.result === "failed") all.push({ row: outcome.rows[0] ?? 0, message: `Left out: ${outcome.error}`, skipped: true });
-      if (outcome.note) all.push({ row: outcome.rows[0] ?? 0, message: outcome.note, skipped: false });
+      if (outcome.note) all.push({ row: outcome.rows[0] ?? 0, message: outcome.note, skipped: outcome.result === "skipped" });
     }
     return all;
   }, [plan, run]);
@@ -567,8 +576,25 @@ export function CustomerImport() {
       {loaded && plan && hasName && (
         <Section title="3. Import">
           <div aria-busy={planning} className={`transition-opacity ${planning ? "opacity-60" : ""}`}>
-            <Preview plan={plan} notes={notes} fileName={loaded.fileName} />
+            <Preview plan={plan} notes={notes} fileName={loaded.fileName} onlyOnFile={onlyOnFile} />
           </div>
+          <label className="mt-5 flex min-h-11 cursor-pointer items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              checked={onlyOnFile}
+              disabled={running}
+              onChange={(event) => setOnlyOnFile(event.target.checked)}
+              className="mt-0.5 size-5 shrink-0 accent-glow"
+              data-import-only-on-file
+            />
+            <span>
+              <span className="font-medium text-ink">Only fill in customers already on Customers</span>
+              <span className="mt-0.5 block text-ink-muted">
+                Nobody new is added: a name Customers doesn&apos;t have, or has twice, is left out and listed in the notes. For filling in the
+                phone numbers and addresses of customers you already have.
+              </span>
+            </span>
+          </label>
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-3">
             <button
               type="button"
@@ -603,7 +629,17 @@ export function CustomerImport() {
   );
 }
 
-function Preview({ plan, notes, fileName }: { plan: NonNullable<ReturnType<typeof planImport>>; notes: ImportNote[]; fileName: string }) {
+function Preview({
+  plan,
+  notes,
+  fileName,
+  onlyOnFile,
+}: {
+  plan: NonNullable<ReturnType<typeof planImport>>;
+  notes: ImportNote[];
+  fileName: string;
+  onlyOnFile: boolean;
+}) {
   const shown = plan.customers.slice(0, 8);
   return (
     <div className="space-y-4">
@@ -611,8 +647,9 @@ function Preview({ plan, notes, fileName }: { plan: NonNullable<ReturnType<typeo
         {plural(plan.rowsRead, "row", "rows")} read: {plural(plan.customers.length, "customer", "customers")} with{" "}
         {plural(plan.vehicles, "vehicle", "vehicles")}
         {plan.rowsSkipped > 0 ? `, ${plural(plan.rowsSkipped, "row", "rows")} left out` : ""}. Customers already on file are recognised by
-        name, and by phone number or email where the file has them: their blank details are filled in, nothing they have is changed, and
-        units they already have aren&apos;t added again.
+        name (either way round: &ldquo;Rudd, Benjamin&rdquo; is Benjamin Rudd), and by phone number or email where the file has them: their
+        blank details are filled in, nothing they have is changed, and units they already have aren&apos;t added again.
+        {onlyOnFile ? " Nobody new is added." : ""}
       </p>
       {shown.length > 0 && (
         <div className="-mx-5 overflow-x-auto sm:-mx-6">
@@ -733,6 +770,8 @@ function Finished({
   const matched = all.length - created;
   const filled = all.filter((customer) => !customer.created && customer.filled).length;
   const failed = run.outcomes.filter((outcome) => outcome.result === "failed").length;
+  // Not on file, with nobody to be added: left out, each with a note.
+  const skipped = run.outcomes.filter((outcome) => outcome.result === "skipped").length;
   const vehiclesAdded = run.outcomes.reduce((sum, outcome) => sum + outcome.vehiclesAdded, 0);
   const vehiclesOnFile = run.outcomes.reduce((sum, outcome) => sum + outcome.vehiclesOnFile, 0);
   return (
@@ -764,6 +803,11 @@ function Finished({
         {vehiclesOnFile > 0 && (
           <li>
             <Badge>{plural(vehiclesOnFile, "vehicle already on record", "vehicles already on record")}</Badge>
+          </li>
+        )}
+        {skipped > 0 && (
+          <li>
+            <Badge tone="trail">{plural(skipped, "not found on Customers", "not found on Customers")}</Badge>
           </li>
         )}
         {failed > 0 && (

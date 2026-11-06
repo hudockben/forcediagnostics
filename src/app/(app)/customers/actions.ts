@@ -122,11 +122,13 @@ export async function removeVehicleAction(_previous: FormState, form: FormData):
 }
 
 // One batch of an import (see src/lib/customer-import-rules.ts); the browser
-// sends them one after another.
+// sends them one after another. onlyOnFile: fill in customers on file and
+// add nobody.
 export async function importCustomersAction(input: {
   importId: string;
   fileName: string;
   customers: unknown;
+  onlyOnFile?: boolean;
 }): Promise<{ outcomes: ImportOutcome[] } | { error: string }> {
   try {
     const user = await requireCapability("repair_orders.intake");
@@ -134,6 +136,7 @@ export async function importCustomersAction(input: {
       importId: input?.importId,
       fileName: input?.fileName,
       customers: input?.customers,
+      onlyOnFile: input?.onlyOnFile === true,
     });
   } catch (error) {
     unstable_rethrow(error);
