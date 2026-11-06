@@ -14,6 +14,7 @@ export const AUDIT_LOG_PAGE_SIZE = 25;
 export const AUDIT_AREAS = {
   diagnoses: { label: "Diagnoses", targetTypes: ["diagnosis"] },
   nusr: { label: "NUSR", targetTypes: ["unit_sale"] },
+  rebates: { label: "Rebates", targetTypes: ["rebate_invoice"] },
   customers: { label: "Customers", targetTypes: ["customer", "customer_vehicle"] },
   stickers: { label: "Sticker & Plate log", targetTypes: ["sticker"] },
   suppliers: { label: "Supplier", targetTypes: ["supplier"] },
@@ -268,6 +269,22 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         fact("Already in the NUSR", num(d.already));
         if (num(d.failed) > 0) fact("Left out", num(d.failed));
         return `Imported sales into the NUSR from ${str(d.fileName) || "a file"}`;
+
+      // Rebates
+      case "rebate_invoice.saved":
+      case "rebate_invoice.replaced":
+      case "rebate_invoice.removed": {
+        fact("Invoice date", formatDay(str(d.invoiceDate)));
+        fact("Lines", num(d.lines));
+        if (d.found !== undefined) fact("Found in the NUSR", num(d.found));
+        if (typeof d.amount === "number") fact("Amounts", formatMoney(d.amount));
+        fact("Amounts in", d.column);
+        fact("File", d.fileName);
+        const invoice = str(d.number) ? `rebate invoice ${str(d.number)}` : "a rebate invoice";
+        if (entry.action === "rebate_invoice.saved") return `Saved ${invoice}`;
+        if (entry.action === "rebate_invoice.replaced") return `Saved ${invoice} again, in place of the one saved before`;
+        return `Removed ${invoice} from Rebates`;
+      }
 
       // Diagnoses
       case "diagnosis.deleted": {

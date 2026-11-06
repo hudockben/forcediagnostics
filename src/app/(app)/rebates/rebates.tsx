@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { Badge, Notice } from "@/components/app/ui";
 import { inputBaseClass, primaryLinkClass } from "@/components/hud";
 import { formatDay, formatMoney, parseMoney, type Cents } from "@/lib/nusr-rules";
-import type { RebateSaleSummary } from "@/lib/rebates";
+import type { OpenedInvoice, RebateSaleSummary } from "@/lib/rebates";
 import {
   REBATE_COLUMNS,
   REBATE_COLUMN_HEADINGS,
@@ -21,14 +22,17 @@ import {
   type RebateColumn,
 } from "@/lib/rebate-rules";
 
-import { findRebateSalesAction, searchRebateSalesAction } from "./actions";
+import { findRebateSalesAction, saveRebateInvoiceAction, searchRebateSalesAction } from "./actions";
 import { readInvoiceFile, type ReadProgress } from "./reader";
 
 // The Rebates tab, in the manager's browser: invoices dropped here are read
 // here (reader.ts), their units found in the NUSR (actions.ts), and every
 // line shown to check: the amount (which can be corrected) and the sale it
-// was found as (which can be changed, or searched for). Download Excel
-// sends what's on the page to /rebates/export, which writes the workbook.
+// was found as (which can be changed, or searched for). Save keeps an
+// invoice as checked (Saved rebates, under it on the page, lists what's
+// saved; Open there brings one back here to change and save again).
+// Download Excel sends what's on the page to /rebates/export, which writes
+// the workbook.
 
 type Line = InvoiceLine & {
   // The amount as shown and corrected.
@@ -54,7 +58,25 @@ type Loaded = {
   programs: InvoicePrograms;
   lines: Line[];
   lookup: { state: "looking" } | { state: "done" } | { state: "failed"; error: string };
+  // The saved invoice it is, once saved or opened from Saved rebates;
+  // whether what's shown is saved; and how often it's been changed (a save
+  // sent before a change doesn't save the change).
+  savedId: string | null;
+  save: SaveState;
+  edits: number;
 };
+
+type SaveState =
+  | { state: "idle" }
+  | { state: "saving" }
+  | { state: "saved"; how: "saved" | "replaced" | "opened" }
+  // Its number is saved already: to save this in its place, or not.
+  | { state: "exists"; savedAt: string; savedBy: string | null; lines: number }
+  | { state: "failed"; error: string };
+
+// Saved rebates' Remove says which saved invoice went, so a card of it on
+// the page is no longer marked saved.
+export const REMOVED_EVENT = "rebates:removed";
 
 type Reading = { fileName: string; progress: ReadProgress; queued: number };
 
@@ -74,6 +96,82 @@ const lineCents = (line: Pick<Line, "amountText">): Cents | null => {
 
 // "8/21/2026": a sale's date, as the NUSR writes it.
 const saleDay = (iso: string) => formatDay(iso);
+// "11/6/2026": the day something was saved, in this browser's time zone.
+const savedDay = (iso: string) => new Date(iso).toLocaleDateString("en-US");
+
+// An invoice as the server takes it, to save or download: what was read,
+// as checked here.
+function payloadOf(loaded: Loaded) {
+  return {
+    fileName: loaded.fileName,
+    number: loaded.invoice.number,
+    type: loaded.invoice.type,
+    date: loaded.invoice.date,
+    total: loaded.invoice.total?.cents ?? null,
+    column: loaded.column,
+    pages: loaded.invoice.pages,
+    lines: loaded.lines.map((line) => ({
+      line: line.line,
+      page: line.page,
+      part: line.part,
+      vinRead: line.vinRead,
+      modelCode: line.modelCode,
+      programs: line.programs,
+      dates: line.dates,
+      purchased: line.purchased,
+      names: line.names,
+      other: line.other,
+      unitPrice: line.unitPrice.cents,
+      amount: lineCents(line),
+      amountText: line.amount.text,
+      amountSure: line.edited || line.amount.sure,
+      saleId: line.saleId,
+      how: line.how,
+    })),
+  };
+}
+
+// A saved invoice, opened from Saved rebates, as the page shows one read
+// from a file: each line with the sale it was saved with.
+function loadedFromSaved(opened: OpenedInvoice): Loaded {
+  const lines: Line[] = opened.lines.map((line) => ({
+    line: line.line,
+    page: line.page,
+    part: line.part,
+    vinRead: line.vinRead,
+    modelCode: line.modelCode,
+    unitPrice: { text: "", cents: line.unitPrice, sure: true, others: [] },
+    amount: { text: line.amountText, cents: line.amount, sure: line.amountSure, others: [] },
+    amountBox: { left: 0, top: 0, right: 0, bottom: 0 },
+    programs: line.programs,
+    dates: line.dates,
+    purchased: line.purchased,
+    names: line.names,
+    other: line.other,
+    amountText: amountText(line.amount),
+    edited: false,
+    saleId: line.saleId,
+    how: line.how,
+    candidates: line.saleId ? [line.saleId] : [],
+    sharedWith: [],
+  }));
+  for (const line of lines) line.sharedWith = lines.filter((other) => other !== line && other.saleId !== null && other.saleId === line.saleId).map((other) => other.line);
+  const { number, type, date, total, column, fileName, pages } = opened.invoice;
+  return {
+    id: opened.id,
+    sameAs: number ? `number:${number}` : `saved:${opened.id}`,
+    fileName,
+    invoice: { number, type, date, total: total === null ? null : { text: "", cents: total, sure: true, others: [] }, pages },
+    scanned: false,
+    column,
+    programs: invoicePrograms(lines),
+    lines,
+    lookup: { state: "done" },
+    savedId: opened.id,
+    save: { state: "saved", how: "opened" },
+    edits: 0,
+  };
+}
 
 function progressText({ step, done, pages }: ReadProgress) {
   if (step === "opening") return "Opening…";
@@ -94,9 +192,22 @@ function downloadName(header: string | null) {
   return /filename="([^"]+)"/i.exec(header ?? "")?.[1] ?? "Rebates.xlsx";
 }
 
-export function Rebates() {
+export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
+  const router = useRouter();
   const [invoices, setInvoices] = useState<Loaded[]>([]);
   const [sales, setSales] = useState<Record<string, RebateSaleSummary>>({});
+  // A saved invoice opened from Saved rebates (?open=) joins the page's
+  // invoices: once while the address has it, however often the page is
+  // shown again (a save refreshes it), so closing it keeps it closed.
+  const openedId = opened?.id ?? null;
+  const [shownOpened, setShownOpened] = useState<string | null>(null);
+  if (openedId !== shownOpened) {
+    setShownOpened(openedId);
+    if (opened) {
+      setInvoices((list) => (list.some((invoice) => invoice.savedId === opened.id) ? list : [...list, loadedFromSaved(opened)]));
+      setSales((old) => ({ ...old, ...Object.fromEntries(opened.sales.map((sale) => [sale.id, sale])) }));
+    }
+  }
   const [reading, setReading] = useState<Reading | null>(null);
   const [problems, setProblems] = useState<{ fileName: string; error: string }[]>([]);
   const [dragging, setDragging] = useState(false);
@@ -112,6 +223,26 @@ export function Rebates() {
     const controller = new AbortController();
     stop.current = controller;
     return () => controller.abort();
+  }, []);
+
+  // An opened invoice counts as on the page for a file dropped after it,
+  // and is scrolled to.
+  const openedNumber = opened?.invoice.number ?? null;
+  useEffect(() => {
+    if (!openedId) return;
+    known.current.add(openedNumber ? `number:${openedNumber}` : `saved:${openedId}`);
+    document.querySelector(`[data-rebates-card="${openedId}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [openedId, openedNumber]);
+
+  // A saved invoice removed in Saved rebates isn't saved any more: a card of
+  // it on the page can be saved again.
+  useEffect(() => {
+    const removed = (event: Event) => {
+      const id = (event as CustomEvent<string>).detail;
+      setInvoices((list) => list.map((invoice) => (invoice.savedId === id ? { ...invoice, savedId: null, save: { state: "idle" } } : invoice)));
+    };
+    window.addEventListener(REMOVED_EVENT, removed);
+    return () => window.removeEventListener(REMOVED_EVENT, removed);
   }, []);
 
   const addSales = (list: readonly RebateSaleSummary[]) => setSales((old) => ({ ...old, ...Object.fromEntries(list.map((sale) => [sale.id, sale])) }));
@@ -171,6 +302,9 @@ export function Rebates() {
         programs,
         lines: lines.map((line) => ({ ...line, amountText: amountText(line.amount.cents), edited: false, saleId: null, how: null, candidates: [], sharedWith: [] })),
         lookup: { state: "looking" },
+        savedId: null,
+        save: { state: "idle" },
+        edits: 0,
       };
       setInvoices((list) => [...list, loaded]);
       void lookUp(loaded);
@@ -179,40 +313,53 @@ export function Rebates() {
     if (input.current) input.current.value = "";
   }
 
-  function remove(id: string) {
-    setInvoices((list) => {
-      const gone = list.find((invoice) => invoice.id === id);
-      if (gone) known.current.delete(gone.sameAs);
-      return list.filter((invoice) => invoice.id !== id);
-    });
+  // Takes an invoice off the page (a saved one stays saved). The one the
+  // address opened goes from the address too, so Open brings it back.
+  function close(loaded: Loaded) {
+    known.current.delete(loaded.sameAs);
+    setInvoices((list) => list.filter((invoice) => invoice.id !== loaded.id));
+    if (openedId && loaded.savedId === openedId) {
+      const params = new URLSearchParams(window.location.search);
+      params.delete("open");
+      router.replace(`/rebates${params.size ? `?${params}` : ""}`, { scroll: false });
+    }
+  }
+
+  // A change on the card: what's shown is no longer what's saved (once a
+  // save on its way comes back).
+  const change = (id: string, edit: (invoice: Loaded) => Loaded) =>
+    updateInvoice(id, (invoice) => ({ ...edit(invoice), edits: invoice.edits + 1, save: invoice.save.state === "saving" ? invoice.save : { state: "idle" } }));
+
+  // Saves an invoice as checked here: in place of the saved one when it's
+  // one opened from Saved rebates or `replace` says so. Saved rebates, below,
+  // shows it once it's saved.
+  async function save(loaded: Loaded, replace: boolean) {
+    const edits = loaded.edits;
+    updateInvoice(loaded.id, (invoice) => ({ ...invoice, save: { state: "saving" } }));
+    const result = await saveRebateInvoiceAction({ invoice: payloadOf(loaded), savedId: loaded.savedId, replace: replace || loaded.savedId !== null }).catch(() => ({
+      error: "The connection dropped. Check it, then save again.",
+    }));
+    if ("error" in result) {
+      updateInvoice(loaded.id, (invoice) => ({ ...invoice, save: { state: "failed", error: result.error } }));
+      return;
+    }
+    if ("exists" in result) {
+      updateInvoice(loaded.id, (invoice) => ({ ...invoice, save: { state: "exists", savedAt: result.exists.savedAt, savedBy: result.exists.savedBy, lines: result.exists.lines } }));
+      return;
+    }
+    const { id, replaced } = result.saved;
+    updateInvoice(loaded.id, (invoice) => ({
+      ...invoice,
+      savedId: id,
+      save: invoice.edits === edits ? { state: "saved", how: replaced ? "replaced" : "saved" } : { state: "idle" },
+    }));
+    router.refresh();
   }
 
   async function download() {
     setDownloading(true);
     setDownloadError(null);
-    const body = {
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      invoices: invoices.map((loaded) => ({
-        fileName: loaded.fileName,
-        number: loaded.invoice.number,
-        type: loaded.invoice.type,
-        date: loaded.invoice.date,
-        total: loaded.invoice.total?.cents ?? null,
-        column: loaded.column,
-        lines: loaded.lines.map((line) => ({
-          line: line.line,
-          part: line.part,
-          vinRead: line.vinRead,
-          modelCode: line.modelCode,
-          programs: line.programs,
-          dates: line.dates,
-          names: line.names,
-          unitPrice: line.unitPrice.cents,
-          amount: lineCents(line),
-          saleId: line.saleId,
-        })),
-      })),
-    };
+    const body = { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, invoices: invoices.map(payloadOf) };
     try {
       const response = await fetch("/rebates/export", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
       if (!response.ok) {
@@ -313,9 +460,11 @@ export function Rebates() {
           key={loaded.id}
           loaded={loaded}
           sales={sales}
-          onChange={(change) => updateInvoice(loaded.id, change)}
+          onChange={(edit) => change(loaded.id, edit)}
           onLookUp={() => void lookUp(loaded)}
-          onRemove={() => remove(loaded.id)}
+          onClose={() => close(loaded)}
+          onSave={(replace) => void save(loaded, replace)}
+          onKeepSaved={() => updateInvoice(loaded.id, (invoice) => ({ ...invoice, save: { state: "idle" } }))}
           onFound={addSales}
         />
       ))}
@@ -360,17 +509,22 @@ function InvoiceCard({
   sales,
   onChange,
   onLookUp,
-  onRemove,
+  onClose,
+  onSave,
+  onKeepSaved,
   onFound,
 }: {
   loaded: Loaded;
   sales: Record<string, RebateSaleSummary>;
   onChange: (change: (invoice: Loaded) => Loaded) => void;
   onLookUp: () => void;
-  onRemove: () => void;
+  onClose: () => void;
+  // Saves it; in place of the one saved with its number, when `replace`.
+  onSave: (replace: boolean) => void;
+  onKeepSaved: () => void;
   onFound: (list: readonly RebateSaleSummary[]) => void;
 }) {
-  const { invoice, lines, lookup } = loaded;
+  const { invoice, lines, lookup, save } = loaded;
   const columnName = useId();
   const sum = lines.reduce((all, line) => all + (lineCents(line) ?? 0), 0);
   const total = invoice.total?.cents === null || invoice.total?.cents === undefined ? null : Math.abs(invoice.total.cents);
@@ -381,6 +535,9 @@ function InvoiceCard({
   }).length;
   const setLine = (number: number, change: Partial<Line>) =>
     onChange((old) => ({ ...old, lines: old.lines.map((line) => (line.line === number ? { ...line, ...change } : line)) }));
+  const badAmounts = lines.filter((line) => lineCents(line) === null && line.amountText.trim() !== "").length;
+  const saveable = lookup.state === "done" && loaded.column !== null && badAmounts === 0;
+  const name = invoice.number ? `Invoice ${invoice.number}` : "This invoice";
 
   // What the lines found come to by category, as the shop notes on the
   // invoice (ATV, RZR, UTV).
@@ -391,7 +548,11 @@ function InvoiceCard({
   }
 
   return (
-    <section className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" data-rebates-invoice={invoice.number ?? loaded.fileName}>
+    <section
+      className="scroll-mt-4 space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
+      data-rebates-invoice={invoice.number ?? loaded.fileName}
+      data-rebates-card={loaded.savedId ?? loaded.id}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-ink">
@@ -400,13 +561,60 @@ function InvoiceCard({
             {invoice.date && <span className="font-normal text-ink-muted"> · {saleDay(invoice.date)}</span>}
           </h2>
           <p className="mt-0.5 text-xs text-ink-muted">
-            {loaded.fileName} · {plural(invoice.pages, "page", "pages")}
+            {loaded.fileName}
+            {invoice.pages > 0 && ` · ${plural(invoice.pages, "page", "pages")}`}
             {loaded.scanned ? ", read from a scan" : ""}
           </p>
         </div>
-        <button type="button" onClick={onRemove} className={linkButtonClass}>
-          Remove
-        </button>
+        <div className="flex flex-wrap items-center gap-4">
+          <button
+            type="button"
+            onClick={() => onSave(false)}
+            disabled={!saveable || save.state === "saving" || save.state === "saved" || save.state === "exists"}
+            className={smallButtonClass}
+            data-rebates-save
+          >
+            {save.state === "saving" ? "Saving…" : save.state === "saved" ? "Saved" : loaded.savedId ? "Save changes" : "Save"}
+          </button>
+          <button type="button" onClick={onClose} className={linkButtonClass} data-rebates-close>
+            Close
+          </button>
+        </div>
+      </div>
+
+      <div data-rebates-save-state={save.state}>
+        {save.state === "saved" ? (
+          <Notice>
+            {save.how === "opened"
+              ? "Opened from Saved rebates. Change anything, then Save changes to keep it."
+              : save.how === "replaced"
+                ? "Saved in place of the one saved before. Saved rebates, below, has it."
+                : "Saved. Saved rebates, below, has it."}
+          </Notice>
+        ) : save.state === "exists" ? (
+          <div className="space-y-3 rounded-lg border border-trail/40 bg-trail/5 p-4" role="alert">
+            <p className="text-sm text-ink">
+              {name} is saved already: {plural(save.lines, "line", "lines")}, saved {save.savedBy ? `by ${save.savedBy} ` : ""}on {savedDay(save.savedAt)}. Save this in
+              its place? Its lines are replaced with these.
+            </p>
+            <div className="flex flex-wrap gap-3">
+              <button type="button" onClick={() => onSave(true)} className={smallButtonClass} data-rebates-replace>
+                Save in its place
+              </button>
+              <button type="button" onClick={onKeepSaved} className={linkButtonClass}>
+                Keep the saved one
+              </button>
+            </div>
+          </div>
+        ) : save.state === "failed" ? (
+          <Notice tone="trail">{save.error}</Notice>
+        ) : save.state === "idle" && lookup.state === "done" && loaded.column === null ? (
+          <p className="text-xs text-ink-muted">Pick which column its amounts go in, below, to save it.</p>
+        ) : save.state === "idle" && lookup.state === "done" && badAmounts > 0 ? (
+          <p className="text-xs text-trail">{plural(badAmounts, "amount isn't", "amounts aren't")} an amount: fix it to save the invoice.</p>
+        ) : save.state === "idle" && loaded.savedId ? (
+          <p className="text-xs text-trail">Changed since it was saved: Save changes to keep them.</p>
+        ) : null}
       </div>
 
       <ul className="flex flex-wrap gap-2" data-rebates-counts>

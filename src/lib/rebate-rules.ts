@@ -27,6 +27,7 @@
 // No server imports: the browser reads the invoice with these rules, and
 // the server matches it and writes the workbook with the same ones.
 
+import { cutText } from "@/lib/manual-rules";
 import { MAX_AMOUNT_CENTS, formatMoney, parseIsoDate, type Cents } from "@/lib/nusr-rules";
 import { vinCheckDigit } from "@/lib/vin";
 
@@ -598,7 +599,8 @@ export type MatchItem = { key: string; vinRead: string; names: string[]; purchas
 // How a unit was found: its VIN; a VIN a slip away (OCR's, read as "read",
 // or the NUSR's, which then fails its check digit: "typo"); by the name and
 // purchase date, the NUSR having no VIN for it; or not at all.
-export type MatchHow = "vin" | "read" | "typo" | "name" | null;
+export const MATCH_HOWS = ["vin", "read", "typo", "name"] as const;
+export type MatchHow = (typeof MATCH_HOWS)[number] | null;
 
 export type ItemMatch = {
   key: string;
@@ -822,3 +824,92 @@ export function rebatesFileName(numbers: readonly (string | null)[], today: stri
 
 // "$60,602.36" for a total.
 export const formatCredit = (cents: Cents | null) => formatMoney(cents === null ? null : Math.abs(cents));
+
+// --- Saved rebates' filters ---------------------------------------------------
+
+// Whether a saved line was found in the NUSR.
+export const REBATE_STATUSES = ["found", "missing"] as const;
+export type RebateStatus = (typeof REBATE_STATUSES)[number];
+export const REBATE_STATUS_LABELS: Record<RebateStatus, string> = { found: "Found in the NUSR", missing: "Not found" };
+
+// The saved rebates' filters, from the address: the year (this one unless
+// another or "all" is asked for) and month of the invoice's date, the
+// column its amounts went in, the salesman and category of the sale a line
+// was found as, whether it was found, and a search.
+export type RebateFilters = {
+  year: number | null;
+  month: number | null;
+  column: RebateColumn | null;
+  salesperson: string | null;
+  category: string | null;
+  status: RebateStatus | null;
+  query: string;
+};
+
+type FilterParams = Record<string, string | string[] | undefined>;
+const filterParam = (params: FilterParams, key: string) => {
+  const value = params[key];
+  return (typeof value === "string" ? value : Array.isArray(value) ? (value[0] ?? "") : "").replace(/\u0000/g, "").replace(/\s+/g, " ").trim();
+};
+
+export function parseRebateFilters(params: FilterParams, thisYear: number): RebateFilters {
+  const yearText = filterParam(params, "year");
+  const year = yearText === "all" ? null : /^\d{4}$/.test(yearText) && Number(yearText) >= 2000 && Number(yearText) <= 2100 ? Number(yearText) : thisYear;
+  const month = filterParam(params, "month");
+  const column = filterParam(params, "column");
+  const status = filterParam(params, "status");
+  return {
+    year,
+    month: year !== null && /^(?:[1-9]|1[0-2])$/.test(month) ? Number(month) : null,
+    column: isRebateColumn(column) ? column : null,
+    salesperson: filterParam(params, "salesperson").slice(0, 80) || null,
+    category: filterParam(params, "category").slice(0, 30) || null,
+    status: (REBATE_STATUSES as readonly string[]).includes(status) ? (status as RebateStatus) : null,
+    query: filterParam(params, "q").slice(0, 100),
+  };
+}
+
+// The filters as an address's search, without what's as it is by default
+// (this year, the rest unset); `extra` adds the page and the like.
+export function rebateFiltersSearch(filters: RebateFilters, thisYear: number, extra: Record<string, string | number | null> = {}) {
+  const search = new URLSearchParams();
+  if (filters.year === null) search.set("year", "all");
+  else if (filters.year !== thisYear) search.set("year", String(filters.year));
+  if (filters.month !== null) search.set("month", String(filters.month));
+  if (filters.column) search.set("column", filters.column);
+  if (filters.salesperson) search.set("salesperson", filters.salesperson);
+  if (filters.category) search.set("category", filters.category);
+  if (filters.status) search.set("status", filters.status);
+  if (filters.query) search.set("q", filters.query);
+  for (const [key, value] of Object.entries(extra)) if (value !== null && value !== "") search.set(key, String(value));
+  const text = search.toString();
+  return text ? `?${text}` : "";
+}
+
+const FILTER_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+// "2026", "October 2026 · Add'l holdback (AQ) · Brian Setree", "All years".
+export function rebateFiltersTitle(filters: RebateFilters) {
+  const when = filters.year === null ? "All years" : filters.month === null ? String(filters.year) : `${FILTER_MONTHS[filters.month - 1]} ${filters.year}`;
+  return [
+    when,
+    filters.column ? REBATE_COLUMN_LABELS[filters.column] : null,
+    filters.salesperson,
+    filters.category,
+    filters.status ? REBATE_STATUS_LABELS[filters.status] : null,
+    filters.query ? `“${filters.query}”` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+// The saved rebates' download's name, "Rebates 2026 2026-11-06.xlsx": the
+// filters' title and the day, as the NUSR's download is named.
+export function savedRebatesFileName(title: string, today: string) {
+  const safe = title
+    .replace(/\s+/g, " ")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .trim();
+  return `Rebates ${cutText(safe, 120).trim()} ${today}.xlsx`.replace(/\s+/g, " ");
+}

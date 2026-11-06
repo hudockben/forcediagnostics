@@ -4,7 +4,7 @@ import { DrizzleQueryError, and, asc, desc, eq, gte, inArray, isNull, lt, lte, s
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { auditLog, customerVehicles, customers, unitSales, users } from "@/db/schema";
+import { auditLog, customerVehicles, customers, rebateInvoices, rebateLines, unitSales, users } from "@/db/schema";
 import { checkCustomer, vehicleLabel } from "@/lib/customer-rules";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid } from "@/lib/diagnose-rules";
@@ -627,6 +627,20 @@ export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: 
       .for("update", { of: unitSales });
     if (!found) return NOT_HERE;
     const { importRef, importRow, ...row } = found;
+    // Rebates saved against it are the shop's record of what Polaris paid on
+    // it: the sale stays until they're moved or removed (its foreign key
+    // refuses too).
+    const [rebate] = await tx
+      .select({ number: rebateInvoices.number })
+      .from(rebateLines)
+      .innerJoin(rebateInvoices, eq(rebateInvoices.id, rebateLines.invoiceId))
+      .where(eq(rebateLines.saleId, id))
+      .limit(1);
+    if (rebate) {
+      return {
+        error: `Rebates are saved against this sale (${rebate.number ? `invoice ${rebate.number}` : "an invoice"} on the Rebates tab). Open that invoice there and pick another sale for its line, or remove the invoice, then remove the sale.`,
+      };
+    }
     // Where an import found it, even when that row was another sale's.
     const from = importRow ?? importRef;
     const sale = toSale(row);

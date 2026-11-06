@@ -3,7 +3,15 @@
 import { DrizzleQueryError } from "drizzle-orm";
 import { unstable_rethrow } from "next/navigation";
 
-import { findRebateSales, searchRebateSales, type RebateLookup, type RebateSaleSummary } from "@/lib/rebates";
+import {
+  findRebateSales,
+  removeSavedInvoice,
+  saveRebateInvoice,
+  searchRebateSales,
+  type RebateLookup,
+  type RebateSaleSummary,
+  type SaveResult,
+} from "@/lib/rebates";
 import { requireCapability } from "@/lib/session";
 
 // Every action re-checks the permission: server actions can be called
@@ -37,5 +45,24 @@ export async function searchRebateSalesAction(query: unknown): Promise<{ sales: 
     "search the NUSR for a rebate",
     async () => searchRebateSales(await requireCapability("sales.log"), query),
     { error: "Couldn't search the NUSR. Check the connection and try again." },
+  );
+}
+
+// Saves an invoice as checked on the page, or says it's saved already (to
+// save it in its place when that's meant: `replace`).
+export async function saveRebateInvoiceAction(input: unknown): Promise<SaveResult> {
+  return attempt<SaveResult>(
+    "save a rebate invoice",
+    async () => saveRebateInvoice(await requireCapability("sales.log"), input),
+    { error: "Couldn't save the invoice. Check the connection and try again." },
+  );
+}
+
+// Removes a saved invoice and its lines.
+export async function removeSavedInvoiceAction(id: unknown): Promise<{ ok: true; number: string | null } | { error: string }> {
+  return attempt<{ ok: true; number: string | null } | { error: string }>(
+    "remove a saved rebate invoice",
+    async () => removeSavedInvoice(await requireCapability("sales.log"), id),
+    { error: "Couldn't remove the invoice. Check the connection and try again." },
   );
 }

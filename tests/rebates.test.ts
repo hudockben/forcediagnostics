@@ -9,18 +9,23 @@
 // (src/lib/rebate-export.ts): the NUSR sheet with the rebate columns in AO
 // to AQ and the app's moved along, and the Rebates sheet; and the lookups
 // and download on the server (src/lib/rebates.ts), kept to the shop and to
-// those who can open the NUSR. Made-up invoices, customers and VINs only.
+// those who can open the NUSR; and Saved rebates: saving an invoice (again
+// only in place of the one saved, when that's meant), its filters, the
+// saved lines they find and what those come to, opening one again,
+// removing one, the Activity log, and their download. Made-up invoices,
+// customers and VINs only.
 // The database tests need DATABASE_URL pointing at a disposable Postgres
 // database; run with `npm test`, which migrates it first.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
 
-import { eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 
-import { systemDb } from "../src/db";
-import { shops, users } from "../src/db/schema";
-import { logSale } from "../src/lib/nusr";
+import { systemDb, withShop } from "../src/db";
+import { auditLog, rebateInvoices, rebateLines, shops, users } from "../src/db/schema";
+import { describeAuditEntry } from "../src/lib/audit-log-rules";
+import { logSale, removeSale } from "../src/lib/nusr";
 import { nusrWorkbook } from "../src/lib/nusr-export";
 import { blankSaleValues, monthlyComparison, withFigures, type SaleFields, type SaleValues } from "../src/lib/nusr-rules";
 import { invoicesTitle, lineRebate, rebateWorkbook, rebatesBySale, type RebateInvoice, type RebateSale } from "../src/lib/rebate-export";
@@ -33,14 +38,18 @@ import {
   matchItems,
   nameLikeness,
   pageLines,
+  parseRebateFilters,
   programColumn,
   readAmount,
   readInvoice,
   readInvoiceDate,
   rebateCells,
+  rebateFiltersSearch,
+  rebateFiltersTitle,
   rebatesFileName,
   reconcileAmounts,
   saleNotes,
+  savedRebatesFileName,
   settleAmounts,
   vinDistance,
   vinGuess,
@@ -50,7 +59,18 @@ import {
   type InvoiceWord,
   type MatchUnit,
 } from "../src/lib/rebate-rules";
-import { findRebateSales, rebateDownload, searchRebateSales } from "../src/lib/rebates";
+import {
+  findRebateSales,
+  listSavedInvoices,
+  listSavedRebates,
+  openSavedInvoice,
+  rebateDownload,
+  removeSavedInvoice,
+  saveRebateInvoice,
+  savedInvoiceYears,
+  savedRebatesDownload,
+  searchRebateSales,
+} from "../src/lib/rebates";
 import type { CurrentUser } from "../src/lib/session";
 import { vinCheckDigit } from "../src/lib/vin";
 import { readXlsx } from "../src/lib/xlsx";
@@ -541,6 +561,29 @@ describe("notes, columns and AO, AP and AQ", () => {
     assert.deepEqual(rebateCells([{ column: "addlHoldback", cents: 66248 }], 0).holdback, null);
   });
 
+  test("Saved rebates' filters, from the address and back", () => {
+    assert.deepEqual(parseRebateFilters({}, 2026), { year: 2026, month: null, column: null, salesperson: null, category: null, status: null, query: "" });
+    const picked = parseRebateFilters(
+      { year: "2025", month: "12", column: "retailRewards", salesperson: "  Lee   Brandvold ", category: "UTV", status: "missing", q: " quill  feather " },
+      2026,
+    );
+    assert.deepEqual(picked, { year: 2025, month: 12, column: "retailRewards", salesperson: "Lee Brandvold", category: "UTV", status: "missing", query: "quill feather" });
+    assert.deepEqual(parseRebateFilters(rebateFiltersSearch(picked, 2026).slice(1).split("&").reduce<Record<string, string>>((all, pair) => {
+      const [key, value] = pair.split("=").map((part) => decodeURIComponent(part.replace(/\+/g, " ")));
+      return { ...all, [key]: value };
+    }, {}), 2026), picked);
+    // A month only within a year; this year unless another (or every one) is asked for.
+    assert.deepEqual(parseRebateFilters({ year: "all", month: "3" }, 2026), { ...parseRebateFilters({}, 2026), year: null });
+    assert.deepEqual(parseRebateFilters({ year: "1999", month: "13", column: "rebate", status: "maybe" }, 2026), parseRebateFilters({}, 2026));
+    assert.equal(rebateFiltersSearch(parseRebateFilters({}, 2026), 2026), "");
+    assert.equal(rebateFiltersSearch({ ...parseRebateFilters({}, 2026), year: null }, 2026, { page: 2, open: null }), "?year=all&page=2");
+    assert.equal(rebateFiltersTitle(parseRebateFilters({}, 2026)), "2026");
+    assert.equal(rebateFiltersTitle({ ...picked, year: 2026, month: 10, column: "addlHoldback", category: null, status: null, query: "" }), "October 2026 · Add'l holdback (AQ) · Lee Brandvold");
+    assert.equal(rebateFiltersTitle({ ...picked, year: null }), "All years · Retail rewards (AP) · Lee Brandvold · UTV · Not found · “quill feather”");
+    assert.equal(savedRebatesFileName("October 2026 · “dana”", "2026-11-06"), "Rebates October 2026 · “dana” 2026-11-06.xlsx");
+    assert.equal(savedRebatesFileName("2026 · A/B: C?", "2026-11-06"), "Rebates 2026 · A-B- C- 2026-11-06.xlsx");
+  });
+
   test("the download's name", () => {
     assert.equal(rebatesFileName(["314886"], "2026-11-06"), "Rebates 314886 2026-11-06.xlsx");
     assert.equal(rebatesFileName(["1", "2", "3", "4", "1"], "2026-11-06"), "Rebates 1 2 3 and 1 more 2026-11-06.xlsx");
@@ -704,7 +747,7 @@ describe("the workbook", () => {
 
 // --- On the server --------------------------------------------------------------
 
-describe("looking units up, and the download", () => {
+describe("on the server: looking units up, the download, and Saved rebates", () => {
   const suffix = randomUUID().slice(0, 6).replace(/-/g, "");
   const shopIds: string[] = [];
   let manager: CurrentUser;
@@ -841,5 +884,299 @@ describe("looking units up, and the download", () => {
     for (const bad of [null, {}, { invoices: [] }, { invoices: [{ column: "rebate", lines: [] }] }, { invoices: [{ column: "addlHoldback", lines: [{ line: "1", vinRead: RANGER }] }] }]) {
       assert.ok("error" in (await rebateDownload(manager, bad)), JSON.stringify(bad));
     }
+  });
+
+  // --- Saved rebates ---
+
+  // An invoice as the page sends it to save.
+  type SentLine = { vinRead: string; names: string[]; amount: number | null; saleId: string | null; how?: string | null };
+  const sent = (invoice: { number: string | null; date: string | null; column: string; total?: number | null }, lines: SentLine[]) => ({
+    fileName: `${invoice.number ?? "scan"}.pdf`,
+    type: "Rebate",
+    total: invoice.total === undefined ? -lines.reduce((sum, line) => sum + (line.amount ?? 0), 0) : invoice.total,
+    pages: 2,
+    ...invoice,
+    lines: lines.map((line, index) => ({
+      line: index + 1,
+      page: 1,
+      part: "012",
+      modelCode: null,
+      programs: ["US RGR NSR 2H 2026 R"],
+      dates: ["PUR:08/21/26"],
+      purchased: ["2026-08-21"],
+      other: [],
+      unitPrice: 0,
+      amountText: line.amount === null ? "" : (line.amount / 100).toFixed(2),
+      amountSure: true,
+      how: line.saleId ? "vin" : null,
+      ...line,
+    })),
+  });
+  const saved: Record<string, string> = {};
+  const invoiceA = () =>
+    sent({ number: "314886", date: "2026-10-29", column: "addlHoldback" }, [
+      { vinRead: RANGER, names: ["DANA QUILLFEATHER"], amount: 79622, saleId: ids.ranger },
+      { vinRead: whole("3NESEA50_TN321384"), names: ["CLYMER VOLUNTEER FIRE COMP"], amount: 22747, saleId: ids.fire, how: "name" },
+      // Another shop's sale of it: saved as not found.
+      { vinRead: RANGER_2, names: ["SOMEONE ELSE"], amount: 10000, saleId: ids.elsewhere },
+    ]);
+  const entriesOf = (id: string) =>
+    systemDb.select().from(auditLog).where(and(eq(auditLog.targetType, "rebate_invoice"), eq(auditLog.targetId, id))).orderBy(asc(auditLog.createdAt), asc(auditLog.id));
+
+  test("saving an invoice: its lines and sales kept; its number again only in place of the one saved, when asked; each in the Activity log", async () => {
+    const first = await saveRebateInvoice(manager, { invoice: invoiceA() });
+    assert.ok("saved" in first, JSON.stringify(first));
+    assert.equal(first.saved.replaced, false);
+    saved.a = first.saved.id;
+
+    const [row] = await systemDb.select().from(rebateInvoices).where(eq(rebateInvoices.id, saved.a));
+    assert.deepEqual(
+      [row.shopId, row.number, row.invoiceType, row.invoiceDate, row.totalCents, row.rebateColumn, row.fileName, row.pages, row.savedByUserId],
+      [manager.shop.id, "314886", "Rebate", "2026-10-29", 112369, "addlHoldback", "314886.pdf", 2, manager.id],
+    );
+    const lines = await systemDb.select().from(rebateLines).where(eq(rebateLines.invoiceId, saved.a)).orderBy(asc(rebateLines.line));
+    assert.deepEqual(
+      lines.map((line) => [line.line, line.vinRead, line.names, line.amountCents, line.amountText, line.saleId, line.matchHow, line.purchased]),
+      [
+        [1, RANGER, ["DANA QUILLFEATHER"], 79622, "796.22", ids.ranger, "vin", ["2026-08-21"]],
+        [2, whole("3NESEA50_TN321384"), ["CLYMER VOLUNTEER FIRE COMP"], 22747, "227.47", ids.fire, "name", ["2026-08-21"]],
+        [3, RANGER_2, ["SOMEONE ELSE"], 10000, "100.00", null, null, ["2026-08-21"]],
+      ],
+    );
+
+    // The same number again: said so, and saved only when asked.
+    const again = await saveRebateInvoice(manager, { invoice: invoiceA() });
+    assert.ok("exists" in again, JSON.stringify(again));
+    assert.deepEqual({ ...again.exists, savedAt: typeof again.exists.savedAt }, { id: saved.a, savedAt: "string", savedBy: "Morgan", lines: 3 });
+    const changed = invoiceA();
+    changed.lines[0].amount = 79600;
+    changed.lines = changed.lines.slice(0, 2);
+    const replaced = await saveRebateInvoice(manager, { invoice: changed, replace: true });
+    assert.deepEqual(replaced, { saved: { id: saved.a, replaced: true } });
+    const after = await systemDb.select().from(rebateLines).where(eq(rebateLines.invoiceId, saved.a)).orderBy(asc(rebateLines.line));
+    assert.deepEqual(
+      after.map((line) => [line.line, line.amountCents]),
+      [
+        [1, 79600],
+        [2, 22747],
+      ],
+    );
+    // Opened on the page and saved again: in its place, by its id.
+    assert.deepEqual(await saveRebateInvoice(manager, { invoice: invoiceA(), savedId: saved.a, replace: true }), { saved: { id: saved.a, replaced: true } });
+    assert.equal((await systemDb.select().from(rebateLines).where(eq(rebateLines.invoiceId, saved.a))).length, 3);
+
+    const entries = await entriesOf(saved.a);
+    assert.deepEqual(
+      entries.map((entry) => entry.action),
+      ["rebate_invoice.saved", "rebate_invoice.replaced", "rebate_invoice.replaced"],
+    );
+    const said = describeAuditEntry(entries[0]);
+    assert.equal(said.summary, "Saved rebate invoice 314886");
+    assert.deepEqual(
+      Object.fromEntries(said.facts.map((fact) => [fact.label, fact.value])),
+      { "Invoice date": "10/29/2026", Lines: "3", "Found in the NUSR": "2", Amounts: "$1,123.69", "Amounts in": "Add'l holdback (AQ)", File: "314886.pdf" },
+    );
+    assert.equal(describeAuditEntry(entries[1]).summary, "Saved rebate invoice 314886 again, in place of the one saved before");
+  });
+
+  test("an invoice with no number read is saved as a new one, unless it's the one opened", async () => {
+    const scan = () => sent({ number: null, date: null, column: "holdback" }, [{ vinRead: whole("4XASEA50_TA999999"), names: ["NOBODY ON FILE"], amount: 1500, saleId: null }]);
+    const first = await saveRebateInvoice(manager, { invoice: scan() });
+    const second = await saveRebateInvoice(manager, { invoice: scan() });
+    assert.ok("saved" in first && "saved" in second);
+    assert.notEqual(first.saved.id, second.saved.id);
+    assert.deepEqual(await saveRebateInvoice(manager, { invoice: scan(), savedId: first.saved.id, replace: true }), { saved: { id: first.saved.id, replaced: true } });
+    assert.ok("ok" in (await removeSavedInvoice(manager, second.saved.id)));
+    saved.scan = first.saved.id;
+    // It counts on the day it was first saved, as no date was read.
+    await systemDb.update(rebateInvoices).set({ createdAt: new Date("2026-06-15T16:00:00Z") }).where(eq(rebateInvoices.id, saved.scan));
+
+    const older = await saveRebateInvoice(manager, {
+      invoice: sent({ number: "298001", date: "2025-12-31", column: "retailRewards" }, [{ vinRead: RZR, names: ["IDA PRUITT"], amount: 50000, saleId: ids.older }]),
+    });
+    assert.ok("saved" in older);
+    saved.older = older.saved.id;
+  });
+
+  test("Saved rebates by the filters: the year and month of the invoice's day, its column, the sale's salesman and category, found or not, and a search", async () => {
+    const lines = async (params: Record<string, string>, page?: { page: number; perPage: number }) => {
+      const result = await listSavedRebates(manager, parseRebateFilters(params, 2026), page);
+      assert.ok(!("error" in result), JSON.stringify(result));
+      return result;
+    };
+    const labels = (result: Awaited<ReturnType<typeof lines>>) => result.items.map((line) => `${line.invoiceNumber ?? "scan"}/${line.line}`);
+
+    // This year's, the newest invoice first, each in its order.
+    const thisYear = await lines({});
+    assert.deepEqual(labels(thisYear), ["314886/1", "314886/2", "314886/3", "scan/1"]);
+    assert.deepEqual(thisYear.totals, {
+      lines: 4,
+      found: 2,
+      amounts: { holdback: 1500, retailRewards: 0, addlHoldback: 112369 },
+      bySalesman: [
+        { label: "Lee Brandvold", lines: 1, amount: 79622 },
+        { label: "No salesman", lines: 1, amount: 22747 },
+        { label: "Not found", lines: 2, amount: 11500 },
+      ],
+      byCategory: [
+        { label: "UTV", lines: 1, amount: 79622 },
+        { label: "ATV", lines: 1, amount: 22747 },
+        { label: "Not found", lines: 2, amount: 11500 },
+      ],
+    });
+    const dana = thisYear.items[0];
+    assert.deepEqual(
+      [dana.invoiceDate, dana.column, dana.vinRead, dana.amount, dana.sale?.customerName, dana.sale?.salesperson],
+      ["2026-10-29", "addlHoldback", RANGER, 79622, "Dana Quillfeather", "Lee Brandvold"],
+    );
+    assert.equal(thisYear.items[2].sale, null, "another shop's sale isn't shown");
+
+    assert.deepEqual(labels(await lines({ year: "all" })), ["314886/1", "314886/2", "314886/3", "scan/1", "298001/1"]);
+    assert.deepEqual(labels(await lines({ year: "2025" })), ["298001/1"]);
+    assert.deepEqual(labels(await lines({ month: "10" })), ["314886/1", "314886/2", "314886/3"]);
+    assert.deepEqual(labels(await lines({ month: "6" })), ["scan/1"]);
+    assert.deepEqual(labels(await lines({ column: "holdback" })), ["scan/1"]);
+    assert.deepEqual(labels(await lines({ salesperson: "lee brandvold" })), ["314886/1"]);
+    assert.deepEqual(labels(await lines({ category: "atv" })), ["314886/2"]);
+    assert.deepEqual(labels(await lines({ status: "missing" })), ["314886/3", "scan/1"]);
+    assert.deepEqual(labels(await lines({ status: "found", year: "all" })), ["314886/1", "314886/2", "298001/1"]);
+    assert.deepEqual(labels(await lines({ q: "quillfeather" })), ["314886/1"]);
+    assert.deepEqual(labels(await lines({ q: "clymer fire" })), ["314886/2"]);
+    assert.deepEqual(labels(await lines({ q: "314886" })), ["314886/1", "314886/2", "314886/3"]);
+    assert.deepEqual(labels(await lines({ q: "pruitt", year: "all" })), ["298001/1"]);
+
+    const paged = await lines({}, { page: 2, perPage: 3 });
+    assert.deepEqual([labels(paged), paged.page, paged.pages, paged.from, paged.to, paged.total, paged.totals.lines], [["scan/1"], 2, 2, 4, 4, 4, 4]);
+
+    // The invoices, with what the filters find of each.
+    const invoices = await listSavedInvoices(manager, parseRebateFilters({}, 2026));
+    assert.ok(!("error" in invoices));
+    assert.deepEqual(
+      invoices.map((invoice) => [invoice.number, invoice.date, invoice.day, invoice.lines, invoice.found, invoice.amount, invoice.shown, invoice.shownAmount, invoice.total, invoice.savedBy]),
+      [
+        ["314886", "2026-10-29", "2026-10-29", 3, 2, 112369, 3, 112369, 112369, "Morgan"],
+        [null, null, "2026-06-15", 1, 0, 1500, 1, 1500, 1500, "Morgan"],
+      ],
+    );
+    const lee = await listSavedInvoices(manager, parseRebateFilters({ salesperson: "Lee Brandvold", year: "all" }, 2026));
+    assert.ok(!("error" in lee));
+    assert.deepEqual(
+      lee.map((invoice) => [invoice.number, invoice.lines, invoice.shown, invoice.shownAmount]),
+      [["314886", 3, 1, 79622]],
+    );
+    assert.deepEqual(await savedInvoiceYears(manager), [2026, 2025]);
+
+    // Another shop sees none of them.
+    const elsewhere = await listSavedRebates(other, parseRebateFilters({ year: "all" }, 2026));
+    assert.ok(!("error" in elsewhere));
+    assert.equal(elsewhere.total, 0);
+    assert.deepEqual(await listSavedInvoices(other, parseRebateFilters({ year: "all" }, 2026)), []);
+    assert.deepEqual(await savedInvoiceYears(other), []);
+  });
+
+  test("opening a saved invoice: every line as saved, with the sales they were found as", async () => {
+    const opened = await openSavedInvoice(manager, saved.a);
+    assert.ok(!("error" in opened), JSON.stringify(opened));
+    assert.deepEqual(opened.invoice, { number: "314886", type: "Rebate", date: "2026-10-29", total: 112369, column: "addlHoldback", fileName: "314886.pdf", pages: 2 });
+    assert.deepEqual(
+      opened.lines.map((line) => [line.line, line.page, line.part, line.vinRead, line.programs, line.dates, line.purchased, line.names, line.amount, line.amountText, line.amountSure, line.saleId, line.how]),
+      [
+        [1, 1, "012", RANGER, ["US RGR NSR 2H 2026 R"], ["PUR:08/21/26"], ["2026-08-21"], ["DANA QUILLFEATHER"], 79622, "796.22", true, ids.ranger, "vin"],
+        [2, 1, "012", whole("3NESEA50_TN321384"), ["US RGR NSR 2H 2026 R"], ["PUR:08/21/26"], ["2026-08-21"], ["CLYMER VOLUNTEER FIRE COMP"], 22747, "227.47", true, ids.fire, "name"],
+        [3, 1, "012", RANGER_2, ["US RGR NSR 2H 2026 R"], ["PUR:08/21/26"], ["2026-08-21"], ["SOMEONE ELSE"], 10000, "100.00", true, null, null],
+      ],
+    );
+    assert.deepEqual(opened.sales.map((sale) => sale.customerName).sort(), ["Clymer FD", "Dana Quillfeather"]);
+    for (const [actor, id] of [
+      [other, saved.a],
+      [manager, "not-an-id"],
+      [manager, randomUUID()],
+    ] as const) {
+      assert.deepEqual(await openSavedInvoice(actor, id), { error: "That invoice isn't saved in this shop's Rebates." });
+    }
+  });
+
+  test("the saved download: the rebates the filters find, in the NUSR sheet's AO to AQ, and the Rebates sheet", async () => {
+    const result = await savedRebatesDownload(manager, parseRebateFilters({ year: "all" }, 2026), new Date("2026-11-06T20:00:00Z"));
+    assert.ok(!("error" in result), JSON.stringify(result));
+    assert.equal(result.fileName, "Rebates All years 2026-11-06.xlsx");
+    const sheets = await readXlsx(result.bytes);
+    assert.deepEqual(
+      sheets.map((sheet) => sheet.name),
+      ["NUSR", "Rebates"],
+    );
+    const nusr = sheets[0].rows;
+    const column = (name: string) => nusr[0].indexOf(name);
+    const customer = (name: string) => nusr.find((row) => row[column("Customer Name")] === name)!;
+    assert.equal(customer("Dana Quillfeather")[column("Add'l Hlbk")], "796.22");
+    assert.equal(customer("Ida Pruitt")[column("Retail Rwds")], "500");
+    const october = await savedRebatesDownload(manager, parseRebateFilters({ month: "10", salesperson: "Lee Brandvold" }, 2026), new Date("2026-11-06T20:00:00Z"));
+    assert.ok(!("error" in october));
+    assert.equal(october.fileName, "Rebates October 2026 · Lee Brandvold 2026-11-06.xlsx");
+    const rows = (await readXlsx(october.bytes))[0].rows;
+    const pruitt = rows.find((row) => row[column("Customer Name")] === "Ida Pruitt");
+    assert.ok(!pruitt?.[column("Retail Rwds")], "only the rebates the filters find");
+  });
+
+  test("removing a saved invoice; a sale with rebates saved against it stays in the NUSR until then", async () => {
+    const spare = await sell(manager, { customerName: "Nell Ashgrove", vin: SPORTSMAN_2, unitModel: "Spm 570", category: "ATV" });
+    const result = await saveRebateInvoice(manager, {
+      invoice: sent({ number: "400001", date: "2026-11-02", column: "addlHoldback" }, [{ vinRead: SPORTSMAN_2, names: ["NELL ASHGROVE"], amount: 12000, saleId: spare }]),
+    });
+    assert.ok("saved" in result);
+    const blocked = await removeSale(manager, spare);
+    assert.ok("error" in blocked);
+    assert.match(blocked.error, /Rebates are saved against this sale \(invoice 400001 on the Rebates tab\)/);
+
+    assert.deepEqual(await removeSavedInvoice(other, result.saved.id), { error: "That invoice isn't saved in this shop's Rebates." });
+    assert.deepEqual(await removeSavedInvoice(manager, result.saved.id), { ok: true, number: "400001" });
+    assert.equal((await systemDb.select().from(rebateLines).where(eq(rebateLines.invoiceId, result.saved.id))).length, 0);
+    const entries = await entriesOf(result.saved.id);
+    assert.deepEqual(
+      entries.map((entry) => entry.action),
+      ["rebate_invoice.saved", "rebate_invoice.removed"],
+    );
+    assert.equal(describeAuditEntry(entries[1]).summary, "Removed rebate invoice 400001 from Rebates");
+    assert.deepEqual(await removeSavedInvoice(manager, result.saved.id), { error: "That invoice isn't saved in this shop's Rebates." });
+    assert.ok("ok" in (await removeSale(manager, spare)));
+  });
+
+  test("the database keeps a shop's saved rebates its own, and each line to a sale of its own shop", async () => {
+    const seen = await withShop(other.shop.id, async (tx) => [
+      ...(await tx.select({ id: rebateInvoices.id }).from(rebateInvoices).where(eq(rebateInvoices.id, saved.a))),
+      ...(await tx.select({ id: rebateLines.id }).from(rebateLines).where(eq(rebateLines.invoiceId, saved.a))),
+    ]);
+    assert.deepEqual(seen, []);
+    await assert.rejects(
+      withShop(other.shop.id, (tx) => tx.insert(rebateInvoices).values({ shopId: manager.shop.id, rebateColumn: "holdback", fileName: "x.pdf", pages: 1 })),
+      "another shop's invoice",
+    );
+    // Even as the owner, past row-level security: a line can't be for
+    // another shop's sale.
+    await assert.rejects(
+      systemDb.insert(rebateLines).values({ shopId: manager.shop.id, invoiceId: saved.a, line: 99, page: 1, vinRead: RANGER, saleId: ids.elsewhere }),
+      "another shop's sale",
+    );
+  });
+
+  test("saving and Saved rebates only for those who can open the NUSR, signed in with a password; an invoice that isn't one isn't saved", async () => {
+    const filters = parseRebateFilters({ year: "all" }, 2026);
+    for (const actor of [writer, { ...manager, bay: { deviceId: "d", deviceName: "Bay 1", sessionId: "s" } }]) {
+      assert.ok("error" in (await saveRebateInvoice(actor, { invoice: invoiceA(), replace: true })));
+      assert.ok("error" in (await listSavedInvoices(actor, filters)));
+      assert.ok("error" in (await listSavedRebates(actor, filters)));
+      assert.ok("error" in (await openSavedInvoice(actor, saved.a)));
+      assert.ok("error" in (await removeSavedInvoice(actor, saved.a)));
+      assert.ok("error" in (await savedRebatesDownload(actor, filters)));
+      assert.deepEqual(await savedInvoiceYears(actor), []);
+    }
+    for (const bad of [null, {}, { invoice: null }, { invoice: { column: "rebate", lines: [] } }, { invoice: { ...invoiceA(), lines: [{ line: 1, vinRead: "" }] } }]) {
+      assert.ok("error" in (await saveRebateInvoice(manager, bad)), JSON.stringify(bad));
+    }
+    const same = invoiceA();
+    same.lines[1].line = 1;
+    assert.ok("error" in (await saveRebateInvoice(manager, { invoice: same, replace: true })), "two lines in one place");
+    // Still as it was.
+    assert.equal((await systemDb.select().from(rebateLines).where(eq(rebateLines.invoiceId, saved.a))).length, 3);
   });
 });
