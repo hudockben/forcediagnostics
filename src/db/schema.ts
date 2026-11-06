@@ -38,6 +38,7 @@ import {
 } from "../lib/diagnose-rules";
 import { PAGE_FACTS_STATUSES, type PageFacts, type PageFactsStatus } from "../lib/manual-facts-rules";
 import { UNIT_CONDITIONS, UNIT_TYPES, type UnitCondition, type UnitType } from "../lib/nusr-rules";
+import { MATCH_HOWS, REBATE_COLUMNS, type MatchHow, type RebateColumn } from "../lib/rebate-rules";
 import { PLATE_CLASSES, type PlateClass } from "../lib/sticker-log-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
@@ -1006,6 +1007,8 @@ export const unitSales = pgTable(
       columns: [t.customerId, t.shopId],
       foreignColumns: [customers.id, customers.shopId],
     }),
+    // For the rebates saved against a sale to be its own shop's.
+    unique("unit_sales_id_shop").on(t.id, t.shopId),
     index("unit_sales_shop_sold").on(t.shopId, t.soldOn),
     index("unit_sales_customer").on(t.customerId),
     // A unit is sold once a day: logging the same VIN for the same day
@@ -1025,6 +1028,116 @@ export const unitSales = pgTable(
     // drizzle/0039_unit_sales_grants.sql; import_id and import_row, added
     // since, aren't among them.
     pgPolicy("unit_sales_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// Rebates (the Rebates tab, src/lib/rebates.ts): Polaris's rebate invoices
+// as read and checked on the tab and saved, each line with the NUSR sale it
+// was found as, so the shop's rebates are kept and can be looked back
+// through. An invoice number is saved once per shop: saving it again
+// replaces it.
+export const rebateInvoices = pgTable(
+  "rebate_invoices",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    // As printed ("314886", "Rebate"), or null when it wasn't read.
+    number: text("number"),
+    invoiceType: text("invoice_type"),
+    invoiceDate: date("invoice_date"),
+    // Its total as printed, as a credit (a positive number), when read.
+    totalCents: integer("total_cents"),
+    // Which of the NUSR sheet's AO, AP and AQ its amounts go in.
+    rebateColumn: text("rebate_column").notNull().$type<RebateColumn>(),
+    fileName: text("file_name").notNull(),
+    pages: integer("pages").notNull(),
+    savedByUserId: text("saved_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("rebate_invoices_id_shop").on(t.id, t.shopId),
+    uniqueIndex("rebate_invoices_shop_number").on(t.shopId, t.number).where(sql`${t.number} is not null`),
+    index("rebate_invoices_shop_date").on(t.shopId, t.invoiceDate),
+    check("rebate_invoices_column", sql`${t.rebateColumn} in (${sql.raw(REBATE_COLUMNS.map((c) => `'${c}'`).join(", "))})`),
+    check("rebate_invoices_number", sql`length(${t.number}) between 1 and 20`),
+    check("rebate_invoices_file_name", sql`length(${t.fileName}) between 1 and 200`),
+    check("rebate_invoices_pages", sql`${t.pages} between 0 and 1000`),
+    // Which columns can change is set by the grant in
+    // drizzle/0044_rebates_grants.sql.
+    pgPolicy("rebate_invoices_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// A saved invoice's lines: a unit each, as read from it (its Description,
+// Unit Price and Amount) and checked on the tab, and the sale it was found
+// as. A sale with rebates saved against it can't be removed from the NUSR
+// (its foreign key sees to that, and removeSale says so).
+export const rebateLines = pgTable(
+  "rebate_lines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    invoiceId: uuid("invoice_id").notNull(),
+    // Its place on the invoice, from 1, and the page its VIN is on.
+    line: integer("line").notNull(),
+    page: integer("page").notNull(),
+    part: text("part"),
+    // The VIN as read (a character OCR couldn't make out is "?"), and the
+    // model code after it.
+    vinRead: text("vin_read").notNull(),
+    modelCode: text("model_code"),
+    // The lines under it: the programs, the purchase dates as printed and
+    // read, the names, and anything else.
+    programs: text("programs").array().notNull().default(sql`'{}'::text[]`),
+    dates: text("dates").array().notNull().default(sql`'{}'::text[]`),
+    purchased: text("purchased").array().notNull().default(sql`'{}'::text[]`),
+    names: text("names").array().notNull().default(sql`'{}'::text[]`),
+    other: text("other").array().notNull().default(sql`'{}'::text[]`),
+    unitPriceCents: integer("unit_price_cents"),
+    // The credit as checked on the tab (below nothing takes a rebate back),
+    // what was read for it, and whether it read cleanly.
+    amountCents: integer("amount_cents"),
+    amountText: text("amount_text").notNull().default(""),
+    amountSure: boolean("amount_sure").notNull().default(true),
+    // The NUSR sale it was found as, and how, or none.
+    saleId: uuid("sale_id"),
+    matchHow: text("match_how").$type<MatchHow>(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // A line goes with its invoice, of its own shop, and is for a sale of
+    // its own shop.
+    foreignKey({
+      name: "rebate_lines_invoice_shop_fk",
+      columns: [t.invoiceId, t.shopId],
+      foreignColumns: [rebateInvoices.id, rebateInvoices.shopId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "rebate_lines_sale_shop_fk",
+      columns: [t.saleId, t.shopId],
+      foreignColumns: [unitSales.id, unitSales.shopId],
+    }),
+    uniqueIndex("rebate_lines_invoice_line").on(t.invoiceId, t.line),
+    index("rebate_lines_sale").on(t.saleId),
+    check("rebate_lines_line", sql`${t.line} between 1 and 100000 and ${t.page} between 0 and 1000`),
+    check("rebate_lines_vin_read", sql`length(${t.vinRead}) between 1 and 30`),
+    check("rebate_lines_match_how", sql`${t.matchHow} in (${sql.raw(MATCH_HOWS.map((how) => `'${how}'`).join(", "))})`),
+    pgPolicy("rebate_lines_own_shop", {
       for: "all",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
