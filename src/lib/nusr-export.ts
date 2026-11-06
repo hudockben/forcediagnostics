@@ -26,6 +26,7 @@ import {
   type SaleTotals,
 } from "@/lib/nusr-rules";
 import { cutText } from "@/lib/manual-rules";
+import { REBATE_COLUMNS, REBATE_COLUMN_HEADINGS, type RebateCells, type RebateColumn } from "@/lib/rebate-rules";
 import type { Cell, CellStyle, CellValue, Column, Sheet } from "@/lib/xlsx-write";
 
 // The shop's own time zone, for when the download was made.
@@ -54,12 +55,14 @@ export type NusrWorkbookOptions = {
   timeZone?: string;
 };
 
+// The oldest first, as the spreadsheet reads; a day's sales stay in the
+// order they came.
+const oldestFirst = <T extends FiguredSale>(sales: readonly T[]) => [...sales].sort((a, b) => (a.soldOn < b.soldOn ? -1 : a.soldOn > b.soldOn ? 1 : 0));
+
 // The download's sheets, NUSR first, for writeXlsx.
 export function nusrWorkbook(sales: readonly FiguredSale[], options: NusrWorkbookOptions): Sheet[] {
   const timeZone = options.timeZone ?? SHOP_TIME_ZONE;
-  // The oldest first, as the spreadsheet reads; a day's sales stay in the
-  // order they came.
-  const ordered = [...sales].sort((a, b) => (a.soldOn < b.soldOn ? -1 : a.soldOn > b.soldOn ? 1 : 0));
+  const ordered = oldestFirst(sales);
   return [
     nusrSheet(ordered, options.title),
     summarySheet(ordered, options.title, options.generatedAt, timeZone),
@@ -74,11 +77,11 @@ const day = (iso: string | null) => (iso === null ? null : new Date(`${iso}T00:0
 // --- The NUSR sheet ------------------------------------------------------------
 
 type HeadStyle = "header" | "headerGreen" | "headerYellow";
+type SheetColumn = { heading: string; width: number; style?: CellStyle; head?: HeadStyle };
 
-// The NUSR sheet's columns, A to AQ: the spreadsheet's own (A left blank, as
-// it was), then the four the app keeps that it didn't have. The headings of
-// what's typed are the spreadsheet's, as SALE_LABELS has them.
-const NUSR_COLUMNS: { heading: string; width: number; style?: CellStyle; head?: HeadStyle }[] = [
+// The spreadsheet's own columns, A to AM (A left blank, as it was). The
+// headings of what's typed are the spreadsheet's, as SALE_LABELS has them.
+const SPREADSHEET_COLUMNS: SheetColumn[] = [
   { heading: "", width: 3 }, // A
   { heading: SALE_LABELS.soldOn, width: 11, style: "date" }, // B
   { heading: SALE_LABELS.salesperson, width: 15 }, // C
@@ -118,13 +121,54 @@ const NUSR_COLUMNS: { heading: string; width: number; style?: CellStyle; head?: 
   { heading: SALE_LABELS.paidOn, width: 11, style: "date" }, // AK
   { heading: SALE_LABELS.comsNumber, width: 12 }, // AL
   { heading: SALE_LABELS.category, width: 10 }, // AM
-  { heading: SALE_LABELS.unitType, width: 15 }, // AN
-  { heading: SALE_LABELS.holdbackRateBp, width: 12, style: "percent" }, // AO
-  { heading: SALE_LABELS.bonusRateBp, width: 9, style: "percent" }, // AP
-  { heading: SALE_LABELS.bonusAdjustment, width: 17, style: "money" }, // AQ
 ];
 
-const LAST_COLUMN = "AQ";
+// The four the app keeps that the spreadsheet didn't have: AN to AQ on
+// NUSR's download.
+const APP_COLUMNS: SheetColumn[] = [
+  { heading: SALE_LABELS.unitType, width: 15 },
+  { heading: SALE_LABELS.holdbackRateBp, width: 12, style: "percent" },
+  { heading: SALE_LABELS.bonusRateBp, width: 9, style: "percent" },
+  { heading: SALE_LABELS.bonusAdjustment, width: 17, style: "money" },
+];
+
+// The rebates the shop keeps in AO to AQ after a blank AN, as its own NUSR
+// sheet has them: on the Rebates tab's download, which moves the app's
+// four columns along to AR to AU.
+const REBATE_SHEET_COLUMNS: SheetColumn[] = [
+  { heading: "", width: 3 },
+  ...REBATE_COLUMNS.map((column): SheetColumn => ({ heading: REBATE_COLUMN_HEADINGS[column], width: 13, style: "money" })),
+];
+
+// Where a sheet's columns go: the spreadsheet's, the rebates' on the
+// Rebates tab's download, then the app's, whose letters the formulas use.
+type Layout = {
+  columns: SheetColumn[];
+  holdbackRate: string;
+  bonusRate: string;
+  bonusAdjustment: string;
+  rebates: Record<RebateColumn, string> | null;
+  last: string;
+};
+
+function layout(withRebates: boolean): Layout {
+  const columns = [...SPREADSHEET_COLUMNS, ...(withRebates ? REBATE_SHEET_COLUMNS : []), ...APP_COLUMNS];
+  const app = columns.length - APP_COLUMNS.length;
+  const rebate = (offset: number) => columnLetters(SPREADSHEET_COLUMNS.length + offset);
+  return {
+    columns,
+    holdbackRate: columnLetters(app + 1),
+    bonusRate: columnLetters(app + 2),
+    bonusAdjustment: columnLetters(app + 3),
+    rebates: withRebates ? { holdback: rebate(1), retailRewards: rebate(2), addlHoldback: rebate(3) } : null,
+    last: columnLetters(columns.length - 1),
+  };
+}
+
+// NUSR's own download: A to AQ.
+const PLAIN = layout(false);
+// The Rebates tab's: A to AU, the rebates in AO to AQ.
+const WITH_REBATES = layout(true);
 
 // A sale's row, r being its row number: what was typed, and each figure as
 // the spreadsheet's formula over the row's own cells, with the value
@@ -132,8 +176,9 @@ const LAST_COLUMN = "AQ";
 // blank, which a formula counts as nothing, as saleFigures does. TOTAL
 // PROFIT is kept to the cent, as saleFigures keeps it: amounts added up in
 // dollars can come out a hair under (502.999999999997 for 503), and a bonus
-// on it that's an exact half cent would then round the other way.
-function saleRow(sale: FiguredSale, r: number): Cell[] {
+// on it that's an exact half cent would then round the other way. With the
+// rebate columns, the sale's rebates go in them.
+function saleRow(sale: FiguredSale, r: number, at: Layout, rebates: RebateCells | null): Cell[] {
   const f = sale.figures;
   const figure = (formula: string, value: CellValue): Cell => ({ formula, value });
   return [
@@ -165,12 +210,12 @@ function saleRow(sale: FiguredSale, r: number): Cell[] {
     dollars(sale.escPrice),
     dollars(sale.escCost),
     dollars(sale.rewards),
-    figure(`IF(ISNUMBER(K${r}),ROUND(K${r}*AO${r},2),0)`, dollars(f.holdback)),
+    figure(`IF(ISNUMBER(K${r}),ROUND(K${r}*${at.holdbackRate}${r},2),0)`, dollars(f.holdback)),
     figure(`ROUND(Q${r}+V${r}+X${r}-Y${r}+Z${r}+AA${r},2)`, dollars(f.totalProfit)),
     figure(`IF(L${r}+S${r}+X${r}=0,"",AB${r}/(L${r}+S${r}+X${r}))`, f.profitPct ?? ""),
-    figure(`ROUND(AB${r}*AP${r},2)`, dollars(f.totalBonus)),
-    figure(`ROUND(AA${r}*AP${r},2)`, dollars(f.holdbackBonus)),
-    figure(`AD${r}-AE${r}+AQ${r}`, dollars(f.salesBonus)),
+    figure(`ROUND(AB${r}*${at.bonusRate}${r},2)`, dollars(f.totalBonus)),
+    figure(`ROUND(AA${r}*${at.bonusRate}${r},2)`, dollars(f.holdbackBonus)),
+    figure(`AD${r}-AE${r}+${at.bonusAdjustment}${r}`, dollars(f.salesBonus)),
     sale.financeCompany,
     dollars(sale.amountFinanced),
     dollars(sale.downPayment),
@@ -178,6 +223,7 @@ function saleRow(sale: FiguredSale, r: number): Cell[] {
     day(sale.paidOn),
     sale.comsNumber,
     sale.category,
+    ...(at.rebates ? [null, ...REBATE_COLUMNS.map((column) => dollars(rebates?.[column] ?? null))] : []),
     UNIT_TYPE_LABELS[sale.unitType],
     sale.holdbackRateBp / 10_000,
     sale.bonusRateBp / 10_000,
@@ -187,7 +233,8 @@ function saleRow(sale: FiguredSale, r: number): Cell[] {
 
 // The amounts the TOTAL row adds up, by column, and what each adds up to in
 // saleTotals; the ones marked average also have an AVG TOTAL, per unit, as
-// the spreadsheet's AVG rows had.
+// the spreadsheet's AVG rows had. Then the bonus adjustment, wherever the
+// layout has it.
 const SUMMED: { column: string; total: (totals: SaleTotals) => Cents; average?: true }[] = [
   { column: "K", total: (t) => t.amounts.msrp },
   { column: "L", total: (t) => t.amounts.salesPrice, average: true },
@@ -209,15 +256,16 @@ const SUMMED: { column: string; total: (totals: SaleTotals) => Cents; average?: 
   { column: "AF", total: (t) => t.figures.salesBonus, average: true },
   { column: "AH", total: (t) => t.amounts.amountFinanced },
   { column: "AI", total: (t) => t.amounts.downPayment },
-  { column: "AQ", total: (t) => t.amounts.bonusAdjustment },
 ];
 
 // Its place in a row: A is 0, Z 25, AA 26.
 const columnIndex = (letters: string) => [...letters].reduce((index, letter) => index * 26 + letter.charCodeAt(0) - 64, 0) - 1;
 
 // The NUSR sheet: the headings, a row per sale, then the totals, frozen,
-// filtered and set to print as the shop would want it on paper.
-function nusrSheet(sales: readonly FiguredSale[], title: string): Sheet {
+// filtered and set to print as the shop would want it on paper. With the
+// rebate columns, each sale's rebates (rebatesOf, by its place in `sales`)
+// and their TOTAL.
+function nusrSheet(sales: readonly FiguredSale[], title: string, at: Layout = PLAIN, rebatesOf: (index: number) => RebateCells | null = () => null): Sheet {
   const totals = saleTotals(sales);
   const lastSale = sales.length + 1;
   // A blank row under the sales, inside the TOTAL row's sums, so a row
@@ -227,12 +275,20 @@ function nusrSheet(sales: readonly FiguredSale[], title: string): Sheet {
   const t = spare + 1;
 
   // The line over the TOTAL row runs the width of the sheet.
-  const totalRow = NUSR_COLUMNS.map((_, i): Cell => (i === 0 ? null : { value: null, style: "total" }));
+  const totalRow = at.columns.map((_, i): Cell => (i === 0 ? null : { value: null, style: "total" }));
   const averageRow: Cell[] = [];
   totalRow[1] = { formula: `COUNTA(B2:B${spare})`, value: totals.units, style: "totalInteger" };
   totalRow[2] = { value: "TOTAL", style: "total" };
   averageRow[2] = { value: "AVG TOTAL", style: "bold" };
-  for (const { column, total, average } of SUMMED) {
+  const rebates = sales.map((_, i) => rebatesOf(i));
+  const summed = [
+    ...SUMMED,
+    { column: at.bonusAdjustment, total: (t: SaleTotals) => t.amounts.bonusAdjustment },
+    ...(at.rebates
+      ? REBATE_COLUMNS.map((rebate) => ({ column: at.rebates![rebate], total: () => rebates.reduce((sum, cells) => sum + (cells?.[rebate] ?? 0), 0) }))
+      : []),
+  ];
+  for (const { column, total, average } of summed as typeof SUMMED) {
     const cents = total(totals);
     totalRow[columnIndex(column)] = { formula: `SUM(${column}2:${column}${spare})`, value: cents / 100, style: "totalMoney" };
     if (average) {
@@ -245,23 +301,32 @@ function nusrSheet(sales: readonly FiguredSale[], title: string): Sheet {
 
   return {
     name: "NUSR",
-    columns: NUSR_COLUMNS.map(({ width, style }): Column => ({ width, style })),
+    columns: at.columns.map(({ width, style }): Column => ({ width, style })),
     rows: [
-      NUSR_COLUMNS.map(({ heading, head }) => (heading ? { value: heading, style: head ?? "header" } : null)),
-      ...sales.map((sale, i) => saleRow(sale, i + 2)),
+      at.columns.map(({ heading, head }) => (heading ? { value: heading, style: head ?? "header" } : null)),
+      ...sales.map((sale, i) => saleRow(sale, i + 2, at, rebates[i])),
       [],
       totalRow,
       averageRow,
     ],
     // The headings, and the date, salesman and customer, stay in view.
     freeze: { rows: 1, columns: 4 },
-    autoFilter: `B1:${LAST_COLUMN}${lastSale}`,
+    autoFilter: `B1:${at.last}${lastSale}`,
     landscape: true,
     fitToWidth: true,
     printTitles: 1,
     printGridlines: true,
     footer: `NUSR ${title}`,
   };
+}
+
+// The NUSR sheet with the shop's rebate columns, for the Rebates tab's
+// download: the sales the oldest first, each with what's in its AO
+// (Holdback), AP (Retail Rwds) and AQ (Add'l Hlbk), and their TOTAL; the
+// app's own columns follow, in AR to AU.
+export function nusrRebateSheet<T extends FiguredSale>(sales: readonly T[], title: string, rebatesOf: (sale: T) => RebateCells | null): Sheet {
+  const ordered = oldestFirst(sales);
+  return nusrSheet(ordered, title, WITH_REBATES, (index) => rebatesOf(ordered[index]));
 }
 
 // --- Summary --------------------------------------------------------------------

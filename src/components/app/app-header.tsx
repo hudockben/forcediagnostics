@@ -32,7 +32,13 @@ export async function AppHeader() {
   const tabs: NavItem[] = [
     { href: "/home", label: "Home", section: "/home" },
     ...(allows(user, "diagnostics.work") ? [{ href: "/diagnose", label: "Diagnose", section: "/diagnose" }] : []),
-    ...(allows(user, "sales.log") ? [{ href: "/nusr", label: "NUSR", section: "/nusr" }] : []),
+    ...(allows(user, "sales.log")
+      ? [
+          { href: "/nusr", label: "NUSR", section: "/nusr" },
+          // Polaris's rebate invoices, read and matched to the NUSR's sales.
+          { href: "/rebates", label: "Rebates", section: "/rebates" },
+        ]
+      : []),
     ...(allows(user, "repair_orders.intake")
       ? [
           { href: "/customers", label: "Customers", section: "/customers" },
