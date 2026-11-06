@@ -722,7 +722,7 @@ export type SaleNote = { check: boolean; text: string; correct: boolean };
 export function saleNotes(
   line: { vinRead: string; how: MatchHow; sharedWith: readonly (string | number)[] },
   sale: { vin: string | null; condition: "new" | "used"; holdback: Cents },
-  column: RebateColumn,
+  column: RebateColumn | null,
 ): SaleNote[] {
   const notes: SaleNote[] = [];
   const read = vinGuess(line.vinRead);
@@ -761,15 +761,43 @@ export const REBATE_COLUMN_LABELS: Record<RebateColumn, string> = {
 };
 export const isRebateColumn = (value: unknown): value is RebateColumn => (REBATE_COLUMNS as readonly unknown[]).includes(value);
 
-// Which column an invoice's amounts go in, by its programs: Polaris's NSR
-// programs ("US RGR NSR 2H 2026 R") pay the additional holdback; a retail
-// rewards program the retail rewards; a holdback statement the holdback.
-export function guessRebateColumn(programs: readonly string[]): RebateColumn {
-  const text = programs.join(" ").toUpperCase();
-  if (/\b(?:RETAIL\s*REW|REWARDS?|RWDS?|RR)\b/.test(text)) return "retailRewards";
+// The column one program's amounts go in, by Polaris's words for it, or
+// null when they don't say: an NSR program ("US RGR NSR 2H 2026 R") pays the
+// additional holdback (AQ); retail rewards go in AP; a holdback statement
+// in AO.
+export function programColumn(program: string): RebateColumn | null {
+  const text = program.toUpperCase().replace(/[^A-Z0-9']+/g, " ");
   if (/\bNSR\b|\bADD'?L\b|\bADDITIONAL\b/.test(text)) return "addlHoldback";
-  if (/\b(?:HOLDBACK|HLDBK|HLBK|HB)\b/.test(text)) return "holdback";
-  return "addlHoldback";
+  if (/\bRETAIL REW|\bRTL\b|\bRWDS?\b|\bREWARDS?\b|\bRR\b/.test(text)) return "retailRewards";
+  if (/\bHOLDBACK\b|\bHLDBK\b|\bHLBK\b|\bHB\b/.test(text)) return "holdback";
+  return null;
+}
+
+// What an invoice's programs say about where its amounts go: each line's
+// program (a line printed with two goes by the first that says), and the
+// column most of its lines say, so a program OCR misread on a line or two
+// doesn't decide it. Null when none say, or two say as often; `lines` has
+// how many lines said each, and `programs` the programs read, the most
+// printed first.
+export type InvoicePrograms = { column: RebateColumn | null; lines: Partial<Record<RebateColumn, number>>; programs: string[] };
+
+export function invoicePrograms(lines: readonly Pick<InvoiceLine, "programs">[]): InvoicePrograms {
+  const said: Partial<Record<RebateColumn, number>> = {};
+  const printed = new Map<string, number>();
+  for (const line of lines) {
+    let column: RebateColumn | null = null;
+    for (const program of line.programs) {
+      printed.set(program, (printed.get(program) ?? 0) + 1);
+      column ??= programColumn(program);
+    }
+    if (column) said[column] = (said[column] ?? 0) + 1;
+  }
+  const [first, second] = (Object.entries(said) as [RebateColumn, number][]).sort((a, b) => b[1] - a[1]);
+  return {
+    column: first && (!second || first[1] > second[1]) ? first[0] : null,
+    lines: said,
+    programs: [...printed.entries()].sort((a, b) => b[1] - a[1]).map(([program]) => program),
+  };
 }
 
 export type RebateCells = Record<RebateColumn, Cents | null>;

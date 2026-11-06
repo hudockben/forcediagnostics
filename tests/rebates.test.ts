@@ -28,11 +28,12 @@ import {
   NO_TABLE,
   NO_UNITS,
   amountsAddUp,
-  guessRebateColumn,
+  invoicePrograms,
   isWholeVin,
   matchItems,
   nameLikeness,
   pageLines,
+  programColumn,
   readAmount,
   readInvoice,
   readInvoiceDate,
@@ -498,11 +499,28 @@ describe("notes, columns and AO, AP and AQ", () => {
     assert.deepEqual(saleNotes({ vinRead: RANGER, how: "vin", sharedWith: [] }, { ...fine, holdback: 0 }, "retailRewards"), []);
   });
 
-  test("which column an invoice's amounts go in, by its programs", () => {
-    assert.equal(guessRebateColumn(["US RGR NSR 2H 2026 R"]), "addlHoldback");
-    assert.equal(guessRebateColumn(["US RGR RETAIL REWARDS JUL-AUG 2026"]), "retailRewards");
-    assert.equal(guessRebateColumn(["US ATV HOLDBACK Q3 2026"]), "holdback");
-    assert.equal(guessRebateColumn([]), "addlHoldback");
+  test("which column a program's amounts go in, by Polaris's words for it", () => {
+    assert.equal(programColumn("US RGR NSR 2H 2026 R"), "addlHoldback");
+    assert.equal(programColumn("US RGR RETAIL REWARDS JUL-AUG 2026"), "retailRewards");
+    assert.equal(programColumn("US RZR RTL RWDS 2026"), "retailRewards");
+    assert.equal(programColumn("US ATV HOLDBACK Q3 2026"), "holdback");
+    assert.equal(programColumn("US RGR N5R 2H 2026 R"), null);
+    assert.equal(programColumn("DEALERCERT ATV-26-051-A"), null);
+  });
+
+  test("an invoice's column: what most of its lines' programs say, a misread line or two outvoted", () => {
+    const lines = (...programs: string[][]) => programs.map((list) => ({ programs: list }));
+    const nsr = invoicePrograms(lines(["US RGR NSR 2H 2026 R"], ["US RGR NSR 2H 2026 R"], ["US RZR NSR 2H 2026 R", "US RGR NSR 2H 2026 R"], ["US RR NSR"], ["US RGR RR 2026"], []));
+    assert.deepEqual(nsr, {
+      column: "addlHoldback",
+      lines: { addlHoldback: 4, retailRewards: 1 },
+      programs: ["US RGR NSR 2H 2026 R", "US RZR NSR 2H 2026 R", "US RR NSR", "US RGR RR 2026"],
+    });
+    assert.equal(invoicePrograms(lines(["US RGR RETAIL REWARDS JUL-AUG 2026"], ["US ATV RETAIL REWARDS JUL-AUG 2026"])).column, "retailRewards");
+    // As many lines say one as the other, or none say: it's for someone to pick.
+    assert.equal(invoicePrograms(lines(["US RGR NSR 2H 2026 R"], ["US RGR RETAIL REWARDS 2026"])).column, null);
+    assert.deepEqual(invoicePrograms(lines(["US RGR SPRING 2026"], [])), { column: null, lines: {}, programs: ["US RGR SPRING 2026"] });
+    assert.equal(invoicePrograms([]).column, null);
   });
 
   test("a sale's AO, AP and AQ: each line's amount in its column, and the NUSR's holdback in AO beside an additional holdback", () => {

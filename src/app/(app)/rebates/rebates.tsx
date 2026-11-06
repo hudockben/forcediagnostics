@@ -9,11 +9,14 @@ import { formatDay, formatMoney, parseMoney, type Cents } from "@/lib/nusr-rules
 import type { RebateSaleSummary } from "@/lib/rebates";
 import {
   REBATE_COLUMNS,
+  REBATE_COLUMN_HEADINGS,
   REBATE_COLUMN_LABELS,
-  guessRebateColumn,
+  REBATE_COLUMN_LETTERS,
+  invoicePrograms,
   saleNotes,
   type Invoice,
   type InvoiceLine,
+  type InvoicePrograms,
   type MatchHow,
   type RebateColumn,
 } from "@/lib/rebate-rules";
@@ -45,7 +48,10 @@ type Loaded = {
   fileName: string;
   invoice: Omit<Invoice, "lines">;
   scanned: boolean;
-  column: RebateColumn;
+  // Where its amounts go: what its programs say, until it's changed; null
+  // until it's picked when they don't say.
+  column: RebateColumn | null;
+  programs: InvoicePrograms;
   lines: Line[];
   lookup: { state: "looking" } | { state: "done" } | { state: "failed"; error: string };
 };
@@ -154,13 +160,15 @@ export function Rebates() {
       }
       known.current.add(sameAs);
       const { lines, ...details } = invoice;
+      const programs = invoicePrograms(lines);
       const loaded: Loaded = {
         id: crypto.randomUUID(),
         sameAs,
         fileName: file.name,
         invoice: details,
         scanned,
-        column: guessRebateColumn(lines.flatMap((line) => line.programs)),
+        column: programs.column,
+        programs,
         lines: lines.map((line) => ({ ...line, amountText: amountText(line.amount.cents), edited: false, saleId: null, how: null, candidates: [], sharedWith: [] })),
         lookup: { state: "looking" },
       };
@@ -228,6 +236,7 @@ export function Rebates() {
   const found = allLines.filter((line) => line.saleId).length;
   const looking = invoices.some((invoice) => invoice.lookup.state === "looking");
   const badAmounts = allLines.filter((line) => lineCents(line) === null && line.amountText.trim() !== "").length;
+  const unpicked = invoices.filter((invoice) => invoice.column === null);
 
   return (
     <div className="space-y-6">
@@ -323,13 +332,19 @@ export function Rebates() {
               and their totals, and a Rebates sheet with every line as read beside its sale, by salesman and by category.
             </p>
             {badAmounts > 0 && <p className="text-sm text-trail">{plural(badAmounts, "amount isn't", "amounts aren't")} an amount: fix it first.</p>}
+            {unpicked.length > 0 && (
+              <p className="text-sm text-trail">
+                Pick which column {unpicked.map((invoice) => (invoice.invoice.number ? `invoice ${invoice.invoice.number}` : invoice.fileName)).join(" and ")}
+                &apos;s amounts go in first.
+              </p>
+            )}
             {downloadError && (
               <p role="alert" className="text-sm text-trail">
                 {downloadError}
               </p>
             )}
           </div>
-          <button type="button" onClick={() => void download()} disabled={downloading || looking || reading !== null || badAmounts > 0} className={primaryLinkClass} data-rebates-download-button>
+          <button type="button" onClick={() => void download()} disabled={downloading || looking || reading !== null || badAmounts > 0 || unpicked.length > 0} className={primaryLinkClass} data-rebates-download-button>
             {downloading ? "Making the workbook…" : "Download Excel"}
           </button>
         </section>
@@ -445,7 +460,7 @@ function InvoiceCard({
         )}
       </div>
 
-      <fieldset>
+      <fieldset data-rebates-column>
         <legend className="text-sm font-medium text-ink">Its amounts go in</legend>
         <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2">
           {REBATE_COLUMNS.map((column) => (
@@ -453,6 +468,7 @@ function InvoiceCard({
               <input
                 type="radio"
                 name={columnName}
+                value={column}
                 checked={loaded.column === column}
                 onChange={() => onChange((old) => ({ ...old, column }))}
                 className="size-4 accent-glow"
@@ -461,13 +477,16 @@ function InvoiceCard({
             </label>
           ))}
         </div>
-        <p className="mt-1 text-xs leading-5 text-ink-muted">
-          {loaded.column === "addlHoldback"
-            ? "The NUSR's own holdback on each unit (MSRP x its rate) goes in AO beside it, as on the shop's sheet."
-            : loaded.column === "retailRewards"
-              ? "AO is left as it is for these: only the retail rewards go in."
-              : "These amounts are the holdback paid, in AO in place of the NUSR's."}
-        </p>
+        <ProgramsSaid programs={loaded.programs} column={loaded.column} />
+        {loaded.column && (
+          <p className="mt-1 text-xs leading-5 text-ink-muted">
+            {loaded.column === "addlHoldback"
+              ? "The NUSR's own holdback on each unit (MSRP x its rate) goes in AO beside it, as on the shop's sheet."
+              : loaded.column === "retailRewards"
+                ? "AO is left as it is for these: only the retail rewards go in. Drop the NSR invoice with it to fill AQ (and AO) in the same workbook."
+                : "These amounts are the holdback paid, in AO in place of the NUSR's."}
+          </p>
+        )}
       </fieldset>
 
       {byCategory.size > 0 && lookup.state === "done" && (
@@ -530,7 +549,7 @@ function LineRow({
 }: {
   line: Line;
   sales: Record<string, RebateSaleSummary>;
-  column: RebateColumn;
+  column: RebateColumn | null;
   looking: boolean;
   onChange: (change: Partial<Line>) => void;
   onFound: (list: readonly RebateSaleSummary[]) => void;
@@ -590,7 +609,7 @@ function SaleCell({
 }: {
   line: Line;
   sales: Record<string, RebateSaleSummary>;
-  column: RebateColumn;
+  column: RebateColumn | null;
   looking: boolean;
   onChange: (change: Partial<Line>) => void;
   onFound: (list: readonly RebateSaleSummary[]) => void;
@@ -699,7 +718,7 @@ function SaleCell({
 
 // What's worth a look about the sale a line was found as (saleNotes), with
 // a link to correct the sale where that's what it needs.
-function SaleNotes({ line, sale, column }: { line: Line; sale: RebateSaleSummary; column: RebateColumn }) {
+function SaleNotes({ line, sale, column }: { line: Line; sale: RebateSaleSummary; column: RebateColumn | null }) {
   const notes = saleNotes(line, sale, column);
   if (notes.length === 0) return null;
   return (
@@ -718,5 +737,39 @@ function SaleNotes({ line, sale, column }: { line: Line; sale: RebateSaleSummary
         </li>
       ))}
     </ul>
+  );
+}
+
+// What the invoice's programs said about where its amounts go: which of
+// them it went by, that they don't say (pick one), or that its lines say
+// more than one thing.
+function ProgramsSaid({ programs, column }: { programs: InvoicePrograms; column: RebateColumn | null }) {
+  const [first, second, ...rest] = programs.programs;
+  const named = !second ? (first ?? "") : rest.length === 0 ? `${first} and ${second}` : `${first}, ${second} and ${rest.length} more`;
+  const said = (Object.entries(programs.lines) as [RebateColumn, number][]).sort((a, b) => b[1] - a[1]);
+  if (!programs.column) {
+    return (
+      <p role="status" className="mt-2 text-sm text-trail">
+        {programs.programs.length === 0
+          ? "No program was read from this invoice"
+          : said.length > 1
+            ? `Its lines' programs (${named}) say ${said.map(([kind, count]) => `${REBATE_COLUMN_HEADINGS[kind]} on ${plural(count, "line", "lines")}`).join(" and ")}`
+            : `Its programs (${named}) don't say which column`}
+        {column ? "." : ": pick which column its amounts go in."}
+      </p>
+    );
+  }
+  return (
+    <>
+      <p className="mt-2 text-xs leading-5 text-ink-muted">
+        {column === programs.column ? "Picked" : `Its programs say ${REBATE_COLUMN_HEADINGS[programs.column]} (${REBATE_COLUMN_LETTERS[programs.column]})`} from its
+        program{programs.programs.length === 1 ? "" : "s"}: {named}.
+      </p>
+      {said.length > 1 && (
+        <p className="mt-1 text-sm text-trail">
+          Its lines&apos; programs aren&apos;t all one kind ({said.map(([kind, count]) => `${REBATE_COLUMN_HEADINGS[kind]} on ${plural(count, "line", "lines")}`).join(", ")}): all its amounts go in the column picked.
+        </p>
+      )}
+    </>
   );
 }
