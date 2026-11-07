@@ -19,8 +19,8 @@ import { Pagination } from "../diagnose/pagination";
 import { LogFilter } from "../nusr/forms";
 import { OpenInvoiceLink, RemoveInvoice } from "./saved-actions";
 
-// Saved rebates, under the invoices on the Rebates tab: the invoices saved
-// there and their lines, by the filters in the address (the year and month
+// Saved rebates, at the top of the Rebates tab: the invoices saved under
+// New invoices and their lines, by the filters in the address (the year and month
 // of the invoice's date, the column its amounts went in, the salesman and
 // category of each line's sale, whether it was found, and a search), what
 // they come to, and the workbook of them.
@@ -58,15 +58,9 @@ export function SavedRebatesSection({
   const path = `/rebates${rebateFiltersSearch({ ...filters, query: "" }, thisYear)}`;
   return (
     <section className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" aria-labelledby="saved-rebates" data-rebates-saved>
-      <div>
-        <h2 id="saved-rebates" className="text-base font-semibold text-ink">
-          Saved rebates
-        </h2>
-        <p className="mt-1 max-w-3xl text-sm leading-6 text-ink-muted">
-          The invoices saved above, by the day on the invoice (or the day it was saved, if none was read). Open one to change it and save again; Download
-          Excel gives the NUSR sheet with the rebates the filters find in AO, AP and AQ.
-        </p>
-      </div>
+      <h2 id="saved-rebates" className="text-base font-semibold text-ink">
+        Saved rebates
+      </h2>
       {removed && <Notice>Removed {removed} from Saved rebates.</Notice>}
 
       <div className="flex flex-wrap items-center gap-3" data-rebates-filters>
@@ -190,13 +184,14 @@ function SavedResults({ filters, thisYear, invoices, saved }: { filters: RebateF
               <p>By category: {totals.byCategory.map((group) => `${group.label} ${formatMoney(group.amount)}`).join(" · ")}</p>
             </div>
           )}
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            {totals.lines > 0 && (
+          {totals.lines > 0 && (
+            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
               <a href={`/rebates/saved/export${rebateFiltersSearch(filters, thisYear)}`} className={downloadClass} data-rebates-saved-export>
                 Download Excel
               </a>
-            )}
-          </div>
+              <p className="text-xs text-ink-muted">The NUSR sheet with these rebates in AO, AP and AQ, and a sheet of the rebates.</p>
+            </div>
+          )}
 
           <h3 className="mt-6 text-sm font-semibold text-ink">Invoices</h3>
           <div className="relative -mx-5 mt-2 overflow-x-auto border-y border-white/10 sm:-mx-6">

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState, type FormEvent } from "react";
 
 import { Badge, Notice } from "@/components/app/ui";
 import { inputBaseClass, primaryLinkClass } from "@/components/hud";
@@ -25,14 +25,14 @@ import {
 import { findRebateSalesAction, saveRebateInvoiceAction, searchRebateSalesAction } from "./actions";
 import { readInvoiceFile, type ReadProgress } from "./reader";
 
-// The Rebates tab, in the manager's browser: invoices dropped here are read
-// here (reader.ts), their units found in the NUSR (actions.ts), and every
-// line shown to check: the amount (which can be corrected) and the sale it
-// was found as (which can be changed, or searched for). Save keeps an
-// invoice as checked (Saved rebates, under it on the page, lists what's
-// saved; Open there brings one back here to change and save again).
-// Download Excel sends what's on the page to /rebates/export, which writes
-// the workbook.
+// The Rebates tab, in the manager's browser: invoices dropped anywhere on
+// the page (or chosen) are read here (reader.ts), their units found in the
+// NUSR (actions.ts), and every line shown to check, under New invoices: the
+// amount (which can be corrected) and the sale it was found as (which can
+// be changed, or searched for). Save keeps an invoice as checked (Saved
+// rebates, at the top of the page, lists what's saved; Open there brings
+// one back here to change and save again). Download Excel sends what's on
+// the page to /rebates/export, which writes the workbook.
 
 type Line = InvoiceLine & {
   // The amount as shown and corrected.
@@ -77,6 +77,20 @@ type SaveState =
 // Saved rebates' Remove says which saved invoice went, so a card of it on
 // the page is no longer marked saved.
 export const REMOVED_EVENT = "rebates:removed";
+
+// The page's one file box, which Choose invoices (at the top of the page)
+// opens too.
+const FILE_INPUT = "rebates-file";
+
+// Choose invoices, at the top of the page: the file box under New invoices,
+// which reads what's chosen.
+export function ChooseInvoicesButton() {
+  return (
+    <button type="button" onClick={() => document.getElementById(FILE_INPUT)?.click()} className={primaryLinkClass} data-rebates-choose>
+      Choose invoices
+    </button>
+  );
+}
 
 type Reading = { fileName: string; progress: ReadProgress; queued: number };
 
@@ -216,7 +230,7 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
   const input = useRef<HTMLInputElement>(null);
   const known = useRef(new Set<string>());
   const stop = useRef<AbortController | null>(null);
-  const fileId = useId();
+  const newInvoices = useRef<HTMLElement>(null);
 
   // Reading stops when the page goes.
   useEffect(() => {
@@ -233,6 +247,47 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
     known.current.add(openedNumber ? `number:${openedNumber}` : `saved:${openedId}`);
     document.querySelector(`[data-rebates-card="${openedId}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [openedId, openedNumber]);
+
+  // A file can be dropped anywhere on the page (Saved rebates is above where
+  // it's read): while one is dragged over, the page says to drop it.
+  const dropped = useEffectEvent((files: File[]) => void readFiles(files));
+  useEffect(() => {
+    let over = 0;
+    const withFiles = (event: DragEvent) => event.dataTransfer?.types.includes("Files") ?? false;
+    const enter = (event: DragEvent) => {
+      if (!withFiles(event)) return;
+      over += 1;
+      setDragging(true);
+    };
+    const move = (event: DragEvent) => {
+      if (!withFiles(event)) return;
+      // Dropping is allowed, and never opens the file in place of the page.
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    };
+    const leave = (event: DragEvent) => {
+      if (!withFiles(event)) return;
+      over = Math.max(0, over - 1);
+      if (over === 0) setDragging(false);
+    };
+    const drop = (event: DragEvent) => {
+      if (!withFiles(event)) return;
+      event.preventDefault();
+      over = 0;
+      setDragging(false);
+      dropped([...(event.dataTransfer?.files ?? [])]);
+    };
+    window.addEventListener("dragenter", enter);
+    window.addEventListener("dragover", move);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragenter", enter);
+      window.removeEventListener("dragover", move);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("drop", drop);
+    };
+  }, []);
 
   // A saved invoice removed in Saved rebates isn't saved any more: a card of
   // it on the page can be saved again.
@@ -273,7 +328,15 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
   // Each file dropped, read one after another.
   async function readFiles(files: File[]) {
     const controller = stop.current;
-    if (files.length === 0 || reading || !controller) return;
+    if (files.length === 0 || !controller) return;
+    if (reading) {
+      setProblems((list) => [...list, ...files.map((file) => ({ fileName: file.name, error: "Another invoice was being read: drop this one again once it's done." }))]);
+      return;
+    }
+    // New invoices, where it's read, is under Saved rebates: brought into
+    // view unless it's in view already.
+    const box = newInvoices.current?.getBoundingClientRect();
+    if (box && (box.top < 0 || box.top > window.innerHeight - 160)) newInvoices.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     for (const [index, file] of files.entries()) {
       const queued = files.length - index - 1;
       setReading({ fileName: file.name, progress: { step: "opening", done: 0, pages: 0 }, queued });
@@ -387,31 +450,36 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6">
+      {dragging && (
+        <div aria-hidden className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-forest-950/70 p-6 backdrop-blur-sm" data-rebates-dragging>
+          <p className="rounded-xl border-2 border-dashed border-glow/60 bg-charcoal-900/90 px-8 py-6 text-center text-base font-medium text-glow">
+            Drop the invoice to read it
+          </p>
+        </div>
+      )}
+      <section
+        ref={newInvoices}
+        className="scroll-mt-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
+        aria-labelledby="new-invoices"
+        data-rebates-new
+      >
+        <h2 id="new-invoices" className="text-base font-semibold text-ink">
+          New invoices
+        </h2>
         <label
-          htmlFor={fileId}
-          onDragOver={(event) => {
-            event.preventDefault();
-            setDragging(true);
-          }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={(event) => {
-            event.preventDefault();
-            setDragging(false);
-            void readFiles([...event.dataTransfer.files]);
-          }}
-          className={`flex min-h-32 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed px-4 py-6 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-glow/40 ${
+          htmlFor={FILE_INPUT}
+          className={`mt-4 flex min-h-28 cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed px-4 py-6 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-glow/40 ${
             dragging ? "border-glow/60 bg-glow/10" : "border-white/20 hover:border-white/30"
           }`}
           data-rebates-drop
         >
           <span className="text-sm font-medium text-ink">{reading ? `Reading ${reading.fileName}…` : "Drop a rebate invoice here, or choose one"}</span>
           <span className="text-xs text-ink-muted">
-            A PDF from the dealer portal (Invoice Print), or a scan or photo of the printout. Several at once is fine.
+            A PDF from the dealer portal (Invoice Print), or a scan or photo of the printout. Several at once is fine, and anywhere on the page will do.
           </span>
           <input
             ref={input}
-            id={fileId}
+            id={FILE_INPUT}
             type="file"
             multiple
             accept=".pdf,application/pdf,image/*"
@@ -588,8 +656,8 @@ function InvoiceCard({
             {save.how === "opened"
               ? "Opened from Saved rebates. Change anything, then Save changes to keep it."
               : save.how === "replaced"
-                ? "Saved in place of the one saved before. Saved rebates, below, has it."
-                : "Saved. Saved rebates, below, has it."}
+                ? "Saved in place of the one saved before. Saved rebates, at the top of the page, has it."
+                : "Saved. Saved rebates, at the top of the page, has it."}
           </Notice>
         ) : save.state === "exists" ? (
           <div className="space-y-3 rounded-lg border border-trail/40 bg-trail/5 p-4" role="alert">
