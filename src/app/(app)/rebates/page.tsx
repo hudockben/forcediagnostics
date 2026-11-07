@@ -10,14 +10,14 @@ import { listSavedInvoices, listSavedRebates, openSavedInvoice, savedInvoiceYear
 import { requireCapability } from "@/lib/session";
 
 import { WidePage } from "../nusr/forms";
-import { Rebates } from "./rebates";
+import { ChooseInvoicesButton, Rebates } from "./rebates";
 import { SavedRebatesSection } from "./saved";
 
-// The Rebates tab: drop a Polaris rebate invoice, see each unit on it found
-// in the NUSR, save it, and download the NUSR sheet with the rebates in AO
-// (Holdback), AP (Retail Rwds) and AQ (Add'l Hlbk). Saved rebates, under
-// it, lists what's saved by the filters in the address; ?open= puts a saved
-// invoice on the page to change.
+// The Rebates tab: Saved rebates at the top, by the filters in the address;
+// under it, New invoices: drop a Polaris rebate invoice (anywhere on the
+// page), see each unit on it found in the NUSR, save it, and download the
+// NUSR sheet with the rebates in AO (Holdback), AP (Retail Rwds) and AQ
+// (Add'l Hlbk). ?open= puts a saved invoice there to change.
 
 export const metadata: Metadata = { title: "Rebates" };
 
@@ -47,10 +47,10 @@ async function RebatesTab({ searchParams }: { searchParams: PageProps<"/rebates"
     <WidePage className="space-y-6">
       <PageHeading
         title="Rebates"
-        description="Drop a Polaris rebate invoice: the PDF from the dealer portal, or a scan or photo of the printout. Each unit's VIN, customer, unit price and amount are read from it in this browser and the unit is found in the NUSR. Save keeps the invoice as checked, in Saved rebates below; Download Excel gives the NUSR sheet with the rebates in AO (Holdback), AP (Retail Rwds) and AQ (Add'l Hlbk)."
+        description="Polaris's rebate invoices, matched to the NUSR. Drop one anywhere on this page to read and check it."
+        action={<ChooseInvoicesButton />}
       />
       {opened && "error" in opened && <Notice tone="trail">{opened.error} It may have been removed.</Notice>}
-      <Rebates opened={opened && !("error" in opened) ? opened : null} />
       <SavedRebatesSection
         filters={filters}
         thisYear={thisYear}
@@ -61,6 +61,7 @@ async function RebatesTab({ searchParams }: { searchParams: PageProps<"/rebates"
         saved={saved}
         removed={typeof params.removed === "string" ? params.removed.slice(0, 220) : null}
       />
+      <Rebates opened={opened && !("error" in opened) ? opened : null} />
     </WidePage>
   );
 }
