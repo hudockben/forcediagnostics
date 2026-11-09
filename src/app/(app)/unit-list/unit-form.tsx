@@ -8,7 +8,7 @@ import { MIN_VIN_TAIL, UNIT_LIMITS, type UnitFields, type UnitValues } from "@/l
 import { useFormAction } from "@/lib/use-form-action";
 import { checkVin } from "@/lib/vin";
 
-import { addUnitAction, removeUnitAction, saveUnitAction, type FormState } from "./actions";
+import { addUnitAction, putOnLocAction, removeUnitAction, saveUnitAction, type FormState } from "./actions";
 
 // A unit's form: typed in by hand (Add a unit) or corrected (a unit's own
 // page), marked sold or put back in stock. Amount boxes take what the
@@ -143,8 +143,67 @@ export function UnitForm({ id, values, today }: { id?: string; values: UnitValue
         <Field name="engineNumber" label="Engine #" values={values} state={state} maxLength={UNIT_LIMITS.engineNumber} className="sm:col-span-2 [&_input]:font-mono" />
         <Field name="notes" label="Notes" values={values} state={state} maxLength={UNIT_LIMITS.notes} className="sm:col-span-6" />
       </div>
+      {!id && <OnLocFields />}
       <button type="submit" disabled={pending} className={primaryButtonClass} data-unit-save>
         {pending ? "Saving…" : id ? "Save" : "Add to the list"}
+      </button>
+    </form>
+  );
+}
+
+// Putting a new unit on the LOC too, floored, with its free floor's last
+// day: a box to tick on Add a unit.
+function OnLocFields() {
+  const [on, setOn] = useState(false);
+  return (
+    <fieldset className="space-y-3 rounded-lg border border-white/10 p-4">
+      <legend className="sr-only">The LOC</legend>
+      <label className="flex items-start gap-2.5 text-sm text-ink">
+        <input type="checkbox" name="loc" value="loc" checked={on} onChange={(event) => setOn(event.currentTarget.checked)} className="mt-0.5 size-4 accent-glow" data-unit-loc />
+        <span>
+          Put it on the LOC too, floored
+          <span className="block text-xs text-ink-muted">A unit the LOC has already (by its VIN or stock #) is left as it is there.</span>
+        </span>
+      </label>
+      {on && (
+        <div className="max-w-xs">
+          <label htmlFor="unit-freeFloorEnds" className={labelClass}>
+            Free floor ends
+          </label>
+          <input id="unit-freeFloorEnds" name="freeFloorEnds" type="date" className={inputClass} />
+        </div>
+      )}
+    </fieldset>
+  );
+}
+
+// A unit on the list that isn't on the LOC, put on it from its page:
+// floored (as a new unit comes in) or the shop's own, with its free floor.
+export function PutOnLocForm({ unit }: { unit: { id: string } }) {
+  const { state, pending, formProps } = useFormAction<FormState>(putOnLocAction, {});
+  const [section, setSection] = useState<"loc" | "owned">("loc");
+  return (
+    <form {...formProps} className="space-y-4" data-unit-put-on-loc>
+      <input type="hidden" name="id" value={unit.id} />
+      <Feedback state={state} />
+      <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-ink">
+        {(["loc", "owned"] as const).map((option) => (
+          <label key={option} className="flex items-center gap-2">
+            <input type="radio" name="loc" value={option} checked={section === option} onChange={() => setSection(option)} className="size-4 accent-glow" />
+            {option === "loc" ? "Floored on the LOC" : "The shop's own (paid off)"}
+          </label>
+        ))}
+      </div>
+      {section === "loc" && (
+        <div className="max-w-xs">
+          <label htmlFor="put-freeFloorEnds" className={labelClass}>
+            Free floor ends
+          </label>
+          <input id="put-freeFloorEnds" name="freeFloorEnds" type="date" className={inputClass} />
+        </div>
+      )}
+      <button type="submit" disabled={pending} className={primaryButtonClass} data-unit-put-on-loc-button>
+        {pending ? "Putting it on the LOC…" : "Put it on the LOC"}
       </button>
     </form>
   );

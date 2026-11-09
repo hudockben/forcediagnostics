@@ -11,6 +11,7 @@ import { formatDay, formatMoney, shopToday } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
 
 import { LocUnitForm, QuickMark, RemoveLocUnitForm } from "../forms";
+import { unitListSold } from "../units-table";
 
 export const metadata: Metadata = { title: "LOC unit" };
 
@@ -80,6 +81,23 @@ async function LocUnitScreen({ params, searchParams }: { params: PageProps<"/loc
                 </QuickMark>
               ) : null}
               <span className="sr-only"> ({nusrNewsText(unit.nusr)})</span>
+            </>
+          )}
+        </div>
+      )}
+      {unit.unitList && (
+        <div className="rounded-lg border border-white/10 px-4 py-3 text-sm text-ink" data-loc-unit-unit-list>
+          On the Unit List as {unit.unitList.name}, {unit.unitList.listPrice === null ? "with no list price yet" : `listed at ${formatMoney(unit.unitList.listPrice)}`}
+          {unit.unitList.soldOn ? `, marked sold ${formatDay(unit.unitList.soldOn)}` : ""}.{" "}
+          <Link href={`/unit-list/${unit.unitList.id}`} className="font-medium text-glow hover:underline">
+            Open it there
+          </Link>
+          {unitListSold(unit) && (
+            <>
+              {" · "}
+              <QuickMark id={unit.id} mark="sold" on={unit.unitList.soldOn!} back={back}>
+                Mark it sold {formatDay(unit.unitList.soldOn!)}
+              </QuickMark>
             </>
           )}
         </div>

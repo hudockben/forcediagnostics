@@ -26,6 +26,10 @@ import { QuickMark } from "./forms";
 export const MARK_FORM = "loc-mark";
 
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
+
+// The Unit List has it marked sold and the LOC doesn't yet (unless the
+// NUSR's sale says so already): marked here with a tap, as the NUSR's are.
+export const unitListSold = (unit: LocUnit) => Boolean(unit.unitList?.soldOn && !unit.soldOn && unit.nusr?.kind !== "sold" && (!unit.receivedOn || unit.unitList.soldOn >= unit.receivedOn));
 const cell = "px-3 py-2.5 align-top";
 
 function UnitRow({ unit, today, back, ticking }: { unit: LocUnit; today: string; back: string; ticking: boolean }) {
@@ -104,6 +108,22 @@ function UnitRow({ unit, today, back, ticking }: { unit: LocUnit; today: string;
                 Mark paid off {formatDay(unit.nusr.sale.paidOn)}
               </QuickMark>
             ) : null}
+          </span>
+        )}
+        {unit.unitList && (
+          <span className="block text-ink-muted" data-loc-unit-list>
+            <Link href={`/unit-list/${unit.unitList.id}`} className="text-glow/90 hover:text-glow hover:underline">
+              Unit List
+            </Link>
+            : {unit.unitList.listPrice === null ? "no list price yet" : `listed at ${formatMoney(unit.unitList.listPrice)}`}
+            {unitListSold(unit) && (
+              <>
+                , sold {formatDay(unit.unitList.soldOn!)}{" "}
+                <QuickMark id={unit.id} mark="sold" on={unit.unitList.soldOn!} back={back}>
+                  Mark sold {formatDay(unit.unitList.soldOn!)}
+                </QuickMark>
+              </>
+            )}
           </span>
         )}
         {unit.notes && <span className="block break-words text-ink-muted">{unit.notes.length > 120 ? `${unit.notes.slice(0, 120)}…` : unit.notes}</span>}

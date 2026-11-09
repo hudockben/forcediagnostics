@@ -4,6 +4,7 @@ import { Suspense } from "react";
 
 import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { MAX_LIST_WORDS, listSearchIsCut } from "@/lib/diagnose-list-rules";
+import { floorStatus, floorStatusText } from "@/lib/loc-rules";
 import { formatDay, formatMoney, shopToday } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
 import { MAX_LISTED, listStockUnits, type StockUnit, type UnitList } from "@/lib/unit-list";
@@ -58,6 +59,7 @@ async function UnitListTab({ searchParams }: { searchParams: PageProps<"/unit-li
   const added = note(params.added);
   const filled = note(params.filled);
   const removed = note(params.removed);
+  const locNote = typeof params.loc === "string" ? params.loc.slice(0, 300) : null;
 
   return (
     <WidePage className="space-y-6">
@@ -79,6 +81,7 @@ async function UnitListTab({ searchParams }: { searchParams: PageProps<"/unit-li
       {added && <Notice>Added {added} to the list.</Notice>}
       {filled && <Notice>Filled in the whole VIN of {filled}, which the list had only the end of.</Notice>}
       {removed && <Notice>Removed {removed} from the list.</Notice>}
+      {locNote && <Notice tone={locNote.startsWith("Not") ? "trail" : "glow"}>{locNote}</Notice>}
       <NewUnits today={today} />
       <UnitListCard list={list} filters={filters} today={today} />
     </WidePage>
@@ -178,7 +181,14 @@ function Results({ list, filters, today }: { list: UnitList; filters: UnitFilter
 // The figures over the table: units, what they cost and are listed at, and
 // how long they've been in stock.
 function Totals({ totals, status }: { totals: UnitTotals; status: UnitFilters["status"] }) {
-  const stats: { label: string; value: string; note?: string }[] = [
+  const { loc } = totals;
+  const locNotes = [
+    loc.ended ? `${plural(loc.ended, "free floor", "free floors")} ended` : null,
+    loc.soon ? `${loc.soon.toLocaleString("en-US")} ${loc.soon === 1 ? "ends" : "end"} within 30 days` : null,
+    loc.owned ? `${loc.owned.toLocaleString("en-US")} ours` : null,
+    loc.none ? `${loc.none.toLocaleString("en-US")} not on it` : null,
+  ].filter(Boolean);
+  const stats: { label: string; value: string; note?: string; warn?: boolean }[] = [
     { label: status === "sold" ? "Units sold" : status === "stock" ? "Units in stock" : "Units", value: totals.units.toLocaleString("en-US") },
     { label: "Cost", value: formatMoney(totals.cost), note: totals.noCost ? `${plural(totals.noCost, "unit has", "units have")} none` : undefined },
     { label: "List", value: formatMoney(totals.list), note: totals.noList ? `${plural(totals.noList, "unit has", "units have")} no list price yet` : undefined },
@@ -187,14 +197,15 @@ function Totals({ totals, status }: { totals: UnitTotals; status: UnitFilters["s
       value: totals.averageDays === null ? "—" : `${totals.averageDays.toLocaleString("en-US")} avg`,
       note: totals.oldestDays === null ? undefined : `${status === "stock" ? "oldest" : "longest"} ${plural(totals.oldestDays, "day", "days")}`,
     },
+    { label: "Floored on the LOC", value: loc.onLoc.toLocaleString("en-US"), note: locNotes.join(" · ") || undefined, warn: loc.ended > 0 },
   ];
   return (
-    <dl className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4" data-unit-totals>
+    <dl className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5" data-unit-totals>
       {stats.map((stat) => (
         <div key={stat.label} className="rounded-lg border border-white/10 bg-forest-950/40 px-4 py-3">
           <dt className="text-xs text-ink-muted">{stat.label}</dt>
           <dd className="mt-1 font-mono text-lg text-ink">{stat.value}</dd>
-          {stat.note && <dd className={`mt-0.5 text-xs ${stat.label === "List" ? "text-trail" : "text-ink-muted"}`}>{stat.note}</dd>}
+          {stat.note && <dd className={`mt-0.5 text-xs ${stat.label === "List" || stat.warn ? "text-trail" : "text-ink-muted"}`}>{stat.note}</dd>}
         </div>
       ))}
     </dl>
@@ -228,6 +239,9 @@ function UnitTable({ list, status, today }: { list: UnitList; status: UnitFilter
                 Sold
               </th>
             )}
+            <th scope="col" className="px-3 py-2 font-medium">
+              LOC
+            </th>
             <th scope="col" className="px-3 py-2 text-right font-medium">
               Days
             </th>
@@ -249,7 +263,7 @@ function UnitTable({ list, status, today }: { list: UnitList; status: UnitFilter
             ))}
             {group.units.length > 1 && (
               <tr className="bg-white/[0.03] text-xs text-ink-muted" data-unit-group-total>
-                <th scope="row" colSpan={showSold ? 5 : 4} className="px-5 py-2 text-right font-medium sm:px-6">
+                <th scope="row" colSpan={showSold ? 6 : 5} className="px-5 py-2 text-right font-medium sm:px-6">
                   {group.name}
                 </th>
                 <td className={`${moneyClass} py-2`}>{formatMoney(group.totals.cost)}</td>
@@ -261,7 +275,7 @@ function UnitTable({ list, status, today }: { list: UnitList; status: UnitFilter
         ))}
         <tfoot>
           <tr className="text-sm text-ink" data-unit-total>
-            <th scope="row" colSpan={showSold ? 5 : 4} className="px-5 py-3 text-right font-semibold sm:px-6">
+            <th scope="row" colSpan={showSold ? 6 : 5} className="px-5 py-3 text-right font-semibold sm:px-6">
               Total
             </th>
             <td className={`${moneyClass} py-3 font-semibold`}>{formatMoney(list.totals.cost)}</td>
@@ -308,16 +322,46 @@ function UnitRow({ unit, showSold, today }: { unit: StockUnit; showSold: boolean
                   <Badge>NUSR</Badge>
                 </span>
               )}
+              {sold.how === "loc" && (
+                <span title="Marked sold on the LOC">
+                  <Badge>LOC</Badge>
+                </span>
+              )}
             </>
           ) : (
             <Badge tone="glow">In stock</Badge>
           )}
         </td>
       )}
+      <td className={`${cellClass} whitespace-nowrap`}>
+        <LocCell unit={unit} today={today} />
+      </td>
       <td className={`${cellClass} text-right font-mono`}>{daysInStock(unit, today)}</td>
       <td className={moneyClass}>{unit.cost === null ? <span className="text-ink-muted">—</span> : formatMoney(unit.cost)}</td>
       <td className={moneyClass}>{unit.listPrice === null ? <span className="font-sans text-xs text-trail">to fill in</span> : formatMoney(unit.listPrice)}</td>
       <td className="px-5 py-2.5 text-right font-mono sm:px-6">1</td>
     </tr>
+  );
+}
+
+// Where a unit stands on the LOC: floored, with its free floor (ended in
+// the trail colour, ending within 30 days in the glow); the shop's own; or
+// not on it. It opens the unit on the LOC.
+function LocCell({ unit, today }: { unit: StockUnit; today: string }) {
+  const loc = unit.loc;
+  if (!loc) return <span className="text-xs text-ink-muted" title="Not on the LOC (by its VIN, or the stock # its VIN gives)">—</span>;
+  const floor = floorStatus(loc.freeFloorEnds, today);
+  const live = loc.soldOn === null || loc.onLoc;
+  return (
+    <Link href={`/loc/${loc.id}`} className="group block text-xs focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none" data-unit-loc={loc.onLoc ? "loc" : "owned"}>
+      <span className="text-ink group-hover:text-glow group-hover:underline">{loc.onLoc ? "Floored" : "Ours"}</span>
+      {loc.onLoc && loc.freeFloorEnds && (
+        <span className={`block ${live && floor.state === "ended" ? "text-trail" : live && floor.state === "soon" ? "text-glow" : "text-ink-muted"}`}>
+          ends {formatDay(loc.freeFloorEnds)}
+          {live ? ` · ${floorStatusText(floor).toLowerCase()}` : ""}
+        </span>
+      )}
+      {!loc.onLoc && loc.paidOffOn && <span className="block text-ink-muted">paid off {formatDay(loc.paidOffOn)}</span>}
+    </Link>
   );
 }

@@ -33,6 +33,7 @@ import {
 import { cutText } from "@/lib/manual-rules";
 import { formatMoney, parseIsoDate, shopToday, unitLabel } from "@/lib/nusr-rules";
 import type { CurrentUser } from "@/lib/session";
+import { unitListLinksFor, type UnitListLink } from "@/lib/unit-loc";
 
 // The LOC tab: the units on the shop's line of credit and the ones it
 // owns. Callers check sales.log first (it has the shop's costs);
@@ -49,6 +50,9 @@ export type LocUnit = LocUnitFields & {
   // what it says that the LOC doesn't know yet.
   nusrSale: NusrSaleSeen | null;
   nusr: NusrNews | null;
+  // The same unit on the Unit List, if it's there: its list price, and the
+  // day it's marked sold there.
+  unitList: UnitListLink | null;
   createdBy: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -89,11 +93,12 @@ const selectUnits = (tx: ShopTransaction) =>
 
 type Row = Awaited<ReturnType<typeof selectUnits>>[number];
 
-function toUnit(row: Row, sales: readonly NusrSaleSeen[]): LocUnit {
+function toUnit(row: Row, sales: readonly NusrSaleSeen[], unitList: ReadonlyMap<string, UnitListLink>): LocUnit {
   const { tradeSoldOn, tradeCustomer, tradeYear, tradeModel, tradeVin, ...unit } = row;
   const nusrSale = nusrSaleFor(unit, sales);
   return {
     ...unit,
+    unitList: unitList.get(unit.id) ?? null,
     trade:
       unit.tradeSaleId && tradeSoldOn && tradeCustomer
         ? { soldOn: tradeSoldOn, customerName: tradeCustomer, unit: unitLabel({ unitYear: tradeYear, unitModel: tradeModel, vin: tradeVin }) }
@@ -238,7 +243,7 @@ export const MAX_LOC_ROWS = 5_000;
 // the ones we own first and then the ones on the LOC, each by when its
 // free floor ends; sold ones the latest sold first.
 export async function listLocUnits(shopId: string, filters: LocFilters, today = shopToday()): Promise<LocList> {
-  const { rows, sales } = await withShop(shopId, async (tx) => {
+  const { rows, sales, unitList } = await withShop(shopId, async (tx) => {
     const rows = await selectUnits(tx)
       .where(locWhere(filters, today))
       .orderBy(
@@ -248,10 +253,10 @@ export async function listLocUnits(shopId: string, filters: LocFilters, today = 
         asc(locUnits.id),
       )
       .limit(MAX_LOC_ROWS + 1);
-    return { rows, sales: await nusrSalesFor(tx, rows) };
+    return { rows, sales: await nusrSalesFor(tx, rows), unitList: await unitListLinksFor(tx, rows.slice(0, MAX_LOC_ROWS)) };
   });
   const capped = rows.length > MAX_LOC_ROWS;
-  let units = rows.slice(0, MAX_LOC_ROWS).map((row) => toUnit(row, sales));
+  let units = rows.slice(0, MAX_LOC_ROWS).map((row) => toUnit(row, sales, unitList));
   // What the NUSR has sold that the LOC doesn't know of yet.
   if (filters.show === "nusr") units = units.filter((unit) => unit.nusr !== null);
   return { units, totals: locTotals(units, today), capped };
@@ -262,7 +267,7 @@ export async function getLocUnit(shopId: string, id: string): Promise<LocUnit | 
   return withShop(shopId, async (tx) => {
     const [row] = await selectUnits(tx).where(eq(locUnits.id, id));
     if (!row) return null;
-    return toUnit(row, await nusrSalesFor(tx, [row]));
+    return toUnit(row, await nusrSalesFor(tx, [row]), await unitListLinksFor(tx, [row]));
   });
 }
 
@@ -272,7 +277,8 @@ export async function tradeInsForSale(shopId: string, saleId: string): Promise<L
   return withShop(shopId, async (tx) => {
     const rows = await selectUnits(tx).where(eq(locUnits.tradeSaleId, saleId)).orderBy(asc(locUnits.createdAt));
     const sales = await nusrSalesFor(tx, rows);
-    return rows.map((row) => toUnit(row, sales));
+    const unitList = await unitListLinksFor(tx, rows);
+    return rows.map((row) => toUnit(row, sales, unitList));
   });
 }
 
@@ -337,20 +343,25 @@ export async function addLocUnit(actor: CurrentUser, input: LocUnitInput): Promi
   if ("error" in checked) return checked;
   const unit = checked.unit;
   try {
-    return await withShop(actor.shop.id, async (tx) => {
-      const holder = await stockHolder(tx, unit.stockNumber);
-      if (holder && unit.stockNumber) return stockTakenProblem(unit.stockNumber, holder);
-      const [row] = await tx
-        .insert(locUnits)
-        .values({ ...toColumns(unit), shopId: actor.shop.id, createdByUserId: actor.id })
-        .returning({ id: locUnits.id });
-      await audit(tx, actor, "loc_unit.added", row.id, { ...unitSummary(unit), cost: unit.cost, section: sectionOf(unit), freeFloorEnds: unit.freeFloorEnds });
-      return { id: row.id };
-    });
+    return await withShop(actor.shop.id, (tx) => putOnLoc(tx, actor, unit));
   } catch (error) {
     if (isStockTaken(error) && unit.stockNumber) return stockTakenProblem(unit.stockNumber, null);
     throw error;
   }
+}
+
+// A unit, checked, put on the list in the caller's transaction (addLocUnit,
+// and the Unit List putting a unit from its invoice on the LOC: `from`,
+// for the Activity log), unless another unit on the list has its stock #.
+export async function putOnLoc(tx: ShopTransaction, actor: CurrentUser, unit: LocUnitFields, from?: "Unit List"): Promise<{ id: string } | LocProblem> {
+  const holder = await stockHolder(tx, unit.stockNumber);
+  if (holder && unit.stockNumber) return stockTakenProblem(unit.stockNumber, holder);
+  const [row] = await tx
+    .insert(locUnits)
+    .values({ ...toColumns(unit), shopId: actor.shop.id, createdByUserId: actor.id })
+    .returning({ id: locUnits.id });
+  await audit(tx, actor, "loc_unit.added", row.id, { ...unitSummary(unit), cost: unit.cost, section: sectionOf(unit), freeFloorEnds: unit.freeFloorEnds, ...(from ? { from } : {}) });
+  return { id: row.id };
 }
 
 // How an edit changed a unit, for the Activity log: each amount, date and

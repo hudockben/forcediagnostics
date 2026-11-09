@@ -304,7 +304,7 @@ describe("on the server: importing the sheet, and its VINs' ends", () => {
       units: [{ key: "a", vin: RANGER, unitYear: "2027", model: "RGR 1K XP NSULT CR BLUELAB", modelNumber: "R27RSY99AA", description: "RGR-27,1K,XP,NSULT,CR,BLUELAB", engineNumber: "1209000000101", receivedOn: TODAY, cost: "34,900.00", listPrice: "", invoiceNumber: "380101", invoiceDate: "2026-08-28" }],
     });
     assert.ok("completed" in filled, JSON.stringify(filled));
-    assert.deepEqual(filled, { added: [], already: [], completed: [{ key: "a", id: ids.first, name: "2027 Rngr 1000 XP NSU Crew - Blue Lab" }] });
+    assert.deepEqual(filled, { added: [], already: [], completed: [{ key: "a", id: ids.first, name: "2027 Rngr 1000 XP NSU Crew - Blue Lab" }], loc: [] });
     const unit = await getStockUnit(manager, ids.first);
     // The whole VIN and what the list hadn't; the shop's model, day and prices kept.
     assert.deepEqual(
@@ -323,7 +323,7 @@ describe("on the server: importing the sheet, and its VINs' ends", () => {
     assert.ok(said.facts.some((fact) => fact.label === "VIN" && fact.value === `8000101 → ${RANGER}`));
     // Dropped again: on the list as it is now.
     const again = await addStockUnits(manager, { units: [{ key: "a", vin: RANGER, unitYear: "2027", model: "X", receivedOn: TODAY }] });
-    assert.deepEqual(again, { added: [], already: [{ key: "a", id: ids.first, name: "2027 Rngr 1000 XP NSU Crew - Blue Lab" }], completed: [] });
+    assert.deepEqual(again, { added: [], already: [{ key: "a", id: ids.first, name: "2027 Rngr 1000 XP NSU Crew - Blue Lab" }], completed: [], loc: [] });
     // The sheet's end of it, imported again, is the same unit.
     const reimport = await importStockUnits(manager, { importId: randomUUID(), fileName: "Unit List.xlsx", units: sheetUnits().slice(0, 1) });
     assert.ok("outcomes" in reimport);
