@@ -17,6 +17,7 @@ import type { SavedInvoice, SavedRebates } from "@/lib/rebates";
 import { ListSearch } from "../diagnose/list-search";
 import { Pagination } from "../diagnose/pagination";
 import { LogFilter } from "../nusr/forms";
+import { SalesmanTotals } from "./salesman-totals";
 import { OpenInvoiceLink, RemoveInvoice } from "./saved-actions";
 
 // Saved rebates, under New invoices on the Rebates tab: the invoices saved
@@ -205,8 +206,8 @@ function SavedResults({ filters, thisYear, invoices, saved }: { filters: RebateF
 
           <h3 className="mt-6 text-sm font-semibold text-ink">Invoices</h3>
           <div className="relative -mx-5 mt-2 overflow-x-auto border-y border-white/10 sm:-mx-6">
-            <table className="w-full min-w-[52rem] text-sm" data-rebates-saved-invoices>
-              <caption className="sr-only">The saved invoices the filters find</caption>
+            <table className="w-full min-w-[66rem] text-sm" data-rebates-saved-invoices>
+              <caption className="sr-only">The saved invoices the filters find, and what each comes to by salesman</caption>
               <thead>
                 <tr className="border-b border-white/10 text-left text-xs text-ink-muted">
                   <th scope="col" className="px-5 py-2 font-medium sm:px-6">
@@ -223,6 +224,9 @@ function SavedResults({ filters, thisYear, invoices, saved }: { filters: RebateF
                   </th>
                   <th scope="col" className="px-3 py-2 text-right font-medium">
                     Amount
+                  </th>
+                  <th scope="col" className="px-3 py-2 font-medium">
+                    {narrowed ? "By salesman, found" : "By salesman"}
                   </th>
                   <th scope="col" className="px-3 py-2 font-medium">
                     Saved
@@ -257,6 +261,9 @@ function SavedResults({ filters, thisYear, invoices, saved }: { filters: RebateF
                       ) : invoice.total !== null && invoice.total !== invoice.amount ? (
                         <span className="block text-xs text-trail">Invoice total {formatMoney(invoice.total)}</span>
                       ) : null}
+                    </td>
+                    <td className="px-3 py-3">
+                      <SalesmanTotals groups={totals.bySalesmanOf[invoice.id] ?? []} />
                     </td>
                     <td className="px-3 py-3 text-xs leading-5 text-ink-muted">
                       {savedDay(invoice.savedAt)}
