@@ -22,7 +22,8 @@
 // No server imports: the browser reads the invoice with these rules, and the
 // server checks what's saved with the same ones.
 
-import { MAX_AMOUNT_CENTS, cleanVin, formatMoney, line, parseIsoDate, parseMoney, type Cents } from "@/lib/nusr-rules";
+import { floorStatus } from "@/lib/loc-rules";
+import { MAX_AMOUNT_CENTS, cleanVin, formatMoney, guessCategory, line, parseIsoDate, parseMoney, type Cents } from "@/lib/nusr-rules";
 import {
   NO_TABLE,
   PAGE_FOOT,
@@ -800,12 +801,87 @@ export function nusrSaleOf(unit: { vin: string; unitYear: number | null; receive
   return { id: latest.id, soldOn: latest.soldOn, customerName: latest.customerName, salesperson: latest.salesperson };
 }
 
-// When a unit was sold, and how the list knows: marked sold on it, or sold
-// new in the NUSR. Null while it's in stock.
-export function soldOf(unit: { soldOn: string | null; nusrSale: NusrSale | null }): { on: string; how: "marked" | "nusr" } | null {
+// When a unit was sold, and how the list knows: marked sold on it, sold
+// new in the NUSR, or marked sold on the LOC. Null while it's in stock.
+export function soldOf(unit: { soldOn: string | null; nusrSale: NusrSale | null; loc?: Pick<LocLink, "soldOn"> | null }): { on: string; how: "marked" | "nusr" | "loc" } | null {
   if (unit.soldOn) return { on: unit.soldOn, how: "marked" };
   if (unit.nusrSale) return { on: unit.nusrSale.soldOn, how: "nusr" };
+  if (unit.loc?.soldOn) return { on: unit.loc.soldOn, how: "loc" };
   return null;
+}
+
+// --- The LOC ---------------------------------------------------------------------------
+
+// The LOC tab's unit (src/lib/loc.ts) that a unit on the Unit List is: where
+// it stands on the shop's line of credit.
+export type LocLink = {
+  id: string;
+  stockNumber: string | null;
+  vin: string | null;
+  unitYear: number | null;
+  model: string;
+  cost: Cents;
+  freeFloorEnds: string | null;
+  receivedOn: string | null;
+  onLoc: boolean;
+  paidOffOn: string | null;
+  soldOn: string | null;
+};
+
+// The stock # the LOC numbers a unit by, from its VIN on the Unit List: the
+// digits at the end of its last seven characters (six after a plant
+// letter, seven where the plant is a digit), as the LOC's stockFromVin
+// gives it from a whole VIN; the end of a VIN the shop's sheet kept
+// ("8056154", "H272059") gives the same.
+export function stockOfVin(vin: string): string | null {
+  if (vin.length < MIN_VIN_TAIL) return null;
+  const digits = /\d+$/.exec(vin.slice(-7))?.[0] ?? "";
+  return digits.length >= 4 ? digits : null;
+}
+
+// Whether a unit on the LOC is this one on the Unit List: the same VIN; or,
+// of the same model year when both say, a VIN one is the end of the other,
+// or, for a unit the LOC has no VIN for (as its sheet keeps them), the
+// stock # the Unit List's VIN gives.
+export function isLocUnitOf(unit: { vin: string; unitYear: number | null }, loc: Pick<LocLink, "vin" | "stockNumber" | "unitYear">): boolean {
+  if (loc.vin && loc.vin === unit.vin) return true;
+  if (unit.unitYear !== null && loc.unitYear !== null && unit.unitYear !== loc.unitYear) return false;
+  if (loc.vin) return sameVin(loc.vin, unit.vin);
+  const stock = stockOfVin(unit.vin);
+  return stock !== null && loc.stockNumber !== null && loc.stockNumber.toLowerCase() === stock.toLowerCase();
+}
+
+// The LOC's unit a unit on the Unit List is (isLocUnitOf): one still on the
+// LOC's list (in stock, or sold and still owed) before one long gone, then
+// the latest in.
+export function locUnitOf<T extends Pick<LocLink, "vin" | "stockNumber" | "unitYear" | "soldOn" | "onLoc" | "receivedOn">>(unit: { vin: string; unitYear: number | null }, loc: readonly T[]): T | null {
+  const listed = (one: T) => one.soldOn === null || one.onLoc;
+  const found = loc.filter((one) => isLocUnitOf(unit, one));
+  found.sort((a, b) => Number(listed(b)) - Number(listed(a)) || (b.receivedOn ?? "").localeCompare(a.receivedOn ?? ""));
+  return found[0] ?? null;
+}
+
+// A unit on the Unit List as the LOC's form takes it (checkLocUnit in
+// src/lib/loc-rules.ts): its stock # from its VIN, the whole VIN (the end
+// of one stays its stock #), its year and model, the category its model
+// says, new, its cost and the day it came in, and its free floor; on the
+// LOC as a new unit is floored when it comes in, or the shop's own.
+export function locInputOf(unit: UnitFields, { freeFloorEnds, section }: { freeFloorEnds: string | null; section: "loc" | "owned" }) {
+  return {
+    stockNumber: stockOfVin(unit.vin) ?? "",
+    vin: isPartialVin(unit.vin) ? "" : unit.vin,
+    unitYear: unit.unitYear === null ? "" : String(unit.unitYear),
+    model: unit.model,
+    category: guessCategory(unit.model) ?? "",
+    condition: "new",
+    cost: unit.cost === null ? "" : (unit.cost / 100).toFixed(2),
+    freeFloorEnds: freeFloorEnds ?? "",
+    receivedOn: unit.receivedOn,
+    section,
+    paidOffOn: "",
+    soldOn: unit.soldOn ?? "",
+    notes: "",
+  };
 }
 
 // Whole days from one day ("2026-11-06") to another.
@@ -813,12 +889,42 @@ export const daysBetween = (from: string, to: string) => Math.round((Date.parse(
 
 // Days a unit has been in stock: from the day it was received to the day it
 // sold, or to today; never below zero (a unit sold before it came in).
-export const daysInStock = (unit: { receivedOn: string; soldOn: string | null; nusrSale: NusrSale | null }, today: string) =>
+export const daysInStock = (unit: { receivedOn: string; soldOn: string | null; nusrSale: NusrSale | null; loc?: Pick<LocLink, "soldOn"> | null }, today: string) =>
   Math.max(0, daysBetween(unit.receivedOn, soldOf(unit)?.on ?? today));
 
-type Listed = { unitYear: number | null; model: string; receivedOn: string; vin: string; cost: Cents | null; listPrice: Cents | null; soldOn: string | null; nusrSale: NusrSale | null };
+type Listed = {
+  unitYear: number | null;
+  model: string;
+  receivedOn: string;
+  vin: string;
+  cost: Cents | null;
+  listPrice: Cents | null;
+  soldOn: string | null;
+  nusrSale: NusrSale | null;
+  loc?: Pick<LocLink, "onLoc" | "freeFloorEnds" | "soldOn"> | null;
+};
 
-export type UnitTotals = { units: number; cost: Cents; list: Cents; noCost: number; noList: number; averageDays: number | null; oldestDays: number | null };
+// Where the units stand on the LOC: owed on it (and of those, how many
+// have run out of free flooring, or will within 30 days), the shop's own,
+// and not on it.
+export type LocTally = { onLoc: number; owned: number; none: number; ended: number; soon: number };
+
+export type UnitTotals = { units: number; cost: Cents; list: Cents; noCost: number; noList: number; averageDays: number | null; oldestDays: number | null; loc: LocTally };
+
+function locTally(units: readonly Listed[], today: string): LocTally {
+  const tally: LocTally = { onLoc: 0, owned: 0, none: 0, ended: 0, soon: 0 };
+  for (const unit of units) {
+    if (!unit.loc) tally.none++;
+    else if (!unit.loc.onLoc) tally.owned++;
+    else {
+      tally.onLoc++;
+      const floor = floorStatus(unit.loc.freeFloorEnds, today).state;
+      if (floor === "ended") tally.ended++;
+      else if (floor === "soon") tally.soon++;
+    }
+  }
+  return tally;
+}
 
 // The units, counted, their costs and list prices added up (and how many
 // have none yet), and how long they've been in stock on average and at
@@ -833,6 +939,7 @@ export function unitTotals(units: readonly Listed[], today: string): UnitTotals 
     noList: units.filter((unit) => unit.listPrice === null).length,
     averageDays: days.length ? Math.round(days.reduce((sum, day) => sum + day, 0) / days.length) : null,
     oldestDays: days.length ? Math.max(...days) : null,
+    loc: locTally(units, today),
   };
 }
 

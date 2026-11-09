@@ -348,6 +348,7 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
           fact("Traded in on", d.sale);
           return `Put the trade-in ${locUnitWords(d)} on the LOC, as ours`;
         }
+        if (d.from === "Unit List") return `Put ${locUnitWords(d)} ${d.section === "owned" ? "with the units we own" : "on the LOC"} from the Unit List`;
         return `Added ${locUnitWords(d)} ${d.section === "owned" ? "to the units we own" : "to the LOC"}`;
       }
       case "loc_unit.updated": {

@@ -7,8 +7,11 @@ import { auditLog, manualCatalogModels, stockUnits, unitSales, users } from "@/d
 import { containsPattern, listSearchWords } from "@/lib/diagnose-list-rules";
 import { isUuid } from "@/lib/diagnose-rules";
 import { line, parseIsoDate, shopToday, type Cents } from "@/lib/nusr-rules";
+import { putOnLoc } from "@/lib/loc";
+import { checkLocUnit } from "@/lib/loc-rules";
 import { allows } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/session";
+import { locLinksFor } from "@/lib/unit-loc";
 import {
   MIN_VIN_TAIL,
   UNIT_LIMITS,
@@ -16,6 +19,7 @@ import {
   groupUnits,
   isPartialVin,
   listedAs,
+  locInputOf,
   nusrSaleOf,
   paintOf,
   soldOf,
@@ -24,6 +28,7 @@ import {
   unitTotals,
   vinTails,
   withPaint,
+  type LocLink,
   type NusrSale,
   type UnitFields,
   type UnitFilters,
@@ -61,6 +66,8 @@ export type StockUnit = UnitFields & {
   updatedAt: Date;
   createdBy: string | null;
   nusrSale: NusrSale | null;
+  // The same unit on the LOC tab, if it's there.
+  loc: LocLink | null;
 };
 
 const unitColumns = {
@@ -84,7 +91,7 @@ const unitColumns = {
   createdBy: users.name,
 };
 
-type UnitRow = Omit<StockUnit, "nusrSale">;
+type UnitRow = Omit<StockUnit, "nusrSale" | "loc">;
 
 const toColumns = (unit: UnitFields) => ({
   vin: unit.vin,
@@ -225,7 +232,8 @@ export async function listStockUnits(actor: CurrentUser, filters: UnitFilters, t
       .orderBy(desc(stockUnits.receivedOn), desc(stockUnits.createdAt))
       .limit(MAX_SCANNED);
     const sales = await nusrSalesFor(tx, rows);
-    const units: StockUnit[] = rows.map((row) => ({ ...row, nusrSale: sales.get(row.vin) ?? null }));
+    const locs = await locLinksFor(tx, rows);
+    const units: StockUnit[] = rows.map((row) => ({ ...row, nusrSale: sales.get(row.vin) ?? null, loc: locs.get(row.vin) ?? null }));
     const inStock = units.filter((unit) => !soldOf(unit));
     const sold = units.filter((unit) => soldOf(unit));
     const chosen = filters.status === "stock" ? inStock : filters.status === "sold" ? sold : units;
@@ -241,7 +249,8 @@ export async function getStockUnit(actor: CurrentUser, id: string): Promise<Stoc
     const [row] = await tx.select(unitColumns).from(stockUnits).leftJoin(users, eq(users.id, stockUnits.createdByUserId)).where(eq(stockUnits.id, id));
     if (!row) return null;
     const sales = await nusrSalesFor(tx, [row]);
-    return { ...row, nusrSale: sales.get(row.vin) ?? null };
+    const locs = await locLinksFor(tx, [row]);
+    return { ...row, nusrSale: sales.get(row.vin) ?? null, loc: locs.get(row.vin) ?? null };
   });
 }
 
@@ -262,6 +271,8 @@ export type UnitLookup = {
   model: { name: string; from: "list" | "paint" | "nusr" | "models" } | null;
   // The list price the last unit with the same model number had.
   listPrice: { cents: Cents; receivedOn: string; vin: string } | null;
+  // On the LOC already (by its VIN, or the stock # it gives).
+  loc: Pick<LocLink, "id" | "stockNumber" | "onLoc" | "soldOn"> | null;
 };
 
 type LookupItem = { key: string; vin: string; modelNumber: string | null; description: string | null };
@@ -299,6 +310,7 @@ export async function lookUpUnits(actor: CurrentUser, input: unknown): Promise<{
   return withShop(actor.shop.id, async (tx) => {
     const onList = vins.length ? await listedFor(tx, vins) : [];
     const sales = await nusrSalesFor(tx, read.filter((unit) => unit.vin));
+    const locs = await locLinksFor(tx, read.filter((unit) => unit.vin));
     // The same model number on the list, the latest first.
     const sameNumber = numbers.length
       ? await tx
@@ -352,6 +364,10 @@ export async function lookUpUnits(actor: CurrentUser, input: unknown): Promise<{
         sold: sales.get(item.vin) ?? null,
         model,
         listPrice: priced && priced.listPrice !== null ? { cents: priced.listPrice, receivedOn: priced.receivedOn, vin: priced.vin } : null,
+        loc: (() => {
+          const link = item.vin ? locs.get(item.vin) : undefined;
+          return link ? { id: link.id, stockNumber: link.stockNumber, onLoc: link.onLoc, soldOn: link.soldOn } : null;
+        })(),
       });
     }
     return { units };
@@ -403,11 +419,45 @@ export type AddResult =
       // Units from the shop's sheet, with only their VIN's end, that these
       // filled in.
       completed: { key: string; id: string; name: string }[];
+      // Those asked for on the LOC too: put on it (its id and stock #), on
+      // it already, or not, and why.
+      loc: LocOutcome[];
     }
   | { problems: (UnitProblem & { key: string })[] }
   | Problem;
 
-type CheckedAdd = { key: string; unit: UnitFields; invoiceNumber: string | null; invoiceDate: string | null };
+type CheckedAdd = {
+  key: string;
+  unit: UnitFields;
+  invoiceNumber: string | null;
+  invoiceDate: string | null;
+  // Put on the LOC too (on it, or the shop's own), with its free floor.
+  loc: { section: "loc" | "owned"; freeFloorEnds: string } | null;
+};
+
+export type LocOutcome = { key: string; id: string | null; stockNumber: string | null; already: boolean; error: string | null };
+
+// A unit put on the LOC from the Unit List (unless the LOC has it already,
+// by its VIN or the stock # its VIN gives), in the caller's transaction.
+async function putUnitOnLoc(tx: ShopTransaction, actor: CurrentUser, key: string, unit: UnitFields, loc: { section: "loc" | "owned"; freeFloorEnds: string }): Promise<LocOutcome> {
+  const [link] = (await locLinksFor(tx, [unit])).values();
+  if (link) return { key, id: link.id, stockNumber: link.stockNumber, already: true, error: null };
+  const checked = checkLocUnit(locInputOf(unit, loc));
+  if ("error" in checked) {
+    const error = checked.field === "cost" ? "It has no cost, which the LOC needs: give it one, then put it on the LOC from its page." : checked.error;
+    return { key, id: null, stockNumber: null, already: false, error };
+  }
+  const put = await putOnLoc(tx, actor, checked.unit, "Unit List");
+  if ("error" in put) return { key, id: null, stockNumber: checked.unit.stockNumber, already: false, error: put.error };
+  return { key, id: put.id, stockNumber: checked.unit.stockNumber, already: false, error: null };
+}
+
+// What the page sends for the LOC: "loc" (floored, as a new unit comes
+// in) or "owned", with the free floor's last day; nothing for neither.
+function locWanted(fields: { loc?: unknown; freeFloorEnds?: unknown }): CheckedAdd["loc"] {
+  const section = fields.loc === "loc" || fields.loc === "owned" ? fields.loc : null;
+  return section ? { section, freeFloorEnds: line(fields.freeFloorEnds) } : null;
+}
 
 // Adds units to the list: read from an invoice and checked on the page
 // (`fileName` the file dropped, each with its invoice's number and date), or
@@ -422,7 +472,7 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
   const checked: CheckedAdd[] = [];
   const seen = new Map<string, string>();
   for (const [index, entry] of units.entries()) {
-    const fields = (entry ?? {}) as UnitInput & { key?: unknown; invoiceNumber?: unknown; invoiceDate?: unknown };
+    const fields = (entry ?? {}) as UnitInput & { key?: unknown; invoiceNumber?: unknown; invoiceDate?: unknown; loc?: unknown; freeFloorEnds?: unknown };
     const key = typeof fields.key === "string" && fields.key.length <= 40 ? fields.key : String(index + 1);
     const result = checkUnit({ ...fields, soldOn: null });
     if ("error" in result) {
@@ -436,7 +486,7 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
     }
     seen.set(result.unit.vin, key);
     const invoiceNumber = line(fields.invoiceNumber).replace(/[^A-Za-z0-9-]/g, "").slice(0, UNIT_LIMITS.invoiceNumber) || null;
-    checked.push({ key, unit: result.unit, invoiceNumber, invoiceDate: parseIsoDate(fields.invoiceDate) });
+    checked.push({ key, unit: result.unit, invoiceNumber, invoiceDate: parseIsoDate(fields.invoiceDate), loc: locWanted(fields) });
   }
   if (problems.length) return { problems };
 
@@ -449,6 +499,8 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
     const already: { key: string; id: string; name: string }[] = [];
     const completed: { key: string; id: string; name: string }[] = [];
     const fresh: CheckedAdd[] = [];
+    // What's on the list now, added or filled in, for the LOC.
+    const placed: CheckedAdd[] = [];
     for (const one of checked) {
       const match = listedAs(one.unit, listed);
       if (!match) {
@@ -487,6 +539,7 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
       // Another unit here ending the same doesn't fill it in again.
       match.vin = after.vin;
       completed.push({ key: one.key, id: match.id, name: unitName(after) });
+      placed.push({ ...one, unit: after });
     }
 
     const inserted = fresh.length
@@ -515,6 +568,7 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
         continue;
       }
       added.push({ key: one.key, id });
+      placed.push(one);
       await audit(tx, actor, "stock_unit.added", id, {
         unit: unitName(one.unit),
         vin: one.unit.vin,
@@ -536,7 +590,24 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
       const unit = existing.find((row) => row.vin === one.unit.vin);
       if (unit) already.push({ key: one.key, id: unit.id, name: unitName(unit) });
     }
-    return { added, already, completed };
+    // On the LOC too, those asked for: a new unit comes in floored.
+    const loc: LocOutcome[] = [];
+    for (const one of placed) if (one.loc) loc.push(await putUnitOnLoc(tx, actor, one.key, one.unit, one.loc));
+    return { added, already, completed, loc };
+  });
+}
+
+// Puts a unit on the LOC from its page on the Unit List: floored ("loc")
+// or the shop's own ("owned"), with its free floor's last day.
+export async function putStockUnitOnLoc(actor: CurrentUser, id: string, input: { loc?: unknown; freeFloorEnds?: unknown }): Promise<LocOutcome | Problem> {
+  if (!allows(actor, "sales.log")) return notAllowed;
+  if (!isUuid(id)) return notHere;
+  const wanted = locWanted({ loc: input.loc ?? "loc", freeFloorEnds: input.freeFloorEnds });
+  if (!wanted) return { error: "Say whether it's on the LOC or the shop's own." };
+  return withShop(actor.shop.id, async (tx) => {
+    const [row] = await tx.select(unitColumns).from(stockUnits).leftJoin(users, eq(users.id, stockUnits.createdByUserId)).where(eq(stockUnits.id, id));
+    if (!row) return notHere;
+    return putUnitOnLoc(tx, actor, id, fieldsOf(row), wanted);
   });
 }
 

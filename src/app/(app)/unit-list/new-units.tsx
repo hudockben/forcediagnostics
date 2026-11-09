@@ -7,7 +7,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Notice } from "@/components/app/ui";
 import { inputBaseClass, primaryLinkClass } from "@/components/hud";
 import { formatDay, formatMoney, parseMoney, type Cents } from "@/lib/nusr-rules";
-import type { UnitLookup } from "@/lib/unit-list";
+import type { LocOutcome, UnitLookup } from "@/lib/unit-list";
 import { invoiceAddsUp, modelFromDescription, moneyBox, type InvoiceKind, type InvoiceUnit, type UnitFields, type UnitInvoice } from "@/lib/unit-list-rules";
 import { checkVin } from "@/lib/vin";
 
@@ -24,7 +24,7 @@ import { addStockUnitsAction, lookUpUnitsAction } from "./actions";
 // received, the cost (the invoice's Unit Price) and the list price to fill
 // in. Add puts them on the list under it.
 
-type Values = { unitYear: string; model: string; vin: string; receivedOn: string; cost: string; listPrice: string; notes: string };
+type Values = { unitYear: string; model: string; vin: string; receivedOn: string; cost: string; listPrice: string; notes: string; freeFloorEnds: string };
 type ModelFrom = "invoice" | "typed" | NonNullable<UnitLookup["model"]>["from"];
 
 type Row = {
@@ -40,6 +40,8 @@ type Row = {
   // its VIN's end.
   added: { id: string; filled: boolean } | null;
   problem: { error: string; field?: keyof UnitFields } | null;
+  // What putting it on the LOC did, once it's added.
+  loc: LocOutcome | null;
 };
 
 type Card = {
@@ -51,6 +53,9 @@ type Card = {
   invoices: UnitInvoice[];
   rows: Row[];
   lookup: { state: "looking" } | { state: "done" } | { state: "failed"; error: string };
+  // Its units go on the LOC too, floored, as Polaris Acceptance finances
+  // them.
+  loc: boolean;
   adding: boolean;
   error: string | null;
 };
@@ -112,12 +117,14 @@ function rowsOf(cardId: string, invoices: readonly UnitInvoice[], today: string)
           cost: unit.cost.cents === null ? "" : moneyBox(unit.cost.cents),
           listPrice: "",
           notes: "",
+          freeFloorEnds: "",
         },
         modelFrom: "invoice",
         lookup: null,
         take: true,
         added: null,
         problem: null,
+        loc: null,
       }),
     ),
   );
@@ -218,7 +225,7 @@ export function NewUnits({ today }: { today: string }) {
       known.current.add(sameAs);
       // Short, so its rows' keys ("1a2b3c4d-1") are too.
       const id = crypto.randomUUID().slice(0, 8);
-      const card: Card = { id, fileName: file.name, sameAs, scanned, invoices, rows: rowsOf(id, invoices, today), lookup: { state: "looking" }, adding: false, error: null };
+      const card: Card = { id, fileName: file.name, sameAs, scanned, invoices, rows: rowsOf(id, invoices, today), lookup: { state: "looking" }, loc: true, adding: false, error: null };
       setCards((list) => [...list, card]);
       void lookUp(card);
     }
@@ -286,6 +293,7 @@ export function NewUnits({ today }: { today: string }) {
       engineNumber: row.unit.engineNumber ?? "",
       invoiceNumber: row.unit.invoice ?? "",
       invoiceDate: row.invoiceDate ?? "",
+      loc: card.loc ? "loc" : "",
     }));
     const result = await addStockUnitsAction({ fileName: card.fileName, units }).catch(() => ({ error: "The connection dropped. Check it, then add them again." }));
     if ("error" in result) {
@@ -310,12 +318,13 @@ export function NewUnits({ today }: { today: string }) {
     const added = new Map(result.added.map((one) => [one.key, one.id]));
     const filled = new Map(result.completed.map((one) => [one.key, one.id]));
     const already = new Map(result.already.map((one) => [one.key, one]));
+    const onLoc = new Map(result.loc.map((one) => [one.key, one]));
     updateCard(card.id, (old) => ({
       ...old,
       adding: false,
       rows: old.rows.map((row) => {
         const id = added.get(row.key) ?? filled.get(row.key);
-        if (id) return { ...row, added: { id, filled: filled.has(row.key) } };
+        if (id) return { ...row, added: { id, filled: filled.has(row.key) }, loc: onLoc.get(row.key) ?? null };
         const there = already.get(row.key);
         if (there && row.lookup) {
           return { ...row, take: false, lookup: { ...row.lookup, onList: { id: there.id, name: there.name, vin: row.values.vin, receivedOn: row.values.receivedOn, soldOn: null, partial: false } } };
@@ -486,6 +495,24 @@ function UnitsCard({
         </div>
       )}
 
+      <label className="flex items-start gap-2.5 text-sm text-ink" data-unit-list-loc-choice>
+        <input
+          type="checkbox"
+          checked={card.loc}
+          disabled={card.adding}
+          onChange={(event) => {
+            const loc = event.currentTarget.checked;
+            onChange((old) => ({ ...old, loc }));
+          }}
+          className="mt-0.5 size-4 accent-glow"
+          data-unit-list-loc
+        />
+        <span>
+          Put them on the LOC too, floored, with their free floor&apos;s last day if you have it
+          <span className="block text-xs text-ink-muted">Polaris Acceptance finances them. A unit the LOC has already (by its VIN or stock #) is left as it is there.</span>
+        </span>
+      </label>
+
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
         <span className="text-ink-muted">Received:</span>
         <button type="button" onClick={() => setReceived(today)} className={linkButtonClass}>
@@ -500,7 +527,7 @@ function UnitsCard({
 
       <ul className="space-y-3">
         {card.rows.map((row) => (
-          <UnitRow key={row.key} row={row} looking={card.lookup.state === "looking"} onChange={(change) => setRow(row.key, change)} />
+          <UnitRow key={row.key} row={row} looking={card.lookup.state === "looking"} loc={card.loc} onChange={(change) => setRow(row.key, change)} />
         ))}
       </ul>
 
@@ -538,8 +565,10 @@ const MODEL_FROM: Record<ModelFrom, string> = {
   models: "From Polaris's model list (System Admin > Manuals).",
 };
 
-function UnitRow({ row, looking, onChange }: { row: Row; looking: boolean; onChange: (change: (row: Row) => Row) => void }) {
+function UnitRow({ row, looking, loc, onChange }: { row: Row; looking: boolean; loc: boolean; onChange: (change: (row: Row) => Row) => void }) {
   const { unit, values, lookup, added, problem } = row;
+  // Asked on the LOC, and not there already.
+  const floor = loc && !lookup?.loc;
   const done = added !== null || onListAlready(row);
   const set = (field: keyof Values, value: string) =>
     onChange((old) => ({ ...old, values: { ...old.values, [field]: value }, modelFrom: field === "model" ? "typed" : old.modelFrom, problem: old.problem?.field === field ? null : old.problem }));
@@ -667,7 +696,23 @@ function UnitRow({ row, looking, onChange }: { row: Row; looking: boolean; onCha
             </button>
           )}
         </div>
-        <div className="sm:col-span-2 lg:col-span-6">
+        {floor && (
+          <div className="sm:col-span-2 lg:col-span-3">
+            <label htmlFor={`${row.key}-freeFloorEnds`} className="text-xs font-medium text-ink-muted">
+              Free floor ends
+            </label>
+            <input
+              id={`${row.key}-freeFloorEnds`}
+              type="date"
+              value={values.freeFloorEnds}
+              disabled={done}
+              onChange={(event) => set("freeFloorEnds", event.currentTarget.value)}
+              className={boxClass}
+              data-unit-list-free-floor
+            />
+          </div>
+        )}
+        <div className={`sm:col-span-2 ${floor ? "lg:col-span-3" : "lg:col-span-6"}`}>
           <label htmlFor={id("notes")} className="text-xs font-medium text-ink-muted">
             Notes
           </label>
@@ -687,6 +732,30 @@ function UnitRow({ row, looking, onChange }: { row: Row; looking: boolean; onCha
             <Link href={`/unit-list/${added.id}`} className="underline">
               Open it
             </Link>
+          </p>
+        )}
+        {row.loc && (
+          <p className={row.loc.error ? "text-trail" : "text-glow"} data-unit-list-loc-result>
+            {row.loc.error ? (
+              `Not put on the LOC: ${row.loc.error}`
+            ) : (
+              <>
+                {row.loc.already ? "On the LOC already" : "Put on the LOC"}
+                {row.loc.stockNumber ? ` as stock # ${row.loc.stockNumber}` : ""}.{" "}
+                {row.loc.id && (
+                  <Link href={`/loc/${row.loc.id}`} className="underline">
+                    Open it there
+                  </Link>
+                )}
+              </>
+            )}
+          </p>
+        )}
+        {!added && lookup?.loc && loc && (
+          <p className="text-ink-muted" data-unit-list-on-loc>
+            The LOC has it already
+            {lookup.loc.stockNumber ? ` (stock # ${lookup.loc.stockNumber})` : ""}
+            {lookup.loc.onLoc ? ", floored" : ", as the shop's own"}: it&apos;s left as it is there.
           </p>
         )}
         {!added && lookup?.onList?.partial && (

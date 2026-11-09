@@ -420,7 +420,16 @@ describe("models, a unit as typed, and the list", () => {
         ["2026 GEN XP 1000 Ult", ["A"], 1, 3188400, 0],
       ],
     );
-    assert.deepEqual(unitTotals(units, "2026-11-09"), { units: 3, cost: 10202400, list: 7519800, noCost: 0, noList: 1, averageDays: 56, oldestDays: 89 });
+    assert.deepEqual(unitTotals(units, "2026-11-09"), {
+      units: 3,
+      cost: 10202400,
+      list: 7519800,
+      noCost: 0,
+      noList: 1,
+      averageDays: 56,
+      oldestDays: 89,
+      loc: { onLoc: 0, owned: 0, none: 3, ended: 0, soon: 0 },
+    });
     assert.equal(daysInStock(unit("D", "X", 2027, "2026-11-01", null, null, "2026-11-21"), "2026-12-25"), 20);
     // Presold before it came in: never below zero.
     assert.equal(daysInStock(unit("D", "X", 2027, "2026-11-09", null, null, "2026-11-01"), "2026-12-25"), 0);
@@ -617,7 +626,7 @@ describe("on the server: looking up, adding, the list, correcting and removing",
         ["2026 General XP 1000 4P Premium", [GENERAL]],
       ],
     );
-    assert.deepEqual(stock.totals, { units: 2, cost: 6978600, list: 3739900, noCost: 0, noList: 1, averageDays: 22, oldestDays: 22 });
+    assert.deepEqual(stock.totals, { units: 2, cost: 6978600, list: 3739900, noCost: 0, noList: 1, averageDays: 22, oldestDays: 22, loc: { onLoc: 0, owned: 0, none: 2, ended: 0, soon: 0 } });
 
     const sold = await listStockUnits(manager, { status: "sold", query: "" }, today);
     assert.ok(!("error" in sold));
