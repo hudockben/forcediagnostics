@@ -38,6 +38,8 @@ export async function AppHeader() {
           { href: "/nusr", label: "NUSR", section: "/nusr" },
           // Polaris's rebate invoices, read and matched to the NUSR's sales.
           { href: "/rebates", label: "Rebates", section: "/rebates" },
+          // The units in stock, added from Polaris's whole goods invoices.
+          { href: "/unit-list", label: "Unit List", section: "/unit-list" },
           // The units on the line of credit and the ones we own, with the
           // NUSR's trade-ins.
           { href: "/loc", label: "LOC", section: "/loc" },

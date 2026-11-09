@@ -56,7 +56,7 @@ export function wordsFromTsv(tsv: string): InvoiceWord[] {
   return words;
 }
 
-type Line = { words: InvoiceWord[]; center: number; text: string };
+export type Line = { words: InvoiceWord[]; center: number; text: string };
 
 function median(values: number[]) {
   if (values.length === 0) return 0;
@@ -112,10 +112,10 @@ export function pageLines(words: readonly InvoiceWord[]): { lines: Line[]; heigh
 
 // Where the Description column starts, and where the Unit Price and Amount
 // columns end (their figures line up on the right).
-type Columns = { descriptionLeft: number; priceRight: number; amountRight: number };
+export type Columns = { descriptionLeft: number; priceRight: number; amountRight: number };
 
 // The table's headings row ("Part Description Unit Price Amount"), or null.
-function headingColumns(line: Line): Columns | null {
+export function headingColumns(line: Line): Columns | null {
   const find = (pattern: RegExp) => line.words.find((word) => pattern.test(word.text));
   const description = find(/^desc/i);
   const amount = find(/^amo?unt|^amt\b/i);
@@ -146,13 +146,13 @@ const AMOUNT_WIDTH = 9;
 const AMOUNT_PAST = 0.6;
 const AMOUNT_HALF_HEIGHT = 0.75;
 
-type Cells = { part: string; description: string; unitPrice: string[]; amount: string[]; figuresCenter: number };
+export type Cells = { part: string; description: string; unitPrice: string[]; amount: string[]; figuresCenter: number };
 
 // A line's words in the table's columns: the Part code left of the
 // Description, the description, and the figures by which column they line
 // up under. Marks out past the description that aren't figures are ticks
 // made by hand on the printout, and are left out.
-function lineCells(line: Line, columns: Columns, height: number): Cells {
+export function lineCells(line: Line, columns: Columns, height: number): Cells {
   const figuresFrom = Math.max(columns.descriptionLeft + height * 12, columns.priceRight - height * 6);
   const between = (columns.priceRight + columns.amountRight) / 2;
   const part: string[] = [];
@@ -276,7 +276,7 @@ const PURCHASE_LINE = /\bP[UV]R\b|\bPD\b/i;
 const PROGRAM_LINE = /^(?:US|CA|CAN)\s+\S+|\b(?:NSR|PROGRAM|PROMO|REBATE|RETAIL|REWARDS?|RWDS?|HOLDBACK|HLDBK|HLBK)\b/i;
 const NAME_LINE = /^[A-Za-z][A-Za-z .,'’&/-]*$/;
 
-const tidy = (text: string) => text.replace(/^[|!\s]+/, "").replace(/\s+/g, " ").trim();
+export const tidy = (text: string) => text.replace(/^[|!\s]+/, "").replace(/\s+/g, " ").trim();
 
 // The words a name is known by, lower-cased: without punctuation, titles,
 // generations (Jr, III) or a company's Inc and LLC.
@@ -356,11 +356,11 @@ export type Invoice = {
 
 // Where the table ends: the invoice's summary, or the page's foot (the
 // portal's address and the page number).
-const TABLE_END = /^summary\b|\bfinanced by\b|\bmail your\b|\bvat charges\b|^tax\b.*\btotal\b/i;
-const PAGE_FOOT = /https?:|www\.|\.asp\b|polarisportal/i;
+export const TABLE_END = /^summary\b|\bfinanced by\b|\bmail your\b|\bvat charges\b|^tax\b.*\btotal\b/i;
+export const PAGE_FOOT = /https?:|www\.|\.asp\b|polarisportal/i;
 // The head of a page, which is read as the table's when OCR missed the
 // page's headings row: when it was printed, "Parts", and the headings.
-const PAGE_HEAD = /\binvoice print\b|^\W*parts\W*$|\bord\b.*\bship\b|\bunit price\b/i;
+export const PAGE_HEAD = /\binvoice print\b|^\W*parts\W*$|\bord\b.*\bship\b|\bunit price\b/i;
 
 // The VIN at the start of a description ("3NSXAW1R9TM204033/R26XAW1RB",
 // "3NSX6W1R7TM296793/R26 <6W1RB"), and the model code after it.
@@ -403,7 +403,7 @@ function invoiceDetails(lines: readonly Line[], height: number) {
 }
 
 // The invoice's total: the amount beside "Total", or under it.
-function invoiceTotal(lines: readonly Line[]): ReadAmount | null {
+export function invoiceTotal(lines: readonly Line[]): ReadAmount | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const label = lines[i].words.find((word) => /^total:?$/i.test(word.text));
     if (!label) continue;
@@ -544,7 +544,10 @@ export function amountsAddUp(invoice: Pick<Invoice, "lines" | "total">) {
 // Characters OCR mixes up on Polaris's printouts, and a VIN typed by hand.
 const MIXED_UP = ["0O", "0Q", "0D", "0C", "0U", "1I", "1L", "1T", "1J", "17", "2Z", "5S", "9S", "8S", "8B", "8E", "3B", "38", "6G", "6B", "4A", "9G", "9Q", "7T", "7Z", "UV", "VY", "MN", "HN", "KX", "EF", "PF", "RK"];
 const MIXED = new Set(MIXED_UP.flatMap(([a, b]) => [a + b, b + a]));
-const alike = (a: string | undefined, b: string | undefined) => a !== undefined && b !== undefined && (a === b || MIXED.has(a + b));
+// Whether OCR could have read one character for the other (or they're the
+// same); the Unit List's reader uses it too.
+export const ocrAlike = (a: string | undefined, b: string | undefined) => a !== undefined && b !== undefined && (a === b || MIXED.has(a + b));
+const alike = ocrAlike;
 
 // The VIN as read, with the letters a VIN never has (I, O, Q) as the
 // figures they stand for: what's shown for a unit that isn't found.

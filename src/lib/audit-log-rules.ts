@@ -8,6 +8,7 @@ import { SALE_LABELS, formatDay, formatMoney, type SaleFields } from "@/lib/nusr
 import { ROLE_LABELS } from "@/lib/permissions";
 import { ROLES, type Role } from "@/lib/roles";
 import { SUPPLIER_FIELD_LABELS, type SupplierField } from "@/lib/supplier-rules";
+import { UNIT_LABELS, type UnitFields } from "@/lib/unit-list-rules";
 
 export const AUDIT_LOG_PAGE_SIZE = 25;
 
@@ -16,6 +17,7 @@ export const AUDIT_AREAS = {
   diagnoses: { label: "Diagnoses", targetTypes: ["diagnosis"] },
   nusr: { label: "NUSR", targetTypes: ["unit_sale"] },
   rebates: { label: "Rebates", targetTypes: ["rebate_invoice"] },
+  unitList: { label: "Unit List", targetTypes: ["stock_unit"] },
   loc: { label: "LOC", targetTypes: ["loc_unit"] },
   customers: { label: "Customers", targetTypes: ["customer", "customer_vehicle"] },
   stickers: { label: "Sticker & Plate log", targetTypes: ["sticker"] },
@@ -297,6 +299,47 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         return `Removed ${invoice} from Rebates`;
       }
 
+      // Unit List
+      case "stock_unit.added":
+        fact("VIN", d.vin);
+        fact("Received", formatDay(str(d.receivedOn)));
+        if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
+        if (typeof d.listPrice === "number") fact("List Price", formatMoney(d.listPrice));
+        fact("Invoice", d.invoiceNumber);
+        fact("File", d.fileName);
+        return `Added ${str(d.unit) || "a unit"} to the Unit List`;
+      case "stock_unit.updated": {
+        const changes = (d.changes ?? {}) as Record<string, { from?: unknown; to?: unknown }>;
+        const money = (key: string) => key === "cost" || key === "listPrice";
+        for (const [key, change] of Object.entries(changes)) {
+          const label = UNIT_LABELS[key as keyof UnitFields] ?? key;
+          const shown = (value: unknown) =>
+            value === null || value === undefined || value === "" ? "blank" : money(key) && typeof value === "number" ? formatMoney(value) : key.endsWith("On") ? formatDay(str(value)) || str(value) : str(value);
+          fact(label, `${shown(change.from)} → ${shown(change.to)}`);
+        }
+        const unlisted = (Array.isArray(d.fields) ? d.fields : []).filter((key): key is string => typeof key === "string" && !(key in changes));
+        if (unlisted.length) fact("Also changed", inWords(unlisted.map((key) => (UNIT_LABELS[key as keyof UnitFields] ?? key).toLowerCase())));
+        if (!("vin" in changes)) fact("VIN", d.vin);
+        const unit = str(d.unit) || "a unit";
+        if (str(d.filledFrom)) return `Filled in ${unit} on the Unit List from ${str(d.filledFrom)}`;
+        const sold = changes.soldOn;
+        if (sold && sold.to && !sold.from) return `Marked ${unit} sold on the Unit List`;
+        if (sold && !sold.to && sold.from) return `Put ${unit} back in stock on the Unit List`;
+        return `Corrected ${unit} on the Unit List`;
+      }
+      case "stock_units.imported":
+        fact("Added", num(d.added));
+        fact("Already on the list", num(d.already));
+        if (num(d.failed) > 0) fact("Left out", num(d.failed));
+        return `Imported units onto the Unit List from ${str(d.fileName) || "a spreadsheet"}`;
+      case "stock_unit.removed":
+        fact("VIN", d.vin);
+        fact("Received", formatDay(str(d.receivedOn)));
+        if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
+        if (typeof d.listPrice === "number") fact("List Price", formatMoney(d.listPrice));
+        fact("Sold", formatDay(str(d.soldOn)));
+        fact("Invoice", d.invoiceNumber);
+        return `Removed ${str(d.unit) || "a unit"} from the Unit List`;
       // LOC
       case "loc_unit.added": {
         if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
