@@ -476,6 +476,10 @@ describe("Diagnose and customers' vehicles", () => {
     assert.equal(diagnosis.status, "solved");
     assert.equal(diagnosis.fix, "Ignition coil breaking down");
     assert.equal(diagnosis.startedBy, "Mike");
+    // The time on its clock, which This was it ended, as the diagnosis has it.
+    const clock = (await getConversation(tech, conversationId))!.conversation.clock;
+    assert.equal(clock?.state, "ended");
+    assert.equal(diagnosis.clockSeconds, clock?.seconds);
 
     // The Diagnose list says whose it is and finds it by the customer.
     const list = await listConversations(tech.shop.id, { query: "carver", perPage: 100 });

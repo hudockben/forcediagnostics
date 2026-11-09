@@ -3,9 +3,8 @@ import Link from "next/link";
 import { LocalTime } from "@/components/app/local-time";
 import { Badge } from "@/components/app/ui";
 import type { ConversationSummary } from "@/lib/diagnose";
-import { formatDuration } from "@/lib/diagnose-clock-rules";
 
-import { QuickIcon } from "./icons";
+import { TimeOnClock } from "./time-on-clock";
 
 const plural = (count: number, one: string, many: string) =>
   `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
@@ -44,11 +43,7 @@ export function ConversationRow({
             {conversation.clockSeconds !== null && (
               <>
                 {" · "}
-                <span data-row-clock className="whitespace-nowrap">
-                  <QuickIcon className="mr-0.5 inline size-3.5 align-[-2px]" />
-                  {formatDuration(conversation.clockSeconds)}
-                  <span className="sr-only"> on the clock</span>
-                </span>
+                <TimeOnClock seconds={conversation.clockSeconds} />
               </>
             )}{" "}
             · <LocalTime value={conversation.updatedAt} />

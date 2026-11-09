@@ -1,10 +1,19 @@
 import "server-only";
 
-import { asc, eq, sql } from "drizzle-orm";
+import { asc, eq, sql, type SQLWrapper } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
 import { diagnosisConversations, diagnosisTimeSpans, users } from "@/db/schema";
-import { applyPlan, clockPlan, clockView, latestSpan, type ClockEvent, type ClockSpan, type ClockView } from "@/lib/diagnose-clock-rules";
+import {
+  CLOCK_IDLE_MS,
+  applyPlan,
+  clockPlan,
+  clockView,
+  latestSpan,
+  type ClockEvent,
+  type ClockSpan,
+  type ClockView,
+} from "@/lib/diagnose-clock-rules";
 import { isUuid } from "@/lib/diagnose-rules";
 import type { CurrentUser } from "@/lib/session";
 
@@ -18,6 +27,22 @@ import type { CurrentUser } from "@/lib/session";
 // transaction with the diagnosis's row locked (select … for update), as
 // every change to a diagnosis is, so two requests never move one clock at
 // once. Times are the database's clock at that moment.
+
+// The time on a diagnosis's clock (seconds) as the diagnosis shows it, for
+// a list of diagnoses (the Diagnose tab's, Home's, a customer's vehicle's):
+// its stretches, and while it runs the time since the last use (see
+// clockView); null for one with no clock. `conversationId` is the list's
+// column for the diagnosis's id.
+export const clockSecondsOf = (conversationId: SQLWrapper) => sql<number | null>`(
+  select sum(extract(epoch from s.ended_at - s.started_at))
+    + coalesce(sum(greatest(extract(epoch from now() - s.ended_at), 0)) filter (
+        where s.stop is null and s.ended_at >= now() - make_interval(secs => ${CLOCK_IDLE_MS / 1000})
+      ), 0)
+  from ${diagnosisTimeSpans} s where s.conversation_id = ${conversationId}
+)::float8`;
+
+// Whole seconds, as a list shows them.
+export const roundSeconds = (seconds: number | string | null) => (seconds === null ? null : Math.round(Number(seconds)));
 
 type SpanRow = typeof diagnosisTimeSpans.$inferSelect;
 

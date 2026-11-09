@@ -6,6 +6,7 @@ import { DrizzleQueryError, and, asc, desc, eq, inArray, ne, sql, type SQL } fro
 
 import { withShop, type ShopTransaction } from "@/db";
 import { auditLog, customerVehicles, customers, diagnosisConversations, stickerPlateLog, unitSales, users } from "@/db/schema";
+import { clockSecondsOf, roundSeconds } from "@/lib/diagnose-clock";
 import {
   checkCustomer,
   checkVehicle,
@@ -169,6 +170,9 @@ export type VehicleDiagnosis = {
   startedBy: string;
   createdAt: Date;
   updatedAt: Date;
+  // The time on its clock (seconds), as the diagnosis shows it; null for
+  // one started before the clock was added.
+  clockSeconds: number | null;
 };
 
 export type VehicleRecord = VehicleFields & {
@@ -225,14 +229,15 @@ async function diagnosesOf(tx: ShopTransaction, vehicleIds: string[]) {
       startedBy: users.name,
       createdAt: diagnosisConversations.createdAt,
       updatedAt: diagnosisConversations.updatedAt,
+      clockSeconds: clockSecondsOf(diagnosisConversations.id),
     })
     .from(diagnosisConversations)
     .innerJoin(users, eq(users.id, diagnosisConversations.userId))
     .where(inArray(diagnosisConversations.customerVehicleId, vehicleIds))
     .orderBy(desc(diagnosisConversations.createdAt), desc(diagnosisConversations.id));
-  for (const { vehicleId, outcome, ...row } of rows) {
+  for (const { vehicleId, outcome, clockSeconds, ...row } of rows) {
     const list = byVehicle.get(vehicleId!) ?? [];
-    list.push({ ...row, fix: outcome?.title ?? null });
+    list.push({ ...row, fix: outcome?.title ?? null, clockSeconds: roundSeconds(clockSeconds) });
     byVehicle.set(vehicleId!, list);
   }
   return byVehicle;

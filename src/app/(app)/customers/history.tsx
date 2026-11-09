@@ -5,9 +5,11 @@ import { Badge } from "@/components/app/ui";
 import { RELATION_DATE_LABELS, RELATION_LABELS, formatDay, type VehicleRelation } from "@/lib/customer-rules";
 import type { VehicleDiagnosis } from "@/lib/customers";
 
+import { TimeOnClock } from "../diagnose/time-on-clock";
+
 // A vehicle's diagnoses, newest first: what the complaint was, the fix
-// when one was confirmed ("This was it" on Diagnose), who started it and
-// when. Those who can use Diagnose can open each one.
+// when one was confirmed ("This was it" on Diagnose), who started it, the
+// time on its clock and when. Those who can use Diagnose can open each one.
 export function DiagnosisHistory({ diagnoses, canOpen }: { diagnoses: VehicleDiagnosis[]; canOpen: boolean }) {
   if (diagnoses.length === 0) return <p className="text-sm text-ink-muted">No diagnoses yet.</p>;
   return (
@@ -23,7 +25,14 @@ export function DiagnosisHistory({ diagnoses, canOpen }: { diagnoses: VehicleDia
                 </span>
               )}
               <span className="block text-xs text-ink-muted">
-                {diagnosis.startedBy} · <LocalTime value={diagnosis.createdAt.toISOString()} />
+                {diagnosis.startedBy}
+                {diagnosis.clockSeconds !== null && (
+                  <>
+                    {" · "}
+                    <TimeOnClock seconds={diagnosis.clockSeconds} />
+                  </>
+                )}{" "}
+                · <LocalTime value={diagnosis.createdAt.toISOString()} />
               </span>
             </span>
             {diagnosis.status === "solved" ? <Badge tone="glow">Solved</Badge> : <Badge>Open</Badge>}
