@@ -509,6 +509,9 @@ export type SavedTotals = {
   amounts: Record<RebateColumn, Cents>;
   bySalesman: { label: string; lines: number; amount: Cents }[];
   byCategory: { label: string; lines: number; amount: Cents }[];
+  // Each invoice's lines the filters find, by salesman, for its line in
+  // the list of invoices.
+  bySalesmanOf: Record<string, { label: string; lines: number; amount: Cents }[]>;
 };
 
 export type SavedRebates = ListPage & { items: SavedRebateLine[]; total: number; totals: SavedTotals };
@@ -605,6 +608,8 @@ function groupBy(rows: readonly LineRow[], nameOf: (row: LineRow) => string) {
   return [...groups.values()].sort((a, b) => b.amount - a.amount || a.label.localeCompare(b.label));
 }
 
+const salesmanOf = (row: LineRow) => (row.saleId ? row.sale?.salesperson?.trim() || "No salesman" : "Not found");
+
 // The saved lines the filters find, a page of them, with their totals.
 export async function listSavedRebates(actor: CurrentUser, filters: RebateFilters, { page = 1, perPage = SAVED_PAGE_SIZE } = {}): Promise<SavedRebates | Problem> {
   if (!allows(actor, "sales.log")) return notAllowed;
@@ -631,8 +636,11 @@ export async function listSavedRebates(actor: CurrentUser, filters: RebateFilter
       lines: rows.length,
       found: rows.filter((row) => row.saleId).length,
       amounts,
-      bySalesman: groupBy(rows, (row) => (row.saleId ? row.sale?.salesperson?.trim() || "No salesman" : "Not found")),
+      bySalesman: groupBy(rows, salesmanOf),
       byCategory: groupBy(rows, (row) => (row.saleId ? row.sale?.category?.trim() || "No category" : "Not found")),
+      bySalesmanOf: Object.fromEntries(
+        [...Map.groupBy(rows, (row) => row.invoiceId)].map(([invoiceId, lines]) => [invoiceId, groupBy(lines, salesmanOf)]),
+      ),
     },
   };
 }

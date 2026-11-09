@@ -1023,7 +1023,18 @@ describe("on the server: looking units up, the download, and Saved rebates", () 
         { label: "ATV", lines: 1, amount: 22747 },
         { label: "Not found", lines: 2, amount: 11500 },
       ],
+      // Each invoice's own, for its line in the list of invoices.
+      bySalesmanOf: {
+        [saved.a]: [
+          { label: "Lee Brandvold", lines: 1, amount: 79622 },
+          { label: "No salesman", lines: 1, amount: 22747 },
+          { label: "Not found", lines: 1, amount: 10000 },
+        ],
+        [saved.scan]: [{ label: "Not found", lines: 1, amount: 1500 }],
+      },
     });
+    // Narrowed to a salesman, each invoice's are the lines found.
+    assert.deepEqual((await lines({ salesperson: "lee brandvold" })).totals.bySalesmanOf, { [saved.a]: [{ label: "Lee Brandvold", lines: 1, amount: 79622 }] });
     const dana = thisYear.items[0];
     assert.deepEqual(
       [dana.invoiceDate, dana.column, dana.vinRead, dana.amount, dana.sale?.customerName, dana.sale?.salesperson],
