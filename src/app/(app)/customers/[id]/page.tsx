@@ -82,8 +82,9 @@ async function Customer({
                 )}
               </span>
             )}
-            {address.map((addressLine) => (
-              <span key={addressLine} className="block">
+            {/* Keyed by position, not text: two lines can read the same. */}
+            {address.map((addressLine, index) => (
+              <span key={index} className="block">
                 {addressLine}
               </span>
             ))}
