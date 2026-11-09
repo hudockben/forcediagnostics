@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { CLOCK_BEAT_MS, CLOCK_IDLE_MS, formatDuration, shownClock, type ClockView } from "@/lib/diagnose-clock-rules";
+import { estimateBasis, type Estimate } from "@/lib/diagnosis-times-rules";
 
 import { QuickIcon } from "./icons";
 
@@ -71,11 +72,32 @@ const buttonClass =
 const quietButton = `${buttonClass} border-white/15 text-ink-muted hover:border-white/25 hover:text-ink`;
 const glowButton = `${buttonClass} border-glow/30 text-glow hover:border-glow/50 hover:bg-glow/10`;
 
+// What similar jobs took (src/lib/diagnosis-times-rules.ts), under the
+// clock and on the quick form as it's filled in.
+export function EstimateLine({ estimate }: { estimate: Estimate }) {
+  return (
+    <p data-estimate className="text-xs leading-5 text-ink-muted">
+      Similar jobs: about <span className="font-medium text-ink">{formatDuration(estimate.typical)}</span>, plan for{" "}
+      <span className="font-medium text-ink">{formatDuration(estimate.planFor)}</span> (from {estimateBasis(estimate)}).
+    </p>
+  );
+}
+
 type ClockAction = "look" | "use" | "pause" | "end" | "resume" | "keep-gap" | "drop-gap";
 
 const newer = (next: ClockView, old: ClockView | null) => !old || Date.parse(next.at) >= Date.parse(old.at);
 
-export function DiagnosisClock({ conversationId, clock, busy }: { conversationId: string; clock: ClockView | null; busy: boolean }) {
+export function DiagnosisClock({
+  conversationId,
+  clock,
+  estimate,
+  busy,
+}: {
+  conversationId: string;
+  clock: ClockView | null;
+  estimate: Estimate | null;
+  busy: boolean;
+}) {
   // The latest clock: as the conversation has it (a message, a tick or a
   // mark brought it), or as the clock's own requests brought it, whichever
   // the server worked out last.
@@ -238,6 +260,7 @@ export function DiagnosisClock({ conversationId, clock, busy }: { conversationId
           {shown.state === "ended" && button("resume", "Reopen")}
         </div>
       </div>
+      {estimate && <EstimateLine estimate={estimate} />}
       {held.gap && (
         <div data-clock-gap className="space-y-2 rounded-xl border border-glow/25 bg-glow/5 px-4 py-3 text-sm">
           <p className="text-ink">

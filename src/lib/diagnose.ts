@@ -10,6 +10,8 @@ import { conversationCustomer, type ConversationCustomer } from "@/lib/customer-
 import { customerOf, findChoice } from "@/lib/customers";
 import { moveClock, readClock, startClock } from "@/lib/diagnose-clock";
 import type { ClockEvent, ClockView } from "@/lib/diagnose-clock-rules";
+import { conversationEstimate } from "@/lib/diagnosis-times";
+import type { Estimate } from "@/lib/diagnosis-times-rules";
 import { runDiagnosisLoop, type ClaudeStream, type LoopResult, type ToolHandler } from "@/lib/diagnose-loop";
 import { TOOL_NAMES, webSearchEnabled } from "@/lib/diagnose-prompt";
 import {
@@ -130,11 +132,15 @@ async function unitOf(shopId: string, conversation: ConversationRow) {
   return { scope, ...machine };
 }
 
-// What the screen shows of a conversation: its unit, whose it is, and its
-// clock as the viewer sees it.
+// What the screen shows of a conversation: its unit, whose it is, its clock
+// as the viewer sees it, and what similar jobs took.
 async function viewOf(shopId: string, conversation: ConversationRow, clock: ClockView | null) {
-  const [unit, customer] = await Promise.all([unitOf(shopId, conversation), customerOf(shopId, conversation.customerVehicleId)]);
-  return toConversationView(conversation, unit, customer, clock);
+  const [unit, customer, estimate] = await Promise.all([
+    unitOf(shopId, conversation),
+    customerOf(shopId, conversation.customerVehicleId),
+    conversationEstimate(shopId, conversation),
+  ]);
+  return toConversationView(conversation, unit, customer, clock, estimate);
 }
 
 function toConversationView(
@@ -142,6 +148,7 @@ function toConversationView(
   { scope, vehicle, model }: { scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null },
   customer: ConversationCustomer | null,
   clock: ClockView | null,
+  estimate: Estimate | null,
 ): ConversationView {
   return {
     id: conversation.id,
@@ -160,6 +167,7 @@ function toConversationView(
     techMessages: conversation.techMessages,
     full: fullReason(conversation),
     clock,
+    estimate,
   };
 }
 

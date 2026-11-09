@@ -6,6 +6,7 @@
 
 import type { ConversationCustomer } from "@/lib/customer-rules";
 import type { ClockView } from "@/lib/diagnose-clock-rules";
+import type { Estimate } from "@/lib/diagnosis-times-rules";
 import { inferSystem, listedSystem, type CauseSystem, type UnitVehicle } from "@/lib/diagnose-zones";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 
@@ -747,6 +748,9 @@ export type ConversationView = {
   // The clock on it, as the viewer sees it (src/lib/diagnose-clock-rules.ts);
   // null for one started before the clock was added.
   clock: ClockView | null;
+  // What similar jobs took (src/lib/diagnosis-times-rules.ts), when the
+  // shop has solved enough like it.
+  estimate: Estimate | null;
 };
 
 export type StreamEvent =

@@ -85,10 +85,11 @@ export type FinishedDiagnosis = {
 };
 
 // The fault codes in a diagnosis's opening message (the quick form's
-// "Fault codes: P0300, P0301" line).
+// "Fault codes: P0300, P0301" line), or in that line's list on its own.
+export const splitCodes = (list: string | null) => [...new Set((list ?? "").split(/,\s*/).map((code) => code.trim()).filter(Boolean))];
 export function openingCodes(techText: string | null) {
   const match = /^Fault codes: (.+)$/m.exec(techText ?? "");
-  return match ? [...new Set(match[1].split(/,\s*/).map((code) => code.trim()).filter(Boolean))] : [];
+  return match ? splitCodes(match[1]) : [];
 }
 
 // The unit as the shop would group jobs: its line and engine size ("RZR
@@ -213,4 +214,63 @@ export const fixOf = (diagnosis: Pick<FinishedDiagnosis, "solved" | "fix" | "sys
 export function timesFileName(params: TimesParams, today: string) {
   const what = timesPeriod(params).label.replace(/[^\w ,–-]+/g, "").replace(/\s+/g, " ").trim();
   return `Diagnosis times ${what} ${today}.xlsx`;
+}
+
+// --- An estimate for the next one ------------------------------------------------
+
+// What a diagnosis about to start, or under way, is likely to take, from the
+// shop's solved ones like it (src/lib/diagnosis-times.ts reads them): those
+// on the same unit (its group: "RZR 1000") that started with one of the
+// same fault codes, then any with one of the same codes, then any on the
+// same unit. The closest of those with at least ESTIMATE_ENOUGH diagnoses
+// is used, or failing that the closest with ESTIMATE_MIN; with fewer, there
+// isn't one.
+export const ESTIMATE_ENOUGH = 3;
+export const ESTIMATE_MIN = 2;
+
+// A solved diagnosis as an estimate needs it: its unit, the fault codes it
+// started with, and the time on its clock (seconds).
+export type PastJob = { unit: string | null; codes: string[]; seconds: number };
+
+export type Estimate = {
+  // How many it's from, their typical time and what 4 in 5 were done
+  // within (seconds).
+  count: number;
+  typical: number;
+  planFor: number;
+  // What it went by: the unit group, and which of the codes, if either.
+  unit: string | null;
+  codes: string[];
+};
+
+export function estimateFrom(past: readonly PastJob[], target: { unit: string | null; codes: readonly string[] }): Estimate | null {
+  const group = unitGroup(target.unit);
+  const unitKey = group === NO_UNIT ? null : group.toLowerCase();
+  const wanted = new Set(target.codes.map((code) => code.toUpperCase()));
+  const sameUnit = (job: PastJob) => unitKey !== null && unitGroup(job.unit).toLowerCase() === unitKey;
+  const sharesCode = (job: PastJob) => job.codes.some((code) => wanted.has(code.toUpperCase()));
+  const tiers: { unit: string | null; byCodes: boolean; jobs: PastJob[] }[] = [];
+  if (unitKey && wanted.size > 0) tiers.push({ unit: group, byCodes: true, jobs: past.filter((job) => sameUnit(job) && sharesCode(job)) });
+  if (wanted.size > 0) tiers.push({ unit: null, byCodes: true, jobs: past.filter(sharesCode) });
+  if (unitKey) tiers.push({ unit: group, byCodes: false, jobs: past.filter(sameUnit) });
+  const tier = tiers.find((each) => each.jobs.length >= ESTIMATE_ENOUGH) ?? tiers.find((each) => each.jobs.length >= ESTIMATE_MIN);
+  if (!tier) return null;
+  const stats = timeStats(tier.jobs.map((job) => job.seconds));
+  const seen = new Set(tier.jobs.flatMap((job) => job.codes.map((code) => code.toUpperCase())));
+  return {
+    count: stats.count,
+    typical: stats.typical,
+    planFor: stats.planFor,
+    unit: tier.unit,
+    codes: tier.byCodes ? target.codes.filter((code) => seen.has(code.toUpperCase())) : [],
+  };
+}
+
+// "P0300", "P0300 or P0301", "P0300, P0301 or P0302".
+const orList = (items: readonly string[]) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items.at(-1)}`);
+
+// What it's from: "4 solved RZR 1000 diagnoses with P0300".
+export function estimateBasis(estimate: Pick<Estimate, "count" | "unit" | "codes">) {
+  const what = `${estimate.count} solved ${estimate.unit ? `${estimate.unit} ` : ""}${estimate.count === 1 ? "diagnosis" : "diagnoses"}`;
+  return estimate.codes.length > 0 ? `${what} with ${orList(estimate.codes)}` : what;
 }

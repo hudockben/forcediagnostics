@@ -28,6 +28,8 @@ import type {
 } from "@/lib/diagnose-rules";
 import type { StepState } from "@/lib/diagnose-step-checks";
 import { previewVin, suggestUnits } from "@/lib/diagnose-tools";
+import { estimateForStart } from "@/lib/diagnosis-times";
+import type { Estimate } from "@/lib/diagnosis-times-rules";
 import type { UnitVehicle } from "@/lib/diagnose-zones";
 import { requireCapability } from "@/lib/session";
 import type { UnitSpec } from "@/lib/unit-vehicle";
@@ -59,6 +61,17 @@ export async function suggestUnitsAction(query: string): Promise<UnitSuggestion[
 export async function previewVinAction(vin: string): Promise<VinPreview | null> {
   const user = await requireCapability("diagnostics.work");
   const result = await attempt("look up the VIN", () => previewVin(user.shop.id, String(vin ?? "")));
+  return result && !("error" in result) ? result : null;
+}
+
+// What similar jobs took, for the quick form as its unit and fault codes
+// are filled in: the unit as the form has it (a model from the list, a
+// model number as typed, or a year and model) and the codes as typed.
+export async function estimateAction(input: { unit: string; codes: string }): Promise<Estimate | null> {
+  const user = await requireCapability("diagnostics.work");
+  const result = await attempt("estimate the time", () =>
+    estimateForStart(user.shop.id, { unit: String(input?.unit ?? ""), codes: String(input?.codes ?? "") }),
+  );
   return result && !("error" in result) ? result : null;
 }
 

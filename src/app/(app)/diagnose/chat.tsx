@@ -28,13 +28,14 @@ import {
   type VinPreview,
 } from "@/lib/diagnose-rules";
 import { claudeSummary, openTurnIds, techSummary } from "@/lib/diagnose-thread";
+import type { Estimate } from "@/lib/diagnosis-times-rules";
 import type { Vehicle } from "@/lib/manual-catalog-rules";
 import { VIN_LENGTH, checkVin, vinDisagreement } from "@/lib/vin";
 
 import { Chevron, vehicleOptions } from "../library/search-form";
-import { loadConversationAction, previewVinAction, stopTurnAction } from "./actions";
+import { estimateAction, loadConversationAction, previewVinAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
-import { DiagnosisClock } from "./clock";
+import { DiagnosisClock, EstimateLine } from "./clock";
 import { CustomerLine, CustomerName, CustomerVehiclePicker } from "./customer-picker";
 import { DeleteDiagnosis } from "./delete-diagnosis";
 import {
@@ -464,6 +465,35 @@ function Starter({
   const typedNumber = !byVehicle ? (picked?.modelNumber ?? fields.modelNumber.trim()) : "";
   const disagreement = okVin && typedNumber ? vinDisagreement(okVin, typedNumber) : null;
   const vehiclePicked = byVehicle && Boolean(fields.vehicle || fields.year || fields.model.trim());
+  const vehicleIsLine = fields.vehicle !== "" && !["UTV", "ATV", "Generator", "Other"].includes(fields.vehicle);
+
+  // What similar jobs took, as the unit and fault codes are filled in: the
+  // unit as a model picked from the list, the VIN's, the model number as
+  // typed, or the year and model (or line) picked.
+  const vinFound = okVin && preview?.vin === okVin ? preview.found : null;
+  const vinLabel = vinFound && (vinFound.status === "found" || vinFound.status === "listed") ? vinFound.label : null;
+  const estimateUnit = options.carry
+    ? (options.carry.unit ?? "")
+    : byVehicle
+      ? [fields.year, fields.model.trim() || (vehicleIsLine ? fields.vehicle : "")].filter(Boolean).join(" ")
+      : (picked?.label ?? vinLabel ?? fields.modelNumber.trim());
+  const estimateCodes = codes.join(", ");
+  const estimateKey = `${estimateUnit}|${estimateCodes}`;
+  const [estimate, setEstimate] = useState<{ key: string; value: Estimate | null } | null>(null);
+  const shownEstimate = estimate?.key === estimateKey ? estimate.value : null;
+
+  useEffect(() => {
+    if (!estimateUnit && !estimateCodes) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const value = await estimateAction({ unit: estimateUnit, codes: estimateCodes }).catch(() => null);
+      if (!cancelled) setEstimate({ key: `${estimateUnit}|${estimateCodes}`, value });
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [estimateUnit, estimateCodes]);
 
   useEffect(() => {
     if (!okVin || options.carry) return;
@@ -517,7 +547,6 @@ function Starter({
     if (options.carry) return { from: options.carry.id };
     const vinField: Record<string, string> = vin.status === "ok" || vin.status === "partial" ? { vin: vin.vin } : {};
     if (!byVehicle) return { modelNumber: fields.modelNumber.trim(), ...vinField };
-    const vehicleIsLine = fields.vehicle !== "" && !["UTV", "ATV", "Generator", "Other"].includes(fields.vehicle);
     return {
       ...(vehicleIsLine ? { brand: fields.vehicle } : { vehicle: fields.vehicle }),
       year: fields.year,
@@ -789,6 +818,7 @@ function Starter({
               className={`mt-1.5 ${inputBaseClass} h-auto py-3`}
             />
           </div>
+          {shownEstimate && <EstimateLine estimate={shownEstimate} />}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <button
               type="submit"
@@ -1324,7 +1354,7 @@ export function DiagnoseChat({
             canOpen={customerLinks}
             onChange={(customer) => setConversation((old) => (old ? { ...old, customer } : old))}
           />
-          <DiagnosisClock conversationId={conversation.id} clock={conversation.clock} busy={busy} />
+          <DiagnosisClock conversationId={conversation.id} clock={conversation.clock} estimate={conversation.estimate} busy={busy} />
         </div>
       </header>
 
