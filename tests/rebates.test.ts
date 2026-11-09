@@ -731,6 +731,52 @@ describe("the workbook", () => {
       ["Not in the NUSR", 1, 0, 0, 100],
       ["UTV", 1, 979.96, 0, 796.22],
     ]);
+    // One invoice: its salesmen are the Salesman table's, not again.
+    assert.equal(
+      rows.some((row) => row[0] === "Invoice 314886"),
+      false,
+    );
+  });
+
+  test("with several invoices, each one's rebates by salesman, with what it comes to", () => {
+    const rewards: RebateInvoice = {
+      fileName: "rewards.pdf",
+      number: "314990",
+      type: "Rebate",
+      date: "2026-10-30",
+      total: -75000,
+      column: "retailRewards",
+      lines: [
+        { line: 1, part: "011", vinRead: SPORTSMAN, modelCode: null, programs: ["US RETAIL RWDS 2026"], dates: [], names: ["WREN HOLLOWAY"], unitPrice: 0, amount: 50000, saleId: "s2" },
+        { line: 2, part: "011", vinRead: RANGER, modelCode: null, programs: ["US RETAIL RWDS 2026"], dates: [], names: ["DANA QUILLFEATHER"], unitPrice: 0, amount: 25000, saleId: "s1" },
+      ],
+    };
+    const rows = rowsOf(rebateWorkbook([INVOICE, rewards], SALES, { generatedAt: new Date("2026-11-06T20:00:00Z"), timeZone: "America/New_York" })[1]).map((row) => row.map(valueOf));
+    const block = (heading: string) => {
+      const start = rows.findIndex((row) => row[0] === heading);
+      assert.ok(start >= 0, `no ${heading}`);
+      return rows.slice(start, rows.findIndex((row, index) => index > start && row.length === 0));
+    };
+    // Across both, as before: AO the NUSR's holdback beside the additional holdback.
+    assert.deepEqual(block("Salesman").slice(1), [
+      ["Lee Brandvold", 2, 979.96, 250, 796.22],
+      ["Sam Ortiz", 2, 279.96, 500, 227.47],
+      ["Not in the NUSR", 1, 0, 0, 100],
+    ]);
+    // Then each invoice's own, under the Category table, with its total.
+    assert.deepEqual(block("Invoice 314886"), [
+      ["Invoice 314886", "Units", "Holdback", "Retail Rwds", "Add'l Hlbk"],
+      ["Lee Brandvold", 1, 979.96, 0, 796.22],
+      ["Not in the NUSR", 1, 0, 0, 100],
+      ["Sam Ortiz", 1, 279.96, 0, 227.47],
+      ["Total", 3, 1259.92, 0, 1123.69],
+    ]);
+    assert.deepEqual(block("Invoice 314990").slice(1), [
+      ["Lee Brandvold", 1, 0, 250, 0],
+      ["Sam Ortiz", 1, 0, 500, 0],
+      ["Total", 2, 0, 750, 0],
+    ]);
+    assert.ok(rows.findIndex((row) => row[0] === "Category") < rows.findIndex((row) => row[0] === "Invoice 314886"));
   });
 
   test("with nothing found in the NUSR, only the Rebates sheet", () => {
