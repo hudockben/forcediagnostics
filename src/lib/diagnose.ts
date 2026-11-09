@@ -4,12 +4,12 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { auditLog, customerVehicles, customers, diagnosisConversations, diagnosisTurns, users } from "@/db/schema";
+import { auditLog, customerVehicles, customers, diagnosisConversations, diagnosisTimeSpans, diagnosisTurns, users } from "@/db/schema";
 import { giveBackAttempt, takeAttempt } from "@/lib/attempts";
 import { conversationCustomer, type ConversationCustomer } from "@/lib/customer-rules";
 import { customerOf, findChoice } from "@/lib/customers";
 import { moveClock, readClock, startClock } from "@/lib/diagnose-clock";
-import type { ClockEvent, ClockView } from "@/lib/diagnose-clock-rules";
+import { CLOCK_IDLE_MS, type ClockEvent, type ClockView } from "@/lib/diagnose-clock-rules";
 import { conversationEstimate } from "@/lib/diagnosis-times";
 import type { Estimate } from "@/lib/diagnosis-times-rules";
 import { runDiagnosisLoop, type ClaudeStream, type LoopResult, type ToolHandler } from "@/lib/diagnose-loop";
@@ -207,6 +207,9 @@ export type ConversationSummary = {
   techMessages: number;
   updatedAt: string;
   lastTurn: TurnView["status"] | null;
+  // The time on its clock (seconds), as the diagnosis shows it; null for one
+  // started before the clock was added.
+  clockSeconds: number | null;
 };
 
 const summaryColumns = {
@@ -222,11 +225,21 @@ const summaryColumns = {
     select t.status from ${diagnosisTurns} t
     where t.conversation_id = ${diagnosisConversations.id} order by t.seq desc limit 1
   )`,
+  // Its stretches, and while it runs the time since the last use, as the
+  // clock on the diagnosis counts it (see clockView); null with none.
+  clockSeconds: sql<number | null>`(
+    select sum(extract(epoch from s.ended_at - s.started_at))
+      + coalesce(sum(greatest(extract(epoch from now() - s.ended_at), 0)) filter (
+          where s.stop is null and s.ended_at >= now() - make_interval(secs => ${CLOCK_IDLE_MS / 1000})
+        ), 0)
+    from ${diagnosisTimeSpans} s where s.conversation_id = ${diagnosisConversations.id}
+  )::float8`,
 };
 
 const toSummary = (row: Omit<ConversationSummary, "updatedAt"> & { updatedAt: Date }): ConversationSummary => ({
   ...row,
   updatedAt: row.updatedAt.toISOString(),
+  clockSeconds: row.clockSeconds === null ? null : Math.round(Number(row.clockSeconds)),
 });
 
 // What a search of the list looks through: the title (which holds the

@@ -3,13 +3,16 @@ import Link from "next/link";
 import { LocalTime } from "@/components/app/local-time";
 import { Badge } from "@/components/app/ui";
 import type { ConversationSummary } from "@/lib/diagnose";
+import { formatDuration } from "@/lib/diagnose-clock-rules";
+
+import { QuickIcon } from "./icons";
 
 const plural = (count: number, one: string, many: string) =>
   `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 
 // One diagnosis in a list (the Diagnose tab's, Home's own open ones): its
 // title, unit, whose it is (the customer, when one is linked), who started
-// it, how many messages, when, and where it's at.
+// it, how many messages, the time on its clock, when, and where it's at.
 // Home leaves out who started it and the Open badge (a list of the viewer's
 // open ones).
 export function ConversationRow({
@@ -37,7 +40,17 @@ export function ConversationRow({
               plural(conversation.techMessages, "message", "messages"),
             ]
               .filter(Boolean)
-              .join(" · ")}{" "}
+              .join(" · ")}
+            {conversation.clockSeconds !== null && (
+              <>
+                {" · "}
+                <span data-row-clock className="whitespace-nowrap">
+                  <QuickIcon className="mr-0.5 inline size-3.5 align-[-2px]" />
+                  {formatDuration(conversation.clockSeconds)}
+                  <span className="sr-only"> on the clock</span>
+                </span>
+              </>
+            )}{" "}
             · <LocalTime value={conversation.updatedAt} />
           </span>
         </span>
