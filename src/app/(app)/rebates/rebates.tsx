@@ -27,12 +27,14 @@ import { readInvoiceFile, type ReadProgress } from "./reader";
 
 // The Rebates tab, in the manager's browser: invoices dropped anywhere on
 // the page (or chosen) are read here (reader.ts), their units found in the
-// NUSR (actions.ts), and every line shown to check, under New invoices: the
-// amount (which can be corrected) and the sale it was found as (which can
-// be changed, or searched for). Save keeps an invoice as checked (Saved
-// rebates, at the top of the page, lists what's saved; Open there brings
-// one back here to change and save again). Download Excel sends what's on
-// the page to /rebates/export, which writes the workbook.
+// NUSR (actions.ts), and each one shown on its own under New invoices, at
+// the top of the page, every line to check: the amount (which can be
+// corrected) and the sale it was found as (which can be changed, or
+// searched for). With several on the page, New invoices lists them, each
+// with where it stands and a way to it. Save keeps an invoice as checked
+// (Saved rebates, below, lists what's saved; Open there brings one back up
+// here to change and save again). Download Excel sends what's on the page
+// to /rebates/export, which writes the workbook.
 
 type Line = InvoiceLine & {
   // The amount as shown and corrected.
@@ -187,6 +189,47 @@ function loadedFromSaved(opened: OpenedInvoice): Loaded {
   };
 }
 
+// What an invoice's lines come to and what's left on it to check: for its
+// card, and for the list of the invoices on the page.
+type Check = { sum: Cents; total: Cents | null; found: number; toCheck: number; badAmounts: number };
+
+function checkOf(loaded: Loaded, sales: Record<string, RebateSaleSummary>): Check {
+  const { lines } = loaded;
+  const total = loaded.invoice.total?.cents ?? null;
+  return {
+    sum: lines.reduce((all, line) => all + (lineCents(line) ?? 0), 0),
+    total: total === null ? null : Math.abs(total),
+    found: lines.filter((line) => line.saleId).length,
+    toCheck: lines.filter((line) => {
+      const sale = line.saleId ? sales[line.saleId] : undefined;
+      return sale && saleNotes(line, sale, loaded.column).some((note) => note.check);
+    }).length,
+    badAmounts: lines.filter((line) => lineCents(line) === null && line.amountText.trim() !== "").length,
+  };
+}
+
+// Where an invoice on the page stands, in a word or two.
+function standing(loaded: Loaded, check: Check): { text: string; tone: "neutral" | "glow" | "trail" } {
+  const { lookup, save } = loaded;
+  if (lookup.state === "looking") return { text: "Looking up…", tone: "neutral" };
+  if (lookup.state === "failed") return { text: "Not looked up", tone: "trail" };
+  if (save.state === "saving") return { text: "Saving…", tone: "neutral" };
+  if (save.state === "saved") return { text: save.how === "opened" ? "Opened from saved" : "Saved", tone: "glow" };
+  if (save.state === "exists") return { text: "Saved already", tone: "trail" };
+  if (save.state === "failed") return { text: "Didn't save", tone: "trail" };
+  if (loaded.column === null) return { text: "Pick a column", tone: "trail" };
+  if (check.badAmounts > 0) return { text: "Fix an amount", tone: "trail" };
+  if (loaded.savedId) return { text: "Changed since saved", tone: "trail" };
+  return { text: "Not saved yet", tone: "neutral" };
+}
+
+// Brings an invoice's card into view, with the focus on it.
+function goToCard(loaded: Loaded) {
+  const card = document.querySelector<HTMLElement>(`[data-rebates-card="${loaded.savedId ?? loaded.id}"]`);
+  card?.scrollIntoView({ behavior: "smooth", block: "start" });
+  card?.focus({ preventScroll: true });
+}
+
 function progressText({ step, done, pages }: ReadProgress) {
   if (step === "opening") return "Opening…";
   if (step === "checking") return `Reading the amounts it wasn't sure of again: ${done} of ${pages}…`;
@@ -248,8 +291,8 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
     document.querySelector(`[data-rebates-card="${openedId}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [openedId, openedNumber]);
 
-  // A file can be dropped anywhere on the page (Saved rebates is above where
-  // it's read): while one is dragged over, the page says to drop it.
+  // A file can be dropped anywhere on the page (Saved rebates, further down,
+  // too): while one is dragged over, the page says to drop it.
   const dropped = useEffectEvent((files: File[]) => void readFiles(files));
   useEffect(() => {
     let over = 0;
@@ -333,8 +376,8 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
       setProblems((list) => [...list, ...files.map((file) => ({ fileName: file.name, error: "Another invoice was being read: drop this one again once it's done." }))]);
       return;
     }
-    // New invoices, where it's read, is under Saved rebates: brought into
-    // view unless it's in view already.
+    // New invoices, where it's read, is at the top: brought back into view
+    // when it was dropped further down (on Saved rebates, say).
     const box = newInvoices.current?.getBoundingClientRect();
     if (box && (box.top < 0 || box.top > window.innerHeight - 160)) newInvoices.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     for (const [index, file] of files.entries()) {
@@ -394,8 +437,8 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
     updateInvoice(id, (invoice) => ({ ...edit(invoice), edits: invoice.edits + 1, save: invoice.save.state === "saving" ? invoice.save : { state: "idle" } }));
 
   // Saves an invoice as checked here: in place of the saved one when it's
-  // one opened from Saved rebates or `replace` says so. Saved rebates, below,
-  // shows it once it's saved.
+  // one opened from Saved rebates or `replace` says so. Saved rebates, under
+  // the invoices on the page, shows it once it's saved.
   async function save(loaded: Loaded, replace: boolean) {
     const edits = loaded.edits;
     updateInvoice(loaded.id, (invoice) => ({ ...invoice, save: { state: "saving" } }));
@@ -475,7 +518,7 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
         >
           <span className="text-sm font-medium text-ink">{reading ? `Reading ${reading.fileName}…` : "Drop a rebate invoice here, or choose one"}</span>
           <span className="text-xs text-ink-muted">
-            A PDF from the dealer portal (Invoice Print), or a scan or photo of the printout. Several at once is fine, and anywhere on the page will do.
+            A PDF from the dealer portal (Invoice Print), or a scan or photo of the printout. Several at once is fine (each is checked on its own), and anywhere on the page will do.
           </span>
           <input
             ref={input}
@@ -521,6 +564,7 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
             ))}
           </ul>
         )}
+        {invoices.length > 1 && <OnThePage invoices={invoices} sales={sales} />}
       </section>
 
       {invoices.map((loaded) => (
@@ -570,6 +614,93 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
   );
 }
 
+// --- The invoices on the page ---------------------------------------------------
+
+// With several invoices on the page, each on its own line: what it has,
+// whether its amounts add up to its total, where it stands, and Check,
+// which goes to its card below.
+function OnThePage({ invoices, sales }: { invoices: Loaded[]; sales: Record<string, RebateSaleSummary> }) {
+  return (
+    <div className="mt-5" data-rebates-on-page>
+      <h3 className="text-sm font-semibold text-ink">{plural(invoices.length, "invoice", "invoices")} on the page</h3>
+      <p className="mt-0.5 text-xs text-ink-muted">Each file is read, checked and saved on its own, below. Check goes to one.</p>
+      <div className="relative -mx-5 mt-3 overflow-x-auto border-y border-white/10 sm:-mx-6">
+        <table className="w-full min-w-[48rem] text-sm">
+          <caption className="sr-only">The invoices on the page and where each stands</caption>
+          <thead>
+            <tr className="border-b border-white/10 text-left text-xs text-ink-muted">
+              <th scope="col" className="px-5 py-2 font-medium sm:px-6">
+                Invoice
+              </th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                Units
+              </th>
+              <th scope="col" className="px-3 py-2 text-right font-medium">
+                Amount
+              </th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                Where it stands
+              </th>
+              <th scope="col" className="px-5 py-2 sm:px-6">
+                <span className="sr-only">Go to it</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/10">
+            {invoices.map((loaded) => {
+              const check = checkOf(loaded, sales);
+              const { invoice, lines, lookup } = loaded;
+              const status = standing(loaded, check);
+              const name = invoice.number ? `Invoice ${invoice.number}` : loaded.fileName;
+              const notFound = lines.length - check.found;
+              return (
+                <tr key={loaded.id} className="align-top" data-rebates-on-page-invoice={invoice.number ?? loaded.fileName}>
+                  <td className="px-5 py-3 sm:px-6">
+                    <p className="font-medium text-ink">
+                      {name}
+                      {invoice.date && <span className="font-normal text-ink-muted"> · {saleDay(invoice.date)}</span>}
+                    </p>
+                    <p className="text-xs break-all text-ink-muted">
+                      {[invoice.number ? loaded.fileName : null, invoice.type, loaded.column ? REBATE_COLUMN_LETTERS[loaded.column] : null].filter(Boolean).join(" · ")}
+                    </p>
+                  </td>
+                  <td className="px-3 py-3 whitespace-nowrap">
+                    <p className="text-ink tabular-nums">{plural(lines.length, "unit", "units")}</p>
+                    {lookup.state === "done" && (
+                      <p className={`text-xs ${notFound > 0 || check.toCheck > 0 ? "text-trail" : "text-ink-muted"}`}>
+                        {notFound === 0 ? "All found" : `${notFound.toLocaleString("en-US")} not found`}
+                        {check.toCheck > 0 && ` · ${check.toCheck.toLocaleString("en-US")} to check`}
+                      </p>
+                    )}
+                  </td>
+                  <td className="px-3 py-3 text-right whitespace-nowrap">
+                    <p className="text-ink tabular-nums">{formatMoney(check.sum)}</p>
+                    <p className={`text-xs ${check.total !== null && check.sum === check.total ? "text-ink-muted" : "text-trail"}`}>
+                      {check.total === null
+                        ? "No total read"
+                        : check.sum === check.total
+                          ? "Adds up to its total"
+                          : `${formatMoney(Math.abs(check.total - check.sum))} ${check.sum < check.total ? "under" : "over"} its total`}
+                    </p>
+                  </td>
+                  <td className="px-3 py-3">
+                    <Badge tone={status.tone}>{status.text}</Badge>
+                  </td>
+                  <td className="px-5 py-3 text-right sm:px-6">
+                    <button type="button" onClick={() => goToCard(loaded)} className={linkButtonClass} data-rebates-go-to>
+                      Check<span className="sr-only"> {name}</span>
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // --- An invoice -----------------------------------------------------------------
 
 function InvoiceCard({
@@ -594,16 +725,9 @@ function InvoiceCard({
 }) {
   const { invoice, lines, lookup, save } = loaded;
   const columnName = useId();
-  const sum = lines.reduce((all, line) => all + (lineCents(line) ?? 0), 0);
-  const total = invoice.total?.cents === null || invoice.total?.cents === undefined ? null : Math.abs(invoice.total.cents);
-  const found = lines.filter((line) => line.saleId).length;
-  const toCheck = lines.filter((line) => {
-    const sale = line.saleId ? sales[line.saleId] : undefined;
-    return sale && saleNotes(line, sale, loaded.column).some((note) => note.check);
-  }).length;
+  const { sum, total, found, toCheck, badAmounts } = checkOf(loaded, sales);
   const setLine = (number: number, change: Partial<Line>) =>
     onChange((old) => ({ ...old, lines: old.lines.map((line) => (line.line === number ? { ...line, ...change } : line)) }));
-  const badAmounts = lines.filter((line) => lineCents(line) === null && line.amountText.trim() !== "").length;
   const saveable = lookup.state === "done" && loaded.column !== null && badAmounts === 0;
   const name = invoice.number ? `Invoice ${invoice.number}` : "This invoice";
 
@@ -617,7 +741,9 @@ function InvoiceCard({
 
   return (
     <section
-      className="scroll-mt-4 space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6"
+      tabIndex={-1}
+      aria-label={invoice.number ? `Invoice ${invoice.number}` : loaded.fileName}
+      className="scroll-mt-4 space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 focus:outline-none sm:p-6"
       data-rebates-invoice={invoice.number ?? loaded.fileName}
       data-rebates-card={loaded.savedId ?? loaded.id}
     >
@@ -656,8 +782,8 @@ function InvoiceCard({
             {save.how === "opened"
               ? "Opened from Saved rebates. Change anything, then Save changes to keep it."
               : save.how === "replaced"
-                ? "Saved in place of the one saved before. Saved rebates, at the top of the page, has it."
-                : "Saved. Saved rebates, at the top of the page, has it."}
+                ? "Saved in place of the one saved before. Saved rebates, below, has it."
+                : "Saved. Saved rebates, below, has it."}
           </Notice>
         ) : save.state === "exists" ? (
           <div className="space-y-3 rounded-lg border border-trail/40 bg-trail/5 p-4" role="alert">

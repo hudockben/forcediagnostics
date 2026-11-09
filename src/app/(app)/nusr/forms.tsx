@@ -238,7 +238,8 @@ export function MarkPaidForm({ formId, back, today, comsNumbers }: { formId: str
 type FilterOption = { value: string; label: string };
 
 // A select that narrows the log as soon as it's changed; the other filters
-// and the search stay. Rebates' Saved rebates uses it too, at its own path.
+// and the search stay. Rebates' Saved rebates uses it too, at its own path,
+// and without the page going back to the top (it's under New invoices).
 export function LogFilter({
   name,
   label,
@@ -246,6 +247,7 @@ export function LogFilter({
   options,
   search,
   path = "/nusr",
+  scroll = true,
 }: {
   name: string;
   label: string;
@@ -253,6 +255,7 @@ export function LogFilter({
   options: FilterOption[];
   search: string;
   path?: string;
+  scroll?: boolean;
 }) {
   const router = useRouter();
   const id = useId();
@@ -286,7 +289,7 @@ export function LogFilter({
           params.delete("page");
           const next = params.toString();
           setShown(event.target.value);
-          startLoading(() => router.push(`${path}${next ? `?${next}` : ""}`));
+          startLoading(() => router.push(`${path}${next ? `?${next}` : ""}`, { scroll }));
         }}
         className={`${inputBaseClass} h-11 appearance-none pr-9 text-sm transition-opacity ${loading ? "opacity-60" : ""}`}
         data-nusr-filter={name}

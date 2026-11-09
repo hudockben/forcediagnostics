@@ -13,11 +13,11 @@ import { WidePage } from "../nusr/forms";
 import { ChooseInvoicesButton, Rebates } from "./rebates";
 import { SavedRebatesSection } from "./saved";
 
-// The Rebates tab: Saved rebates at the top, by the filters in the address;
-// under it, New invoices: drop a Polaris rebate invoice (anywhere on the
-// page), see each unit on it found in the NUSR, save it, and download the
-// NUSR sheet with the rebates in AO (Holdback), AP (Retail Rwds) and AQ
-// (Add'l Hlbk). ?open= puts a saved invoice there to change.
+// The Rebates tab: New invoices at the top: drop Polaris rebate invoices
+// (anywhere on the page), see each unit on each found in the NUSR, save
+// them, and download the NUSR sheet with the rebates in AO (Holdback), AP
+// (Retail Rwds) and AQ (Add'l Hlbk). Under it, Saved rebates, by the
+// filters in the address; ?open= puts a saved invoice up top to change.
 
 export const metadata: Metadata = { title: "Rebates" };
 
@@ -51,6 +51,7 @@ async function RebatesTab({ searchParams }: { searchParams: PageProps<"/rebates"
         action={<ChooseInvoicesButton />}
       />
       {opened && "error" in opened && <Notice tone="trail">{opened.error} It may have been removed.</Notice>}
+      <Rebates opened={opened && !("error" in opened) ? opened : null} />
       <SavedRebatesSection
         filters={filters}
         thisYear={thisYear}
@@ -61,7 +62,6 @@ async function RebatesTab({ searchParams }: { searchParams: PageProps<"/rebates"
         saved={saved}
         removed={typeof params.removed === "string" ? params.removed.slice(0, 220) : null}
       />
-      <Rebates opened={opened && !("error" in opened) ? opened : null} />
     </WidePage>
   );
 }
