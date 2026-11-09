@@ -7,7 +7,19 @@ import { MAX_LIST_WORDS, listSearchIsCut } from "@/lib/diagnose-list-rules";
 import { formatDay, formatMoney, shopToday } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
 import { MAX_LISTED, listStockUnits, type StockUnit, type UnitList } from "@/lib/unit-list";
-import { UNIT_STATUSES, UNIT_STATUS_LABELS, daysInStock, parseUnitFilters, soldOf, unitListHref, unitName, vinParts, type UnitFilters, type UnitTotals } from "@/lib/unit-list-rules";
+import {
+  UNIT_STATUSES,
+  UNIT_STATUS_LABELS,
+  daysInStock,
+  isPartialVin,
+  parseUnitFilters,
+  soldOf,
+  unitListHref,
+  unitName,
+  vinParts,
+  type UnitFilters,
+  type UnitTotals,
+} from "@/lib/unit-list-rules";
 
 import { ListSearch } from "../diagnose/list-search";
 import { WidePage } from "../nusr/forms";
@@ -44,6 +56,7 @@ async function UnitListTab({ searchParams }: { searchParams: PageProps<"/unit-li
   if ("error" in list) throw new Error("The Unit List said no to a user allowed to see it");
   const note = (value: string | string[] | undefined) => (typeof value === "string" ? value.slice(0, 200) : null);
   const added = note(params.added);
+  const filled = note(params.filled);
   const removed = note(params.removed);
 
   return (
@@ -53,6 +66,9 @@ async function UnitListTab({ searchParams }: { searchParams: PageProps<"/unit-li
         description="Every unit in stock, with what it cost and its list price. Drop Polaris's whole goods invoices anywhere on this page to add their units."
         action={
           <div className="flex flex-wrap gap-3">
+            <Link href="/unit-list/import" className={buttonClass} data-unit-import-link>
+              Import
+            </Link>
             <Link href="/unit-list/new" className={buttonClass} data-unit-add-link>
               Add a unit
             </Link>
@@ -61,6 +77,7 @@ async function UnitListTab({ searchParams }: { searchParams: PageProps<"/unit-li
         }
       />
       {added && <Notice>Added {added} to the list.</Notice>}
+      {filled && <Notice>Filled in the whole VIN of {filled}, which the list had only the end of.</Notice>}
       {removed && <Notice>Removed {removed} from the list.</Notice>}
       <NewUnits today={today} />
       <UnitListCard list={list} filters={filters} today={today} />
@@ -97,8 +114,11 @@ function UnitListCard({ list, filters, today }: { list: UnitList; filters: UnitF
       <div className="mt-4">
         {nothingYet ? (
           <p className="text-sm leading-6 text-ink-muted" data-unit-list-empty>
-            No units on the list yet. Drop a Polaris whole goods invoice on this page (the PDF from the dealer portal, or a scan of the printout) to add its
-            units, or{" "}
+            No units on the list yet.{" "}
+            <Link href="/unit-list/import" className="text-glow hover:underline">
+              Import your spreadsheet
+            </Link>{" "}
+            of the units in stock, drop a Polaris whole goods invoice on this page (the PDF from the dealer portal, or a scan of the printout) to add its units, or{" "}
             <Link href="/unit-list/new" className="text-glow hover:underline">
               add a unit by hand
             </Link>
@@ -268,7 +288,13 @@ function UnitRow({ unit, showSold, today }: { unit: StockUnit; showSold: boolean
         )}
       </th>
       <td className={`${cellClass} font-mono whitespace-nowrap`}>
-        <span className="text-ink-muted">{head}</span>
+        {isPartialVin(unit.vin) ? (
+          <span title="Only the VIN's end, as the spreadsheet had it" className="text-ink-muted">
+            …
+          </span>
+        ) : (
+          <span className="text-ink-muted">{head}</span>
+        )}
         <span className="font-semibold text-ink">{tail}</span>
       </td>
       <td className={`${cellClass} whitespace-nowrap`}>{formatDay(unit.receivedOn)}</td>

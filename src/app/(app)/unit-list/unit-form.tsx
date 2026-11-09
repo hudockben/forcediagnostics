@@ -4,7 +4,7 @@ import { useRef, useState, type InputHTMLAttributes } from "react";
 
 import { Notice } from "@/components/app/ui";
 import { inputClass, labelClass, primaryButtonClass } from "@/components/hud";
-import { UNIT_LIMITS, type UnitFields, type UnitValues } from "@/lib/unit-list-rules";
+import { MIN_VIN_TAIL, UNIT_LIMITS, type UnitFields, type UnitValues } from "@/lib/unit-list-rules";
 import { useFormAction } from "@/lib/use-form-action";
 import { checkVin } from "@/lib/vin";
 
@@ -69,6 +69,8 @@ export function UnitForm({ id, values, today }: { id?: string; values: UnitValue
   const [vin, setVin] = useState(values.vin);
   const sold = useRef<HTMLInputElement>(null);
   const check = checkVin(vin);
+  // The end of a VIN, as the shop's sheet kept it ("8056154").
+  const tail = check.status === "partial" && check.vin.length >= MIN_VIN_TAIL;
   return (
     <form {...formProps} className="space-y-5" data-unit-form>
       {id && <input type="hidden" name="id" value={id} />}
@@ -93,8 +95,16 @@ export function UnitForm({ id, values, today }: { id?: string; values: UnitValue
             aria-describedby="unit-vin-hint"
             className={`${inputClass} font-mono tracking-wide`}
           />
-          <p id="unit-vin-hint" className={`${hintClass} ${check.status === "ok" && check.checkDigitOk ? "" : check.status === "empty" ? "" : "text-trail"}`}>
-            {check.status === "ok" ? (check.checkDigitOk ? "Check digit matches." : check.warning) : check.status === "empty" ? "All 17 characters." : check.message}
+          <p id="unit-vin-hint" className={`${hintClass} ${(check.status === "ok" && check.checkDigitOk) || check.status === "empty" || tail ? "" : "text-trail"}`}>
+            {check.status === "ok"
+              ? check.checkDigitOk
+                ? "Check digit matches."
+                : check.warning
+              : check.status === "empty"
+                ? "All 17 characters."
+                : tail
+                  ? "Only the VIN's end, as the spreadsheet had it: type the whole VIN, or drop the unit's invoice on the Unit List to fill it in."
+                  : check.message}
           </p>
         </div>
         <Field name="receivedOn" label="Received" values={values} state={state} type="date" required className="sm:col-span-3" />

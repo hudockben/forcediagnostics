@@ -5,7 +5,8 @@ import { refresh } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { requireCapability } from "@/lib/session";
-import { addStockUnits, lookUpUnits, removeStockUnit, updateStockUnit, type AddResult, type UnitLookup } from "@/lib/unit-list";
+import type { UnitImportOutcome } from "@/lib/unit-import-rules";
+import { addStockUnits, importStockUnits, lookUpUnits, removeStockUnit, updateStockUnit, type AddResult, type UnitLookup } from "@/lib/unit-list";
 import { UNIT_LABELS, type UnitFields, type UnitInput } from "@/lib/unit-list-rules";
 
 // Every action re-checks the permission: server actions can be called
@@ -62,6 +63,8 @@ export async function addUnitAction(_previous: FormState, form: FormData): Promi
     if ("error" in result) return { error: result.error };
     if ("problems" in result) return { error: result.problems[0].error, field: result.problems[0].field };
     if (result.already.length) return { error: `A unit with this VIN is on the list already: ${result.already[0].name}.`, field: "vin" };
+    // The whole VIN of a unit from the shop's sheet, which had only its end.
+    if (result.completed.length) redirect(`/unit-list?filled=${encodeURIComponent(result.completed[0].name.slice(0, 200))}`);
     const name = [fields.unitYear, fields.model].map((part) => String(part ?? "").trim()).filter(Boolean).join(" ");
     redirect(`/unit-list?added=${encodeURIComponent(name.slice(0, 200))}`);
   });
@@ -84,4 +87,14 @@ export async function removeUnitAction(_previous: FormState, form: FormData): Pr
     if ("error" in result) return { error: result.error };
     redirect(`/unit-list?removed=${encodeURIComponent(result.name.slice(0, 200))}`);
   });
+}
+
+// One batch of an import of the shop's sheet (see src/lib/unit-import-rules.ts);
+// the browser sends them one after another.
+export async function importStockUnitsAction(input: { importId: unknown; fileName: unknown; units: unknown }): Promise<{ outcomes: UnitImportOutcome[] } | { error: string }> {
+  return attempt<{ outcomes: UnitImportOutcome[] } | { error: string }>(
+    "import units onto the Unit List",
+    async () => importStockUnits(await requireCapability("sales.log"), { importId: input?.importId, fileName: input?.fileName, units: input?.units }),
+    { error: "Couldn't save that batch. Check the connection and try again." },
+  );
 }

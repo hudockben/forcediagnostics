@@ -36,7 +36,9 @@ type Row = {
   lookup: UnitLookup | null;
   // Ticked to add (a unit can be left off).
   take: boolean;
-  added: { id: string } | null;
+  // Added, or (filled) filled in a unit from the shop's sheet that had only
+  // its VIN's end.
+  added: { id: string; filled: boolean } | null;
   problem: { error: string; field?: keyof UnitFields } | null;
 };
 
@@ -86,6 +88,11 @@ const centsOf = (text: string): Cents | null => {
 };
 
 const KIND_WORDS: Record<InvoiceKind, string> = { wholeGoods: "whole goods", parts: "parts (PG&A)", rebate: "rebate", other: "" };
+
+// Whether a row's unit is on the list already as it is (not one from the
+// shop's sheet to fill in), and whether it's waiting to be added.
+const onListAlready = (row: Row) => Boolean(row.lookup?.onList && !row.lookup.onList.partial);
+const waiting = (row: Row) => row.take && !row.added && !onListAlready(row);
 
 // The units on a file's invoices, as rows to check: the model from
 // Polaris's description until the shop's own name for it is found, the day
@@ -160,7 +167,7 @@ export function NewUnits({ today }: { today: string }) {
           lookup: found,
           values: named ? { ...row.values, model: found.model!.name } : row.values,
           modelFrom: named ? found.model!.from : row.modelFrom,
-          take: found.onList ? false : row.take,
+          take: found.onList && !found.onList.partial ? false : row.take,
         };
       }),
     }));
@@ -268,7 +275,7 @@ export function NewUnits({ today }: { today: string }) {
   // Adds the ticked units (not on the list already, not added yet) as
   // they're checked on the card.
   async function add(card: Card) {
-    const rows = card.rows.filter((row) => row.take && !row.added && !row.lookup?.onList);
+    const rows = card.rows.filter(waiting);
     if (rows.length === 0) return;
     updateCard(card.id, (old) => ({ ...old, adding: true, error: null, rows: old.rows.map((row) => ({ ...row, problem: null })) }));
     const units = rows.map((row) => ({
@@ -301,15 +308,18 @@ export function NewUnits({ today }: { today: string }) {
       return;
     }
     const added = new Map(result.added.map((one) => [one.key, one.id]));
+    const filled = new Map(result.completed.map((one) => [one.key, one.id]));
     const already = new Map(result.already.map((one) => [one.key, one]));
     updateCard(card.id, (old) => ({
       ...old,
       adding: false,
       rows: old.rows.map((row) => {
-        const id = added.get(row.key);
-        if (id) return { ...row, added: { id } };
+        const id = added.get(row.key) ?? filled.get(row.key);
+        if (id) return { ...row, added: { id, filled: filled.has(row.key) } };
         const there = already.get(row.key);
-        if (there && row.lookup) return { ...row, take: false, lookup: { ...row.lookup, onList: { id: there.id, name: there.name, receivedOn: row.values.receivedOn, soldOn: null } } };
+        if (there && row.lookup) {
+          return { ...row, take: false, lookup: { ...row.lookup, onList: { id: there.id, name: there.name, vin: row.values.vin, receivedOn: row.values.receivedOn, soldOn: null, partial: false } } };
+        }
         return row;
       }),
     }));
@@ -419,9 +429,9 @@ function UnitsCard({
   const setRow = (key: string, change: (row: Row) => Row) => onChange((old) => ({ ...old, rows: old.rows.map((row) => (row.key === key ? change(row) : row)) }));
   const withUnits = card.invoices.filter((invoice) => invoice.units.length > 0);
   const leftOut = card.invoices.filter((invoice) => invoice.units.length === 0);
-  const toAdd = card.rows.filter((row) => row.take && !row.added && !row.lookup?.onList);
+  const toAdd = card.rows.filter(waiting);
   const added = card.rows.filter((row) => row.added).length;
-  const listed = card.rows.filter((row) => row.added || row.lookup?.onList).length;
+  const listed = card.rows.filter((row) => row.added || onListAlready(row)).length;
   const cost = toAdd.reduce((sum, row) => sum + (centsOf(row.values.cost) ?? 0), 0);
   const noList = toAdd.filter((row) => !row.values.listPrice.trim()).length;
   const dates = [...new Set(withUnits.map((invoice) => invoice.date).filter((date): date is string => date !== null))];
@@ -530,7 +540,7 @@ const MODEL_FROM: Record<ModelFrom, string> = {
 
 function UnitRow({ row, looking, onChange }: { row: Row; looking: boolean; onChange: (change: (row: Row) => Row) => void }) {
   const { unit, values, lookup, added, problem } = row;
-  const done = added !== null || Boolean(lookup?.onList);
+  const done = added !== null || onListAlready(row);
   const set = (field: keyof Values, value: string) =>
     onChange((old) => ({ ...old, values: { ...old.values, [field]: value }, modelFrom: field === "model" ? "typed" : old.modelFrom, problem: old.problem?.field === field ? null : old.problem }));
   const id = (field: keyof UnitFields) => `${row.key}-${field}`;
@@ -555,7 +565,7 @@ function UnitRow({ row, looking, onChange }: { row: Row; looking: boolean; onCha
             }}
             className="size-4 accent-glow"
           />
-          {added ? "Added" : lookup?.onList ? "On the list already" : "Add this unit"}
+          {added ? (added.filled ? "Filled in on the list" : "Added") : onListAlready(row) ? "On the list already" : lookup?.onList ? "Fill in the unit on the list" : "Add this unit"}
         </label>
         <p className="text-xs break-words text-ink-muted">{details.join(" · ")}</p>
       </div>
@@ -673,13 +683,22 @@ function UnitRow({ row, looking, onChange }: { row: Row; looking: boolean; onCha
         )}
         {added && (
           <p className="text-glow">
-            Added to the list.{" "}
+            {added.filled ? "Its whole VIN and what else the invoice says are filled in on the list." : "Added to the list."}{" "}
             <Link href={`/unit-list/${added.id}`} className="underline">
               Open it
             </Link>
           </p>
         )}
-        {!added && lookup?.onList && (
+        {!added && lookup?.onList?.partial && (
+          <p className="text-ink-muted" data-unit-list-fill>
+            <Link href={`/unit-list/${lookup.onList.id}`} className="text-glow hover:underline">
+              {lookup.onList.name}
+            </Link>{" "}
+            is on the list with only the end of this VIN ({lookup.onList.vin}), as the spreadsheet had it. Adding this fills in its whole VIN, model number and
+            engine #, and its cost or list price if it has none; its model, received day and prices stay as they are.
+          </p>
+        )}
+        {!added && lookup?.onList && !lookup.onList.partial && (
           <p className="text-ink-muted">
             <Link href={`/unit-list/${lookup.onList.id}`} className="text-glow hover:underline">
               {lookup.onList.name}

@@ -310,11 +310,17 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         if (unlisted.length) fact("Also changed", inWords(unlisted.map((key) => (UNIT_LABELS[key as keyof UnitFields] ?? key).toLowerCase())));
         if (!("vin" in changes)) fact("VIN", d.vin);
         const unit = str(d.unit) || "a unit";
+        if (str(d.filledFrom)) return `Filled in ${unit} on the Unit List from ${str(d.filledFrom)}`;
         const sold = changes.soldOn;
         if (sold && sold.to && !sold.from) return `Marked ${unit} sold on the Unit List`;
         if (sold && !sold.to && sold.from) return `Put ${unit} back in stock on the Unit List`;
         return `Corrected ${unit} on the Unit List`;
       }
+      case "stock_units.imported":
+        fact("Added", num(d.added));
+        fact("Already on the list", num(d.already));
+        if (num(d.failed) > 0) fact("Left out", num(d.failed));
+        return `Imported units onto the Unit List from ${str(d.fileName) || "a spreadsheet"}`;
       case "stock_unit.removed":
         fact("VIN", d.vin);
         fact("Received", formatDay(str(d.receivedOn)));

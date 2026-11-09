@@ -745,6 +745,61 @@ export function unitListHref(filters: UnitFilters) {
 // The NUSR's sale of a unit (sold new): the Unit List counts it as sold.
 export type NusrSale = { id: string; soldOn: string; customerName: string; salesperson: string | null };
 
+// --- Partial VINs -----------------------------------------------------------------
+
+// The shop's sheet kept each unit's VIN as its last seven characters (the
+// plant and the serial number: "8056154"), so a unit imported from it has
+// only those until its invoice is dropped or the whole VIN is typed. A VIN
+// that short is matched by the end of a whole one, from this many
+// characters.
+export const MIN_VIN_TAIL = 6;
+export const isPartialVin = (vin: string) => vin.length < 17;
+
+// Whether two VINs are one unit's: the same, or the shorter (6 to 16
+// characters, as a sheet kept it) the end of the longer.
+export function sameVin(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [short, long] = a.length < b.length ? [a, b] : [b, a];
+  return short.length >= MIN_VIN_TAIL && short.length < 17 && long.endsWith(short);
+}
+
+// The endings of a whole VIN a sheet could have kept: its last 16 to 6.
+export const vinTails = (vin: string) => (vin.length === 17 ? Array.from({ length: 17 - MIN_VIN_TAIL }, (_, i) => vin.slice(i + 1)) : []);
+
+// Whether a whole VIN can be a unit's of this model year (its character
+// 10 says the year).
+const fitsYear = (vin: string, year: number | null) => year === null || vin.length !== 17 || vin[9] === vinYearCode(year);
+
+// Whether two units are one: the same VIN, or one VIN the end of the other,
+// of the same model year.
+export function sameUnit(a: { vin: string; unitYear: number | null }, b: { vin: string; unitYear: number | null }): boolean {
+  if (a.vin === b.vin) return true;
+  if (!sameVin(a.vin, b.vin)) return false;
+  if (a.unitYear !== null && b.unitYear !== null && a.unitYear !== b.unitYear) return false;
+  return fitsYear(a.vin, b.unitYear) && fitsYear(b.vin, a.unitYear);
+}
+
+// The unit on the list that a unit (read from an invoice, or a sheet) is:
+// the one with its VIN, else one with only its end, or whose end it has.
+export function listedAs<T extends { vin: string; unitYear: number | null }>(unit: { vin: string; unitYear: number | null }, listed: readonly T[]): T | null {
+  return listed.find((one) => one.vin === unit.vin) ?? listed.find((one) => sameUnit(one, unit)) ?? null;
+}
+
+// The NUSR's sale of a unit on the list: of its VIN, sold new; or, when one
+// of the two VINs is only the end of the other, a sale of the unit's model
+// year (by the whole VIN's character 10) no more than a year before it came
+// in, so an old sale whose serial ends the same isn't taken for it. The
+// latest, when there's more than one.
+export function nusrSaleOf(unit: { vin: string; unitYear: number | null; receivedOn: string }, sales: readonly (NusrSale & { vin: string })[]): NusrSale | null {
+  const exact = sales.filter((sale) => sale.vin === unit.vin);
+  const found = exact.length
+    ? exact
+    : sales.filter((sale) => sameVin(sale.vin, unit.vin) && fitsYear(sale.vin, unit.unitYear) && daysBetween(sale.soldOn, unit.receivedOn) <= 365);
+  if (found.length === 0) return null;
+  const latest = found.reduce((best, sale) => (sale.soldOn > best.soldOn ? sale : best));
+  return { id: latest.id, soldOn: latest.soldOn, customerName: latest.customerName, salesperson: latest.salesperson };
+}
+
 // When a unit was sold, and how the list knows: marked sold on it, or sold
 // new in the NUSR. Null while it's in stock.
 export function soldOf(unit: { soldOn: string | null; nusrSale: NusrSale | null }): { on: string; how: "marked" | "nusr" } | null {

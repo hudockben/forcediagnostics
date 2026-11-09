@@ -596,7 +596,7 @@ describe("on the server: looking up, adding, the list, correcting and removing",
     ]);
     assert.ok(!("error" in result), JSON.stringify(result));
     const [same, next, paint] = result.units;
-    assert.deepEqual(same.onList, { id: ids.ranger, name: "2027 Rngr 1000 XP NSU Crew - Army Green", receivedOn: "2026-11-09", soldOn: null });
+    assert.deepEqual(same.onList, { id: ids.ranger, name: "2027 Rngr 1000 XP NSU Crew - Army Green", vin: RANGER, receivedOn: "2026-11-09", soldOn: null, partial: false });
     assert.equal(next.onList, null);
     assert.deepEqual(next.model, { name: "Rngr 1000 XP NSU Crew - Army Green", from: "list" });
     assert.deepEqual(next.listPrice, { cents: 3739900, receivedOn: "2026-11-09", vin: RANGER });

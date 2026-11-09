@@ -10,13 +10,19 @@ import { line, parseIsoDate, shopToday, type Cents } from "@/lib/nusr-rules";
 import { allows } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/session";
 import {
+  MIN_VIN_TAIL,
   UNIT_LIMITS,
   checkUnit,
   groupUnits,
+  isPartialVin,
+  listedAs,
+  nusrSaleOf,
   paintOf,
+  soldOf,
   unitChanges,
   unitName,
   unitTotals,
+  vinTails,
   withPaint,
   type NusrSale,
   type UnitFields,
@@ -26,6 +32,7 @@ import {
   type UnitProblem,
   type UnitTotals,
 } from "@/lib/unit-list-rules";
+import { MAX_UNIT_IMPORT_BATCH, type UnitImportOutcome } from "@/lib/unit-import-rules";
 import { modelNumberYear, vinYearCode } from "@/lib/vin";
 
 // Unit List (the Unit List tab): the shop's units in stock, added from
@@ -113,25 +120,61 @@ async function audit(tx: ShopTransaction, actor: CurrentUser, action: string, ta
 
 const isUniqueViolation = (error: unknown) => ((error instanceof DrizzleQueryError ? error.cause : error) as { code?: string } | undefined)?.code === "23505";
 
-// The NUSR's sale of each of these VINs as new (the latest, if it was
-// logged twice): a unit sold in the NUSR counts as sold on the list.
-async function nusrSalesFor(tx: ShopTransaction, vins: readonly string[]): Promise<Map<string, NusrSale>> {
-  const sales = new Map<string, NusrSale>();
-  const distinct = [...new Set(vins)];
-  for (let i = 0; i < distinct.length; i += 1000) {
-    const rows = await tx
-      .select({ id: unitSales.id, vin: unitSales.vin, soldOn: unitSales.soldOn, customerName: unitSales.customerName, salesperson: unitSales.salesperson })
-      .from(unitSales)
-      .where(and(inArray(unitSales.vin, distinct.slice(i, i + 1000)), eq(unitSales.condition, "new")))
-      .orderBy(desc(unitSales.soldOn), desc(unitSales.createdAt));
-    for (const { vin, ...sale } of rows) if (vin && !sales.has(vin)) sales.set(vin, sale);
+type SaleRow = NusrSale & { vin: string };
+
+const saleColumns = { id: unitSales.id, vin: unitSales.vin, soldOn: unitSales.soldOn, customerName: unitSales.customerName, salesperson: unitSales.salesperson };
+
+// The NUSR's sales (sold new) that could be these units': of their VINs; of
+// a whole VIN whose last six a unit with only its end has (a unit from the
+// shop's sheet); and every sale the NUSR has with only a VIN's end. Each
+// is one look at the NUSR at most; nusrSaleOf says which is whose.
+async function nusrSalesFor(tx: ShopTransaction, units: readonly { vin: string; unitYear: number | null; receivedOn: string }[]): Promise<Map<string, NusrSale>> {
+  const vins = [...new Set(units.map((unit) => unit.vin))];
+  const ends = [...new Set(vins.filter((vin) => isPartialVin(vin) && vin.length >= MIN_VIN_TAIL).map((vin) => vin.slice(-MIN_VIN_TAIL)))];
+  const found = new Map<string, SaleRow>();
+  const keep = (rows: { id: string; vin: string | null; soldOn: string; customerName: string; salesperson: string | null }[]) => {
+    for (const row of rows) if (row.vin) found.set(row.id, { ...row, vin: row.vin });
+  };
+  for (let i = 0; i < vins.length; i += 1000) {
+    keep(await tx.select(saleColumns).from(unitSales).where(and(inArray(unitSales.vin, vins.slice(i, i + 1000)), eq(unitSales.condition, "new"))));
   }
-  return sales;
+  if (ends.length) {
+    keep(
+      await tx
+        .select(saleColumns)
+        .from(unitSales)
+        .where(and(eq(unitSales.condition, "new"), sql`length(${unitSales.vin}) = 17`, inArray(sql`right(${unitSales.vin}, ${MIN_VIN_TAIL})`, ends))),
+    );
+  }
+  if (vins.some((vin) => !isPartialVin(vin))) {
+    keep(await tx.select(saleColumns).from(unitSales).where(and(eq(unitSales.condition, "new"), sql`length(${unitSales.vin}) between ${MIN_VIN_TAIL} and 16`)));
+  }
+  const sales = [...found.values()];
+  const byVin = new Map<string, NusrSale>();
+  for (const unit of units) {
+    const sale = nusrSaleOf(unit, sales);
+    if (sale) byVin.set(unit.vin, sale);
+  }
+  return byVin;
 }
 
-// Whether the NUSR has sold this unit new (inside withShop, so only the
-// shop's own sales count).
-const nusrSold = sql`exists (select 1 from ${unitSales} where ${unitSales.vin} = ${stockUnits.vin} and ${unitSales.condition} = 'new')`;
+// The units on the list that could be these (read from an invoice, or a
+// sheet): with one of their VINs, with only the end of one, or whose VIN
+// ends with one that's only an end. listedAs says which is which.
+async function listedFor(tx: ShopTransaction, vins: readonly string[]) {
+  const whole = vins.filter((vin) => !isPartialVin(vin));
+  const exactOrEnds = [...new Set([...vins, ...whole.flatMap(vinTails)])];
+  const ends = [...new Set(vins.filter((vin) => isPartialVin(vin) && vin.length >= MIN_VIN_TAIL).map((vin) => vin.slice(-MIN_VIN_TAIL)))];
+  const columns = { id: stockUnits.id, vin: stockUnits.vin, unitYear: stockUnits.unitYear, model: stockUnits.model, receivedOn: stockUnits.receivedOn, soldOn: stockUnits.soldOn };
+  const rows = new Map<string, { id: string; vin: string; unitYear: number | null; model: string; receivedOn: string; soldOn: string | null }>();
+  for (let i = 0; i < exactOrEnds.length; i += 1000) {
+    for (const row of await tx.select(columns).from(stockUnits).where(inArray(stockUnits.vin, exactOrEnds.slice(i, i + 1000)))) rows.set(row.id, row);
+  }
+  if (ends.length) {
+    for (const row of await tx.select(columns).from(stockUnits).where(and(sql`length(${stockUnits.vin}) = 17`, inArray(sql`right(${stockUnits.vin}, ${MIN_VIN_TAIL})`, ends)))) rows.set(row.id, row);
+  }
+  return [...rows.values()];
+}
 
 // What a search looks through: the model and its year, the VIN, Polaris's
 // model number and description, the engine number, the notes and the
@@ -148,9 +191,6 @@ function unitSearch(query: string): SQL | undefined {
   )}]::text[])`;
 }
 
-const inStock = sql`(${stockUnits.soldOn} is null and not ${nusrSold})`;
-const sold = sql`(${stockUnits.soldOn} is not null or ${nusrSold})`;
-
 // --- The list -------------------------------------------------------------------
 
 // The most units the list shows at once (sold ones pile up over the years).
@@ -166,32 +206,31 @@ export type UnitList = {
   counts: { stock: number; sold: number };
 };
 
+// The most units the list looks through at once: years of units sold.
+const MAX_SCANNED = 20_000;
+
 // The units the filters find, by model, with their totals: what's in stock
 // (not marked sold, and not sold new in the NUSR), what's sold, or both;
 // the newest received first when there are more than the list shows.
+// Whether the NUSR has sold one is worked out here (a unit from the shop's
+// sheet has only its VIN's end), so the search finds them all first.
 export async function listStockUnits(actor: CurrentUser, filters: UnitFilters, today = shopToday()): Promise<UnitList | Problem> {
   if (!allows(actor, "sales.log")) return notAllowed;
-  const search = unitSearch(filters.query);
-  const status = filters.status === "stock" ? inStock : filters.status === "sold" ? sold : undefined;
   return withShop(actor.shop.id, async (tx) => {
-    const [counts] = await tx
-      .select({
-        stock: sql<number>`count(*) filter (where ${inStock})::int`,
-        sold: sql<number>`count(*) filter (where ${sold})::int`,
-      })
-      .from(stockUnits)
-      .where(search);
     const rows = await tx
       .select(unitColumns)
       .from(stockUnits)
       .leftJoin(users, eq(users.id, stockUnits.createdByUserId))
-      .where(and(search, status))
+      .where(unitSearch(filters.query))
       .orderBy(desc(stockUnits.receivedOn), desc(stockUnits.createdAt))
-      .limit(MAX_LISTED);
-    const sales = await nusrSalesFor(tx, rows.map((row) => row.vin));
+      .limit(MAX_SCANNED);
+    const sales = await nusrSalesFor(tx, rows);
     const units: StockUnit[] = rows.map((row) => ({ ...row, nusrSale: sales.get(row.vin) ?? null }));
-    const found = filters.status === "stock" ? counts.stock : filters.status === "sold" ? counts.sold : counts.stock + counts.sold;
-    return { groups: groupUnits(units, today), totals: unitTotals(units, today), found, shown: units.length, counts };
+    const inStock = units.filter((unit) => !soldOf(unit));
+    const sold = units.filter((unit) => soldOf(unit));
+    const chosen = filters.status === "stock" ? inStock : filters.status === "sold" ? sold : units;
+    const shown = chosen.slice(0, MAX_LISTED);
+    return { groups: groupUnits(shown, today), totals: unitTotals(shown, today), found: chosen.length, shown: shown.length, counts: { stock: inStock.length, sold: sold.length } };
   });
 }
 
@@ -201,7 +240,7 @@ export async function getStockUnit(actor: CurrentUser, id: string): Promise<Stoc
   return withShop(actor.shop.id, async (tx) => {
     const [row] = await tx.select(unitColumns).from(stockUnits).leftJoin(users, eq(users.id, stockUnits.createdByUserId)).where(eq(stockUnits.id, id));
     if (!row) return null;
-    const sales = await nusrSalesFor(tx, [row.vin]);
+    const sales = await nusrSalesFor(tx, [row]);
     return { ...row, nusrSale: sales.get(row.vin) ?? null };
   });
 }
@@ -211,8 +250,9 @@ export async function getStockUnit(actor: CurrentUser, id: string): Promise<Stoc
 // What the page is told about a unit read from an invoice.
 export type UnitLookup = {
   key: string;
-  // The unit with its VIN on the list already.
-  onList: { id: string; name: string; receivedOn: string; soldOn: string | null } | null;
+  // The unit on the list already: with its VIN, or (partial) with only
+  // its end, from the shop's sheet, which adding it fills in.
+  onList: { id: string; name: string; vin: string; receivedOn: string; soldOn: string | null; partial: boolean } | null;
   // The NUSR's sale of it (a unit presold before it came in, say).
   sold: NusrSale | null;
   // The model in the shop's own words, and where that's from: the last unit
@@ -252,14 +292,13 @@ export async function lookUpUnits(actor: CurrentUser, input: unknown): Promise<{
   if (!items) return { error: "Those units couldn't be looked up. Drop the invoice again." };
   const vins = [...new Set(items.map((item) => item.vin).filter(Boolean))];
   const numbers = [...new Set(items.flatMap((item) => (item.modelNumber ? [item.modelNumber] : [])))];
+  // A unit read from an invoice is the model number's year, and comes in
+  // about now (for matching a VIN's end).
+  const today = shopToday();
+  const read = items.map((item) => ({ vin: item.vin, unitYear: item.modelNumber ? modelNumberYear(item.modelNumber) : null, receivedOn: today }));
   return withShop(actor.shop.id, async (tx) => {
-    const onList = vins.length
-      ? await tx
-          .select({ id: stockUnits.id, vin: stockUnits.vin, unitYear: stockUnits.unitYear, model: stockUnits.model, receivedOn: stockUnits.receivedOn, soldOn: stockUnits.soldOn })
-          .from(stockUnits)
-          .where(inArray(stockUnits.vin, vins))
-      : [];
-    const sales = await nusrSalesFor(tx, vins);
+    const onList = vins.length ? await listedFor(tx, vins) : [];
+    const sales = await nusrSalesFor(tx, read.filter((unit) => unit.vin));
     // The same model number on the list, the latest first.
     const sameNumber = numbers.length
       ? await tx
@@ -288,8 +327,8 @@ export async function lookUpUnits(actor: CurrentUser, input: unknown): Promise<{
       : [];
 
     const units: UnitLookup[] = [];
-    for (const item of items) {
-      const listedUnit = onList.find((unit) => unit.vin === item.vin);
+    for (const [index, item] of items.entries()) {
+      const listedUnit = item.vin ? listedAs(read[index], onList) : null;
       const byNumber = item.modelNumber ? sameNumber.filter((unit) => unit.modelNumber === item.modelNumber) : [];
       const priced = byNumber.find((unit) => unit.listPrice !== null);
       let model: UnitLookup["model"] = byNumber[0] ? { name: byNumber[0].model, from: "list" } : null;
@@ -307,7 +346,9 @@ export async function lookUpUnits(actor: CurrentUser, input: unknown): Promise<{
       }
       units.push({
         key: item.key,
-        onList: listedUnit ? { id: listedUnit.id, name: unitName(listedUnit), receivedOn: listedUnit.receivedOn, soldOn: listedUnit.soldOn } : null,
+        onList: listedUnit
+          ? { id: listedUnit.id, name: unitName(listedUnit), vin: listedUnit.vin, receivedOn: listedUnit.receivedOn, soldOn: listedUnit.soldOn, partial: listedUnit.vin !== item.vin && isPartialVin(listedUnit.vin) }
+          : null,
         sold: sales.get(item.vin) ?? null,
         model,
         listPrice: priced && priced.listPrice !== null ? { cents: priced.listPrice, receivedOn: priced.receivedOn, vin: priced.vin } : null,
@@ -356,7 +397,13 @@ export const MAX_ADD = 200;
 // What adding says: the units added and those on the list already (by
 // their VIN), or what's wrong with any of them (nothing's added then).
 export type AddResult =
-  | { added: { key: string; id: string }[]; already: { key: string; id: string; name: string }[] }
+  | {
+      added: { key: string; id: string }[];
+      already: { key: string; id: string; name: string }[];
+      // Units from the shop's sheet, with only their VIN's end, that these
+      // filled in.
+      completed: { key: string; id: string; name: string }[];
+    }
   | { problems: (UnitProblem & { key: string })[] }
   | Problem;
 
@@ -394,24 +441,74 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
   if (problems.length) return { problems };
 
   return withShop(actor.shop.id, async (tx) => {
-    const inserted = await tx
-      .insert(stockUnits)
-      .values(
-        checked.map(({ unit, invoiceNumber, invoiceDate }) => ({
-          shopId: actor.shop.id,
-          ...toColumns(unit),
-          invoiceNumber,
-          invoiceDate,
-          fileName: file,
-          createdByUserId: actor.id,
-        })),
-      )
-      .onConflictDoNothing({ target: [stockUnits.shopId, stockUnits.vin] })
-      .returning({ id: stockUnits.id, vin: stockUnits.vin });
+    // On the list already: with its VIN, or (from the shop's sheet) with only
+    // its end, which a whole VIN fills in: the rest of what the invoice says
+    // too, where the list has nothing (its model, received day and prices
+    // stay as the shop had them).
+    const listed = await listedFor(tx, checked.map((one) => one.unit.vin));
+    const already: { key: string; id: string; name: string }[] = [];
+    const completed: { key: string; id: string; name: string }[] = [];
+    const fresh: CheckedAdd[] = [];
+    for (const one of checked) {
+      const match = listedAs(one.unit, listed);
+      if (!match) {
+        fresh.push(one);
+        continue;
+      }
+      if (match.vin === one.unit.vin || !isPartialVin(match.vin) || isPartialVin(one.unit.vin)) {
+        already.push({ key: one.key, id: match.id, name: unitName(match) });
+        continue;
+      }
+      const [row] = await tx.select(unitColumns).from(stockUnits).leftJoin(users, eq(users.id, stockUnits.createdByUserId)).where(eq(stockUnits.id, match.id)).for("update", { of: stockUnits });
+      if (!row) {
+        fresh.push(one);
+        continue;
+      }
+      const before = fieldsOf(row);
+      const after: UnitFields = {
+        ...before,
+        vin: one.unit.vin,
+        unitYear: before.unitYear ?? one.unit.unitYear,
+        modelNumber: before.modelNumber ?? one.unit.modelNumber,
+        description: before.description ?? one.unit.description,
+        engineNumber: before.engineNumber ?? one.unit.engineNumber,
+        cost: before.cost ?? one.unit.cost,
+        listPrice: before.listPrice ?? one.unit.listPrice,
+      };
+      await tx.update(stockUnits).set(toColumns(after)).where(eq(stockUnits.id, match.id));
+      const changes = unitChanges(before, after);
+      await audit(tx, actor, "stock_unit.updated", match.id, {
+        unit: unitName(after),
+        vin: after.vin,
+        fields: Object.keys(changes),
+        changes,
+        filledFrom: one.invoiceNumber ? `invoice ${one.invoiceNumber}` : (file ?? "a whole VIN"),
+      });
+      // Another unit here ending the same doesn't fill it in again.
+      match.vin = after.vin;
+      completed.push({ key: one.key, id: match.id, name: unitName(after) });
+    }
+
+    const inserted = fresh.length
+      ? await tx
+          .insert(stockUnits)
+          .values(
+            fresh.map(({ unit, invoiceNumber, invoiceDate }) => ({
+              shopId: actor.shop.id,
+              ...toColumns(unit),
+              invoiceNumber,
+              invoiceDate,
+              fileName: file,
+              createdByUserId: actor.id,
+            })),
+          )
+          .onConflictDoNothing({ target: [stockUnits.shopId, stockUnits.vin] })
+          .returning({ id: stockUnits.id, vin: stockUnits.vin })
+      : [];
     const ids = new Map(inserted.map((row) => [row.vin, row.id]));
     const added: { key: string; id: string }[] = [];
     const waiting: CheckedAdd[] = [];
-    for (const one of checked) {
+    for (const one of fresh) {
       const id = ids.get(one.unit.vin);
       if (!id) {
         waiting.push(one);
@@ -428,17 +525,18 @@ export async function addStockUnits(actor: CurrentUser, input: unknown): Promise
         fileName: file,
       });
     }
+    // Added on the list meanwhile (another tab, someone else).
     const existing = waiting.length
       ? await tx
           .select({ id: stockUnits.id, vin: stockUnits.vin, unitYear: stockUnits.unitYear, model: stockUnits.model })
           .from(stockUnits)
           .where(inArray(stockUnits.vin, waiting.map((one) => one.unit.vin)))
       : [];
-    const already = waiting.flatMap((one) => {
+    for (const one of waiting) {
       const unit = existing.find((row) => row.vin === one.unit.vin);
-      return unit ? [{ key: one.key, id: unit.id, name: unitName(unit) }] : [];
-    });
-    return { added, already };
+      if (unit) already.push({ key: one.key, id: unit.id, name: unitName(unit) });
+    }
+    return { added, already, completed };
   });
 }
 
@@ -492,5 +590,78 @@ export async function removeStockUnit(actor: CurrentUser, id: string): Promise<{
       invoiceNumber: row.invoiceNumber,
     });
     return { ok: true as const, name: unitName(row) };
+  });
+}
+
+// --- Importing the shop's sheet ----------------------------------------------------
+
+// One batch of an import of the shop's sheet (src/lib/unit-import-rules.ts
+// reads it in the browser; the batches go one after another). Each unit is
+// checked again as the form checks one, and one on the list already (by
+// its VIN, or its end) is left as it is, so importing the sheet again adds
+// nothing twice; the rest are added, in stock unless the sheet says sold.
+// The batch goes in the Activity log as one entry, with its counts.
+export async function importStockUnits(
+  actor: CurrentUser,
+  input: { importId: unknown; fileName: unknown; units: unknown },
+): Promise<{ outcomes: UnitImportOutcome[] } | Problem> {
+  if (!allows(actor, "sales.log")) return notAllowed;
+  if (!isUuid(input.importId)) return { error: "That import couldn't be read. Choose the file again." };
+  const list = Array.isArray(input.units) ? (input.units as unknown[]) : null;
+  if (!list || list.length === 0) return { error: "There were no units in that batch." };
+  if (list.length > MAX_UNIT_IMPORT_BATCH) return { error: "That batch is too big. Reload the page and try again." };
+  const fileName = line(input.fileName).slice(0, UNIT_LIMITS.fileName) || "a spreadsheet";
+  const checked = list.map((entry) => {
+    const value = (entry && typeof entry === "object" ? entry : {}) as UnitInput & { row?: unknown };
+    const row = typeof value.row === "number" && Number.isInteger(value.row) && value.row > 0 && value.row < 10_000_000 ? value.row : 0;
+    return { row, result: checkUnit(value) };
+  });
+
+  return withShop(actor.shop.id, async (tx) => {
+    // One import at a time per shop, so two tabs importing the same sheet
+    // don't both add a unit.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('unit-import'), hashtext(${actor.shop.id}))`);
+    const valid = checked.flatMap(({ result }) => ("unit" in result ? [result.unit] : []));
+    const listed = await listedFor(tx, valid.map((unit) => unit.vin));
+    const outcomes: UnitImportOutcome[] = [];
+    const fresh: { unit: UnitFields; outcome: UnitImportOutcome }[] = [];
+    for (const { row, result } of checked) {
+      if ("error" in result) {
+        outcomes.push({ row, result: "failed", id: null, message: result.error });
+        continue;
+      }
+      const unit = result.unit;
+      const match = listedAs(unit, listed);
+      if (match) {
+        outcomes.push({
+          row,
+          result: "already",
+          id: match.id,
+          message: match.vin === unit.vin ? null : `On the list already as ${unitName(match)}, VIN ${match.vin}: left as it is.`,
+        });
+        continue;
+      }
+      const outcome: UnitImportOutcome = { row, result: "added", id: null, message: null };
+      outcomes.push(outcome);
+      fresh.push({ unit, outcome });
+      // A later row ending the same is the same unit.
+      listed.push({ id: "", vin: unit.vin, unitYear: unit.unitYear, model: unit.model, receivedOn: unit.receivedOn, soldOn: unit.soldOn });
+    }
+    if (fresh.length) {
+      const inserted = await tx
+        .insert(stockUnits)
+        .values(fresh.map(({ unit }) => ({ shopId: actor.shop.id, ...toColumns(unit), fileName, createdByUserId: actor.id })))
+        .onConflictDoNothing({ target: [stockUnits.shopId, stockUnits.vin] })
+        .returning({ id: stockUnits.id, vin: stockUnits.vin });
+      const ids = new Map(inserted.map((row) => [row.vin, row.id]));
+      for (const { unit, outcome } of fresh) {
+        const id = ids.get(unit.vin);
+        if (id) outcome.id = id;
+        else Object.assign(outcome, { result: "already", message: `${unit.vin} was put on the list while this import ran: left as it is.` });
+      }
+    }
+    const count = (result: UnitImportOutcome["result"]) => outcomes.filter((outcome) => outcome.result === result).length;
+    await audit(tx, actor, "stock_units.imported", String(input.importId), { fileName, added: count("added"), already: count("already"), failed: count("failed") });
+    return { outcomes };
   });
 }
