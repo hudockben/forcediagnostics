@@ -1147,6 +1147,71 @@ export const rebateLines = pgTable(
   ],
 );
 
+// Unit List (the Unit List tab, src/lib/unit-list.ts): the shop's units in
+// stock, as its spreadsheet kept them (Model, VIN, Received, Cost, List),
+// most added from Polaris's whole goods invoices dropped on the tab. A VIN
+// is on the list once. A unit stays on it once sold (sold_on, or a sale of
+// it in the NUSR), for looking back; the list shows what's in stock.
+// Amounts are whole cents. Where it came from (the invoice and its file)
+// never changes.
+export const stockUnits = pgTable(
+  "stock_units",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    // Upper-cased: a whole VIN, or another maker's serial.
+    vin: text("vin").notNull(),
+    unitYear: integer("unit_year"),
+    // As the shop names it ("Rngr 1000 XP NSU Crew - Blue Lab"), the year
+    // apart.
+    model: text("model").notNull(),
+    // Polaris's model number (the invoice's Part, "R27RSY99AA") and its
+    // description ("RGR-27,1K,XP,NSULT,CR,ARMYG"), and the engine number
+    // printed after the VIN.
+    modelNumber: text("model_number"),
+    description: text("description"),
+    engineNumber: text("engine_number"),
+    receivedOn: date("received_on").notNull(),
+    costCents: integer("cost_cents"),
+    listPriceCents: integer("list_price_cents"),
+    // Marked sold on the list (a unit sold in the NUSR counts as sold
+    // without it).
+    soldOn: date("sold_on"),
+    notes: text("notes"),
+    // The invoice it came in on, and the file that was dropped.
+    invoiceNumber: text("invoice_number"),
+    invoiceDate: date("invoice_date"),
+    fileName: text("file_name"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("stock_units_shop_vin").on(t.shopId, t.vin),
+    index("stock_units_shop_received").on(t.shopId, t.receivedOn),
+    index("stock_units_shop_model_number").on(t.shopId, t.modelNumber),
+    check("stock_units_vin", sql`length(${t.vin}) between 1 and 30`),
+    check("stock_units_model", sql`length(${t.model}) between 1 and 120`),
+    check("stock_units_unit_year", sql`${t.unitYear} between 1950 and 2100`),
+    check(
+      "stock_units_texts",
+      sql`length(${t.modelNumber}) between 1 and 20 and length(${t.description}) between 1 and 120 and length(${t.engineNumber}) between 1 and 30 and length(${t.notes}) between 1 and 1000`,
+    ),
+    check("stock_units_invoice", sql`length(${t.invoiceNumber}) between 1 and 20 and length(${t.fileName}) between 1 and 200`),
+    check("stock_units_amounts", sql`${t.costCents} between 0 and 1000000000 and ${t.listPriceCents} between 0 and 1000000000`),
+    // Which columns can change is set by the grant in
+    // drizzle/0048_stock_units_grants.sql.
+    pgPolicy("stock_units_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
 // Diagnose: a tech and Claude talking a unit's problem through, one
 // conversation per unit and complaint (src/lib/diagnose.ts). The shop's
 // record of it, so anyone in the shop can pick it up again.

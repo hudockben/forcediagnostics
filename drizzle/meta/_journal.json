@@ -330,6 +330,20 @@
       "when": 1794229527173,
       "tag": "0046_diagnosis_clock_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1794243610494,
+      "tag": "0047_stock_units",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1794243611368,
+      "tag": "0048_stock_units_grants",
+      "breakpoints": true
     }
   ]
 }

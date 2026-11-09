@@ -1,8 +1,9 @@
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
-import { OCR_ASSET_URL, ocrScale, ocrWorkerCount, toGreyPgm } from "@/lib/manual-ocr-rules";
+import { OCR_ASSET_URL, RULE_MIN_INCHES, ocrScale, ocrWorkerCount, removeRules, toGreyPgm } from "@/lib/manual-ocr-rules";
 import { PDFJS_WASM_URL, describePdfError, loadPdfJs } from "@/lib/pdfjs";
 import { amountColumn, readInvoice, settleAmounts, wordsFromTsv, type Invoice, type InvoicePage, type InvoiceWord } from "@/lib/rebate-rules";
+import { readUnitInvoices, type UnitInvoice } from "@/lib/unit-list-rules";
 
 // Reading a Polaris invoice in this browser, for the Rebates tab: a PDF's
 // pages through pdf.js (its own text when it has some; drawn at about 300
@@ -12,7 +13,10 @@ import { amountColumn, readInvoice, settleAmounts, wordsFromTsv, type Invoice, t
 // couldn't be sure of (a tick through it, say) is read again on its own,
 // cut off where the tick starts and read as figures only. Nothing leaves
 // the browser: Tesseract's files come from this site (public/tesseract/,
-// as for System Admin > Manuals' scanned pages).
+// as for System Admin > Manuals' scanned pages). The Unit List tab reads
+// Polaris's whole goods invoices the same way (readUnitInvoiceFile), with
+// a scanner's streak down the page whited out before OCR, as the manuals'
+// ruled lines are: it cuts through the VIN.
 
 export type ReadProgress = { step: "opening" | "reading" | "checking"; done: number; pages: number };
 
@@ -135,13 +139,24 @@ const isPdf = (file: File, head: Uint8Array) =>
   /\.pdf$/i.test(file.name) || file.type === "application/pdf" || new TextDecoder().decode(head.subarray(0, 5)) === "%PDF-";
 const isPicture = (file: File) => /^image\//.test(file.type) || /\.(?:jpe?g|png|webp|gif|bmp|tiff?|heic)$/i.test(file.name);
 
-// The invoice in a file, read page by page (`onProgress` says how far it
-// is), with whether any of it was a scan read by OCR.
-export async function readInvoiceFile(
+// What reading the pages leaves for the reading after it: Tesseract, still
+// running when a scan was read (to read amounts again), and each page's
+// Amount column.
+type Ocr = { engine: Engine | null; strips: Map<number, Strip> };
+
+// How the pages are read: `clean` whites out long straight lines (a
+// scanner's streak) before OCR; `strips` keeps each page's Amount column.
+type PageOptions = { clean: boolean; strips: boolean };
+
+// A file's pages read into words (`onProgress` says how far it is), then
+// handed to `then` while Tesseract is still running; it's stopped after.
+async function withPages<T extends object>(
   file: File,
   onProgress: (progress: ReadProgress) => void,
-  signal?: AbortSignal,
-): Promise<{ invoice: Invoice; scanned: boolean } | { error: string }> {
+  signal: AbortSignal | undefined,
+  options: PageOptions,
+  then: (pages: InvoicePage[], ocr: Ocr) => Promise<T | { error: string }>,
+): Promise<T | { error: string }> {
   if (file.size > MAX_INVOICE_BYTES) return { error: `${file.name} is over ${MAX_INVOICE_BYTES / 1024 / 1024} MB: too big to be an invoice.` };
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = isPdf(file, bytes);
@@ -152,6 +167,11 @@ export async function readInvoiceFile(
   const strips = new Map<number, Strip>();
   const stopped = () => {
     if (signal?.aborted) throw new Stop("Stopped.");
+  };
+  // A drawn page's grey pixels, ready for OCR: streaks whited out first
+  // when that's asked for.
+  const ready = (pixels: Uint8Array, width: number, height: number, dpi: number) => {
+    if (options.clean) removeRules(pixels, width, height, Math.round(RULE_MIN_INCHES * dpi));
   };
   try {
     const pages: InvoicePage[] = [];
@@ -193,13 +213,14 @@ export async function readInvoiceFile(
           canvas.width = 0;
           canvas.height = 0;
           page.cleanup();
+          ready(pixels, width, height, dpi);
           const ocr = await engineFor(count);
           const index = number - 1;
           reading.push(
             ocr.read(image, { user_defined_dpi: String(dpi) }, true).then((tsv) => {
               const pageWords = wordsFromTsv(tsv);
               pages[index] = { words: pageWords };
-              const strip = keepStrip(index + 1, pixels, width, height, dpi, pageWords);
+              const strip = options.strips ? keepStrip(index + 1, pixels, width, height, dpi, pageWords) : null;
               if (strip) strips.set(index + 1, strip);
               onProgress({ step: "reading", done: pages.filter(Boolean).length, pages: count });
             }),
@@ -230,16 +251,35 @@ export async function readInvoiceFile(
       const { width, height } = canvas;
       canvas.width = 0;
       canvas.height = 0;
+      ready(pixels, width, height, dpi);
       const ocr = await engineFor(1);
       const words = wordsFromTsv(await ocr.read(image, { user_defined_dpi: String(dpi) }, true));
       pages.push({ words });
-      const strip = keepStrip(1, pixels, width, height, dpi, words);
+      const strip = options.strips ? keepStrip(1, pixels, width, height, dpi, words) : null;
       if (strip) strips.set(1, strip);
       onProgress({ step: "reading", done: 1, pages: 1 });
     }
 
     stopped();
-    const invoice = readInvoice(pages.filter(Boolean));
+    return await then(pages.filter(Boolean), { engine, strips });
+  } catch (error) {
+    if (error instanceof Stop) return { error: error.message };
+    console.error("Couldn't read the invoice", error);
+    return { error: `${file.name} couldn't be read. Check it opens, then drop it again.` };
+  } finally {
+    await (engine as Engine | null)?.stop();
+  }
+}
+
+// The rebate invoice in a file, read page by page (`onProgress` says how
+// far it is), with whether any of it was a scan read by OCR.
+export async function readInvoiceFile(
+  file: File,
+  onProgress: (progress: ReadProgress) => void,
+  signal?: AbortSignal,
+): Promise<{ invoice: Invoice; scanned: boolean } | { error: string }> {
+  return withPages(file, onProgress, signal, { clean: false, strips: true }, async (pages, { engine, strips }) => {
+    const invoice = readInvoice(pages);
     if ("error" in invoice) return invoice;
 
     // The amounts OCR couldn't be sure of, read again on their own.
@@ -261,11 +301,20 @@ export async function readInvoiceFile(
       );
     }
     return { invoice: settleAmounts(invoice, again), scanned: strips.size > 0 || engine !== null };
-  } catch (error) {
-    if (error instanceof Stop) return { error: error.message };
-    console.error("Couldn't read the invoice", error);
-    return { error: `${file.name} couldn't be read. Check it opens, then drop it again.` };
-  } finally {
-    await (engine as Engine | null)?.stop();
-  }
+  });
+}
+
+// The invoices in a file for the Unit List (Polaris's whole goods invoices,
+// often several in one scan, with parts and rebate invoices among them),
+// each with its units, and whether any of it was a scan read by OCR.
+export async function readUnitInvoiceFile(
+  file: File,
+  onProgress: (progress: ReadProgress) => void,
+  signal?: AbortSignal,
+): Promise<{ invoices: UnitInvoice[]; scanned: boolean } | { error: string }> {
+  return withPages(file, onProgress, signal, { clean: true, strips: false }, async (pages, { engine }) => {
+    const read = readUnitInvoices(pages);
+    if ("error" in read) return read;
+    return { invoices: read.invoices, scanned: engine !== null };
+  });
 }

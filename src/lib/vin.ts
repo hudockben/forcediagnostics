@@ -74,6 +74,13 @@ export function vinYears(vin: string, maxYear = new Date().getUTCFullYear() + 2)
   return years;
 }
 
+// The character 10 a model year has (2027 is V, 2026 T), or null for a
+// year before 1980.
+export function vinYearCode(year: number): string | null {
+  if (!Number.isInteger(year) || year < FIRST_YEAR) return null;
+  return YEAR_CODES[(year - FIRST_YEAR) % YEAR_CODES.length];
+}
+
 // Characters 4-8: the model code.
 export const vinModelCode = (vin: string) => vin.slice(3, 8);
 
