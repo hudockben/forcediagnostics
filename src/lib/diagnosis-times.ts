@@ -2,13 +2,27 @@ import "server-only";
 
 import { sql } from "drizzle-orm";
 
-import { withShop } from "@/db";
+import { withShop, type ShopTransaction } from "@/db";
+import { normalizeFaultCodes } from "@/lib/diagnose-rules";
+import { suggestUnits } from "@/lib/diagnose-tools";
 import { causeSystem } from "@/lib/diagnose-zones";
-import { openingCodes, timesPeriod, type FinishedDiagnosis, type TimesParams } from "@/lib/diagnosis-times-rules";
+import {
+  NO_UNIT,
+  estimateFrom,
+  openingCodes,
+  splitCodes,
+  timesPeriod,
+  unitGroup,
+  type Estimate,
+  type FinishedDiagnosis,
+  type PastJob,
+  type TimesParams,
+} from "@/lib/diagnosis-times-rules";
 import { uuidArray } from "@/lib/library";
 import { SHOP_TIME_ZONE } from "@/lib/nusr-rules";
 import { allows } from "@/lib/permissions";
 import type { CurrentUser } from "@/lib/session";
+import { linesNamed } from "@/lib/unit-vehicle";
 
 // Reports > Diagnosis times: the diagnoses whose clock ended in a period (End,
 // or "This was it"), by the shop's day, with the time on their clocks and
@@ -116,4 +130,65 @@ export async function diagnosisTimes(actor: CurrentUser, params: TimesParams): P
     });
     return { diagnoses, open: { count: open?.count ?? 0, seconds: Math.round(Number(open?.seconds ?? 0)) } };
   });
+}
+
+// --- Estimates --------------------------------------------------------------------
+
+// The quick form's "Fault codes: …" line of a diagnosis's opening message.
+const OPENING_CODES = sql.raw(`substring(t.tech_text from '(?n)^Fault codes: (.*)$')`);
+
+// What an estimate goes by (estimateFrom): the shop's solved diagnoses whose
+// clock ended in the last year, newest first, at most PAST_JOBS of them, and
+// never `exclude` (the diagnosis being estimated).
+const PAST_JOBS = 2000;
+
+async function pastJobs(tx: ShopTransaction, exclude: string | null): Promise<PastJob[]> {
+  const result = await tx.execute<{ unit: string | null; codes: string | null; seconds: number }>(sql`
+    select c.unit_label as unit,
+      (select ${OPENING_CODES} from diagnosis_turns t where t.conversation_id = c.id and t.seq = 1) as codes,
+      clock.seconds
+    from diagnosis_conversations c
+    join lateral (
+      select sum(extract(epoch from s.ended_at - s.started_at))::float8 as seconds, max(s.ended_at) as last,
+        (array_agg(s.stop order by s.seq desc))[1] as stop
+      from diagnosis_time_spans s where s.conversation_id = c.id
+    ) clock on clock.stop in ('end', 'solved')
+    where c.status = 'solved' and clock.last >= now() - interval '1 year'
+      ${exclude ? sql`and c.id <> ${exclude}` : sql``}
+    order by clock.last desc
+    limit ${PAST_JOBS}
+  `);
+  return result.rows.map((row) => ({ unit: row.unit, codes: splitCodes(row.codes), seconds: Math.round(Number(row.seconds)) }));
+}
+
+// A diagnosis's own estimate (beside its clock): by its unit and the fault
+// codes it started with, from the shop's other solved diagnoses.
+export async function conversationEstimate(shopId: string, conversation: { id: string; unitLabel: string | null }): Promise<Estimate | null> {
+  return withShop(shopId, async (tx) => {
+    const [opening] = (
+      await tx.execute<{ codes: string | null }>(
+        sql`select ${OPENING_CODES} as codes from diagnosis_turns t where t.conversation_id = ${conversation.id} and t.seq = 1`,
+      )
+    ).rows;
+    const codes = splitCodes(opening?.codes ?? null);
+    if (unitGroup(conversation.unitLabel) === NO_UNIT && codes.length === 0) return null;
+    return estimateFrom(await pastJobs(tx, conversation.id), { unit: conversation.unitLabel, codes });
+  });
+}
+
+// A model number as typed (Z19VDE99AM), rather than a name.
+const isModelNumber = (text: string) => /^[A-Z0-9]{5,14}$/i.test(text) && /\d/.test(text) && /[A-Z]/i.test(text) && linesNamed(text).length === 0;
+
+// The estimate for a diagnosis about to start, as the quick form is filled
+// in: its unit (a model from the model list, a model number as typed, or a
+// year and model) and the fault codes as typed.
+export async function estimateForStart(shopId: string, input: { unit: string; codes: string }): Promise<Estimate | null> {
+  let unit = String(input.unit ?? "").trim().slice(0, 120);
+  const codes = normalizeFaultCodes(String(input.codes ?? "").slice(0, 400));
+  if (isModelNumber(unit)) {
+    const [model] = await suggestUnits(shopId, unit);
+    if (model && model.modelNumber === unit.toUpperCase()) unit = model.label;
+  }
+  if (unitGroup(unit) === NO_UNIT && codes.length === 0) return null;
+  return withShop(shopId, async (tx) => estimateFrom(await pastJobs(tx, null), { unit, codes }));
 }

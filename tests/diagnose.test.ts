@@ -39,6 +39,7 @@ import {
   type TurnRequest,
 } from "../src/lib/diagnose";
 import { clockAction } from "../src/lib/diagnose-clock";
+import { estimateForStart } from "../src/lib/diagnosis-times";
 import {
   FAILURE_MESSAGES,
   apiErrorDetail,
@@ -2886,6 +2887,39 @@ describe("the clock on a diagnosis", () => {
       [2, null, null],
     ]);
     assert.equal(spans[1].startedAt.getTime(), spans[0].endedAt.getTime());
+  });
+
+  test("the quick form's estimate finds a model number as typed in the shop's model list", async () => {
+    // Two RZR XP 1000s solved this month, their clocks ended.
+    for (const minutes of [30, 50]) {
+      const [row] = await systemDb
+        .insert(diagnosisConversations)
+        .values({
+          shopId: cal.shop.id,
+          userId: cal.id,
+          title: "RZR XP 1000 — Runs rough",
+          unitLabel: "2019 RZR XP 1000 EPS — Z19VDE99AM",
+          webSearch: true,
+          status: "solved",
+          outcome: { title: "Fouled plug", likelihood: "high", rank: 1, seq: 1, userId: cal.id, at: new Date().toISOString() },
+        })
+        .returning({ id: diagnosisConversations.id });
+      const startedAt = new Date(Date.now() - (minutes + 60) * 60_000);
+      await systemDb.insert(diagnosisTimeSpans).values({
+        shopId: cal.shop.id,
+        conversationId: row.id,
+        seq: 1,
+        userId: cal.id,
+        startedAt,
+        endedAt: new Date(startedAt.getTime() + minutes * 60_000),
+        stop: "solved",
+      });
+    }
+    const estimate = await estimateForStart(cal.shop.id, { unit: "z19vde99am", codes: "" });
+    assert.equal(estimate?.unit, "RZR 1000", JSON.stringify(estimate));
+    assert.ok(estimate.count >= 2);
+    // One the list doesn't have is taken as typed, and nothing goes by it.
+    assert.equal(await estimateForStart(cal.shop.id, { unit: "Z19VDE99XX", codes: "" }), null);
   });
 
   test("a diagnosis started before the clock has none, and gets none", async () => {

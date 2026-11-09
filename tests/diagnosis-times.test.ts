@@ -18,12 +18,16 @@ import { eq } from "drizzle-orm";
 import { systemDb } from "../src/db";
 import { diagnosisConversations, diagnosisTimeSpans, diagnosisTurns, shops, users } from "../src/db/schema";
 import type { ClockStop } from "../src/lib/diagnose-clock-rules";
-import { diagnosisTimes } from "../src/lib/diagnosis-times";
+import { getConversation } from "../src/lib/diagnose";
+import { conversationEstimate, diagnosisTimes, estimateForStart } from "../src/lib/diagnosis-times";
 import { timesWorkbook } from "../src/lib/diagnosis-times-export";
 import {
   NO_UNIT,
+  estimateBasis,
+  estimateFrom,
   fixOf,
   openingCodes,
+  splitCodes,
   parseTimesParams,
   peopleOf,
   timeStats,
@@ -33,6 +37,7 @@ import {
   typicalTimes,
   unitGroup,
   type FinishedDiagnosis,
+  type PastJob,
   type TimesParams,
 } from "../src/lib/diagnosis-times-rules";
 import type { CurrentUser } from "../src/lib/session";
@@ -197,6 +202,48 @@ describe("typical times", () => {
     const total = list.rows.at(-1)!;
     assert.equal(value(total[0]), "TOTAL: 5 diagnoses");
     assert.deepEqual(total.at(-1), { formula: "SUM(K2:K6)", value: 3.58, style: "totalHours" });
+  });
+});
+
+describe("an estimate for the next one", () => {
+  const RZR = "2019 RZR XP 1000 EPS — Z19VDE99AM";
+  const job = (unit: string | null, codes: string[], minutes: number): PastJob => ({ unit, codes, seconds: minutes * MIN });
+  const past = [
+    job(RZR, ["P0300"], 40),
+    job("2021 RZR XP 1000 — Z21VDE99A2", ["P0300", "P0301"], 50),
+    job(RZR, ["p0300"], 90),
+    job(RZR, ["P0420"], 30),
+    job("2020 RANGER 570 — R20RAE57A1", ["P0300"], 20),
+    job("Ranger 570", ["P0300"], 30),
+    job(RZR, [], 70),
+  ];
+  const minutes = (estimate: ReturnType<typeof estimateFrom>) =>
+    estimate && { ...estimate, typical: estimate.typical / MIN, planFor: estimate.planFor / MIN };
+
+  test("the same unit with one of the codes first, then the codes, then the unit: the closest with three or more", () => {
+    assert.deepEqual(minutes(estimateFrom(past, { unit: RZR, codes: ["P0300", "P0302"] })), { count: 3, typical: 50, planFor: 90, unit: "RZR 1000", codes: ["P0300"] });
+    // One RZR 1000 with P0420, one P0420 anywhere: every RZR 1000.
+    assert.deepEqual(minutes(estimateFrom(past, { unit: "RZR XP 1000", codes: ["P0420"] })), { count: 5, typical: 50, planFor: 70, unit: "RZR 1000", codes: [] });
+    // Two Ranger 570s with P0300: the code's five go first.
+    assert.deepEqual(minutes(estimateFrom(past, { unit: "2022 RANGER 570 EPS", codes: ["P0300"] })), { count: 5, typical: 40, planFor: 50, unit: null, codes: ["P0300"] });
+    assert.deepEqual(minutes(estimateFrom(past, { unit: null, codes: ["P0301", "P0300"] })), { count: 5, typical: 40, planFor: 50, unit: null, codes: ["P0301", "P0300"] });
+  });
+
+  test("two will do when nothing closer has three; fewer, and there isn't one", () => {
+    assert.deepEqual(minutes(estimateFrom(past, { unit: "Ranger 570", codes: [] })), { count: 2, typical: 25, planFor: 30, unit: "Ranger 570", codes: [] });
+    assert.equal(estimateFrom(past, { unit: "2023 SPORTSMAN 570", codes: ["P0171"] }), null);
+    assert.equal(estimateFrom(past.slice(0, 1), { unit: RZR, codes: ["P0300"] }), null);
+    assert.equal(estimateFrom(past, { unit: null, codes: [] }), null);
+    assert.equal(estimateFrom([], { unit: RZR, codes: ["P0300"] }), null);
+  });
+
+  test("what it's from, in words", () => {
+    assert.equal(estimateBasis({ count: 4, unit: "RZR 1000", codes: ["P0300"] }), "4 solved RZR 1000 diagnoses with P0300");
+    assert.equal(estimateBasis({ count: 2, unit: null, codes: ["P0300", "P0301"] }), "2 solved diagnoses with P0300 or P0301");
+    assert.equal(estimateBasis({ count: 3, unit: null, codes: ["P0300", "P0301", "P0302"] }), "3 solved diagnoses with P0300, P0301 or P0302");
+    assert.equal(estimateBasis({ count: 5, unit: "Ranger 570", codes: [] }), "5 solved Ranger 570 diagnoses");
+    assert.deepEqual(splitCodes("P0300, P0301,P0300"), ["P0300", "P0301"]);
+    assert.deepEqual(splitCodes(null), []);
   });
 });
 
@@ -410,5 +457,72 @@ describe("the diagnoses the server reads", () => {
     assert.ok("error" in (await diagnosisTimes(writer, october)));
     const onTablet = await diagnosisTimes({ ...manager, bay: { deviceId: "tablet", deviceName: "Bay 1", sessionId: "pin" } }, october);
     assert.ok("diagnoses" in onTablet && onTablet.diagnoses.length === 3);
+  });
+
+  describe("estimates", () => {
+    const RZR = "2019 RZR XP 1000 EPS — Z19VDE99AM";
+    let eve: CurrentUser;
+    let elsewhere: CurrentUser;
+    // Days before now, so the last year holds them whenever the tests run.
+    const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+    const job = (
+      key: string,
+      who: CurrentUser,
+      unit: string | undefined,
+      codes: string,
+      minutes: number,
+      { daysAgo = 10, stop = "solved" as ClockStop | null, solved = true } = {},
+    ) =>
+      addDiagnosis(key, who, {
+        title: `${unit ?? "No unit"} — ${key}`,
+        unit,
+        opening: `Complaint: Runs rough${codes ? `\nFault codes: ${codes}` : ""}`,
+        createdAt: ago(daysAgo),
+        fix: solved ? { title: "Fouled plug", system: "ignition" } : undefined,
+        spans: [{ user: who, from: ago(daysAgo), minutes, stop }],
+      });
+
+    before(async () => {
+      eve = await createUser(await createShop(`de${suffix}`), "tech", "Eve");
+      elsewhere = await createUser(await createShop(`df${suffix}`), "tech", "Ned");
+      await job("e1", eve, RZR, "P0300", 40);
+      await job("e2", eve, "2021 RZR XP 1000 — Z21VDE99A2", "P0300, P0301", 50);
+      await job("e3", eve, RZR, "P0300", 90);
+      await job("e4", eve, RZR, "P0420", 30);
+      await job("e5", eve, "2020 RANGER 570 — R20RAE57A1", "P0300", 20);
+      await job("e6", eve, "2021 RANGER 570 SP (12 models)", "P0300", 30);
+      await job("e7", eve, RZR, "", 70);
+      // Not counted: ended without a cause; more than a year ago; solved,
+      // but its clock opened again; the one being estimated; another shop's.
+      await job("e8", eve, RZR, "P0300", 5, { stop: "end", solved: false });
+      await job("e9", eve, RZR, "P0300", 500, { daysAgo: 400 });
+      await job("e10", eve, RZR, "P0300", 300, { stop: null });
+      await job("target", eve, RZR, "P0300", 15, { stop: null, solved: false });
+      await job("e-theirs", elsewhere, RZR, "P0300", 999);
+    });
+
+    test("a diagnosis's own: its unit with one of its codes, from the shop's solved ones of the last year, never itself", async () => {
+      const expected = { count: 3, typical: 50 * MIN, planFor: 90 * MIN, unit: "RZR 1000", codes: ["P0300"] };
+      assert.deepEqual(await conversationEstimate(eve.shop.id, { id: ids.target, unitLabel: RZR }), expected);
+      // On the diagnosis, beside its clock.
+      assert.deepEqual((await getConversation(eve, ids.target))!.conversation.estimate, expected);
+      // One started with no codes, on a unit nothing else was.
+      assert.equal(await conversationEstimate(eve.shop.id, { id: ids.e7, unitLabel: "2023 SPORTSMAN 570" }), null);
+    });
+
+    test("one about to start: the unit and codes as the quick form has them", async () => {
+      const shop = eve.shop.id;
+      const minutes = (estimate: Awaited<ReturnType<typeof estimateForStart>>) =>
+        estimate && [estimate.count, estimate.typical / MIN, estimate.planFor / MIN, estimate.unit, estimate.codes];
+      // P0420 on a RZR 1000: only one before, so every RZR 1000.
+      assert.deepEqual(minutes(await estimateForStart(shop, { unit: RZR, codes: "p0420" })), [5, 50, 70, "RZR 1000", []]);
+      assert.deepEqual(minutes(await estimateForStart(shop, { unit: "", codes: "P0300" })), [5, 40, 50, null, ["P0300"]]);
+      assert.deepEqual(minutes(await estimateForStart(shop, { unit: "2022 RANGER 570 EPS", codes: "P0300" })), [5, 40, 50, null, ["P0300"]]);
+      assert.deepEqual(minutes(await estimateForStart(shop, { unit: "Ranger 570", codes: "" })), [2, 25, 30, "Ranger 570", []]);
+      assert.equal(await estimateForStart(shop, { unit: "2023 SPORTSMAN 570", codes: "" }), null);
+      assert.equal(await estimateForStart(shop, { unit: "  ", codes: "" }), null);
+      // Another shop's one RZR 1000 isn't enough, and this shop's never count there.
+      assert.equal(await estimateForStart(elsewhere.shop.id, { unit: RZR, codes: "P0300" }), null);
+    });
   });
 });
