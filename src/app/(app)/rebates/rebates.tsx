@@ -24,7 +24,7 @@ import {
 
 import { findRebateSalesAction, saveRebateInvoiceAction, searchRebateSalesAction } from "./actions";
 import { readInvoiceFile, type ReadProgress } from "./reader";
-import { SalesmanTotals, type SalesmanTotal } from "./salesman-totals";
+import { GroupTotals, type GroupTotal } from "./group-totals";
 
 // The Rebates tab, in the manager's browser: invoices dropped anywhere on
 // the page (or chosen) are read here (reader.ts), their units found in the
@@ -213,8 +213,8 @@ function checkOf(loaded: Loaded, sales: Record<string, RebateSaleSummary>): Chec
 // (its salesman, its category), however it's capitalised or spaced: each
 // group's units and what their amounts come to, the most first. A line not
 // found is "Not found".
-function linesBy(lines: readonly Line[], sales: Record<string, RebateSaleSummary>, of: (sale: RebateSaleSummary) => string | null, none: string): SalesmanTotal[] {
-  const groups = new Map<string, SalesmanTotal>();
+function linesBy(lines: readonly Line[], sales: Record<string, RebateSaleSummary>, of: (sale: RebateSaleSummary) => string | null, none: string): GroupTotal[] {
+  const groups = new Map<string, GroupTotal>();
   for (const line of lines) {
     const sale = line.saleId ? sales[line.saleId] : undefined;
     const label = line.saleId ? (sale ? of(sale) : null)?.trim().replace(/\s+/g, " ") || none : "Not found";
@@ -636,16 +636,17 @@ export function Rebates({ opened }: { opened: OpenedInvoice | null }) {
 // --- The invoices on the page ---------------------------------------------------
 
 // With several invoices on the page, each on its own line: what it has,
-// whether its amounts add up to its total, what they come to by salesman,
-// where it stands, and Check, which goes to its card below.
+// whether its amounts add up to its total, what they come to by salesman
+// and by category, where it stands, and Check, which goes to its card
+// below.
 function OnThePage({ invoices, sales }: { invoices: Loaded[]; sales: Record<string, RebateSaleSummary> }) {
   return (
     <div className="mt-5" data-rebates-on-page>
       <h3 className="text-sm font-semibold text-ink">{plural(invoices.length, "invoice", "invoices")} on the page</h3>
       <p className="mt-0.5 text-xs text-ink-muted">Each file is read, checked and saved on its own, below. Check goes to one.</p>
       <div className="relative -mx-5 mt-3 overflow-x-auto border-y border-white/10 sm:-mx-6">
-        <table className="w-full min-w-[62rem] text-sm">
-          <caption className="sr-only">The invoices on the page, what each comes to by salesman, and where each stands</caption>
+        <table className="w-full min-w-[74rem] text-sm">
+          <caption className="sr-only">The invoices on the page, what each comes to by salesman and by category, and where each stands</caption>
           <thead>
             <tr className="border-b border-white/10 text-left text-xs text-ink-muted">
               <th scope="col" className="px-5 py-2 font-medium sm:px-6">
@@ -659,6 +660,9 @@ function OnThePage({ invoices, sales }: { invoices: Loaded[]; sales: Record<stri
               </th>
               <th scope="col" className="px-3 py-2 font-medium">
                 By salesman
+              </th>
+              <th scope="col" className="px-3 py-2 font-medium">
+                By category
               </th>
               <th scope="col" className="px-3 py-2 font-medium">
                 Where it stands
@@ -705,13 +709,18 @@ function OnThePage({ invoices, sales }: { invoices: Loaded[]; sales: Record<stri
                           : `${formatMoney(Math.abs(check.total - check.sum))} ${check.sum < check.total ? "under" : "over"} its total`}
                     </p>
                   </td>
-                  <td className="px-3 py-3">
-                    {lookup.state === "done" ? (
-                      <SalesmanTotals groups={linesBy(lines, sales, (sale) => sale.salesperson, "No salesman")} />
-                    ) : (
-                      <span className="text-xs text-ink-muted">{lookup.state === "looking" ? "Looking up…" : "—"}</span>
-                    )}
-                  </td>
+                  {(["salesman", "category"] as const).map((by) => (
+                    <td key={by} className="px-3 py-3">
+                      {lookup.state === "done" ? (
+                        <GroupTotals
+                          by={by}
+                          groups={by === "salesman" ? linesBy(lines, sales, (sale) => sale.salesperson, "No salesman") : linesBy(lines, sales, (sale) => sale.category, "No category")}
+                        />
+                      ) : (
+                        <span className="text-xs text-ink-muted">{lookup.state === "looking" ? "Looking up…" : "—"}</span>
+                      )}
+                    </td>
+                  ))}
                   <td className="px-3 py-3">
                     <Badge tone={status.tone}>{status.text}</Badge>
                   </td>

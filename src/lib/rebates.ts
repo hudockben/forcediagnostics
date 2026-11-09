@@ -509,9 +509,10 @@ export type SavedTotals = {
   amounts: Record<RebateColumn, Cents>;
   bySalesman: { label: string; lines: number; amount: Cents }[];
   byCategory: { label: string; lines: number; amount: Cents }[];
-  // Each invoice's lines the filters find, by salesman, for its line in
-  // the list of invoices.
+  // Each invoice's lines the filters find, by salesman and by category,
+  // for its line in the list of invoices.
   bySalesmanOf: Record<string, { label: string; lines: number; amount: Cents }[]>;
+  byCategoryOf: Record<string, { label: string; lines: number; amount: Cents }[]>;
 };
 
 export type SavedRebates = ListPage & { items: SavedRebateLine[]; total: number; totals: SavedTotals };
@@ -609,6 +610,7 @@ function groupBy(rows: readonly LineRow[], nameOf: (row: LineRow) => string) {
 }
 
 const salesmanOf = (row: LineRow) => (row.saleId ? row.sale?.salesperson?.trim() || "No salesman" : "Not found");
+const categoryOf = (row: LineRow) => (row.saleId ? row.sale?.category?.trim() || "No category" : "Not found");
 
 // The saved lines the filters find, a page of them, with their totals.
 export async function listSavedRebates(actor: CurrentUser, filters: RebateFilters, { page = 1, perPage = SAVED_PAGE_SIZE } = {}): Promise<SavedRebates | Problem> {
@@ -617,6 +619,7 @@ export async function listSavedRebates(actor: CurrentUser, filters: RebateFilter
   const at = listPage(rows.length, page, perPage);
   const amounts = Object.fromEntries(REBATE_COLUMNS.map((column) => [column, 0])) as Record<RebateColumn, Cents>;
   for (const row of rows) amounts[row.column] += row.amount ?? 0;
+  const byInvoice = Map.groupBy(rows, (row) => row.invoiceId);
   return {
     ...at,
     total: rows.length,
@@ -637,10 +640,9 @@ export async function listSavedRebates(actor: CurrentUser, filters: RebateFilter
       found: rows.filter((row) => row.saleId).length,
       amounts,
       bySalesman: groupBy(rows, salesmanOf),
-      byCategory: groupBy(rows, (row) => (row.saleId ? row.sale?.category?.trim() || "No category" : "Not found")),
-      bySalesmanOf: Object.fromEntries(
-        [...Map.groupBy(rows, (row) => row.invoiceId)].map(([invoiceId, lines]) => [invoiceId, groupBy(lines, salesmanOf)]),
-      ),
+      byCategory: groupBy(rows, categoryOf),
+      bySalesmanOf: Object.fromEntries([...byInvoice].map(([invoiceId, lines]) => [invoiceId, groupBy(lines, salesmanOf)])),
+      byCategoryOf: Object.fromEntries([...byInvoice].map(([invoiceId, lines]) => [invoiceId, groupBy(lines, categoryOf)])),
     },
   };
 }
