@@ -71,14 +71,14 @@ export const CAPABILITIES = [
   },
   {
     key: "sales.log",
-    label: "NUSR, Rebates and Reports",
+    label: "NUSR, Rebates and bonuses",
     detail: "Every unit sold: the customer, price, cost, profit, holdback, bonuses and financing; Polaris's rebate invoices matched to the sales; the salesmen's bonus reports",
     roles: ["manager", "admin"],
   },
   {
     key: "reports.kpis",
     label: "Shop board and KPIs",
-    detail: "Repair orders by stage, days in shop, AI accuracy",
+    detail: "Repair orders by stage, days in shop, AI accuracy; how long diagnoses take (Reports > Diagnosis times)",
     roles: ["manager", "admin"],
   },
   {
@@ -154,6 +154,15 @@ export function allows(user: { role: Role; bay: object | null }, capability: Cap
 export function mayDeleteDiagnosis(user: { id: string; role: Role; bay: object | null }, startedBy: string) {
   return allows(user, "diagnostics.delete") || (allows(user, "diagnostics.delete_own") && startedBy === user.id);
 }
+
+// The Reports tab's sections, in menu order: the salesmen's bonuses (the
+// NUSR's figures, so a password sign-in) and how long diagnoses take. The
+// tab opens the first one the user may use; the bonuses are at /reports
+// itself, so only that address marks them (exact).
+export const REPORT_SECTIONS: { href: string; label: string; capability: Capability; exact?: boolean }[] = [
+  { href: "/reports", label: "Salesman bonuses", capability: "sales.log", exact: true },
+  { href: "/reports/diagnosis-times", label: "Diagnosis times", capability: "reports.kpis" },
+];
 
 // The System Admin sections, in menu order. The tab opens the first one the
 // user may use. Customers and the Sticker & Plate log are tabs of their own

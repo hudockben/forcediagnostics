@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { NavTabs, type NavItem } from "@/components/app/nav-tabs";
 import { SignOutButton } from "@/components/sign-out-button";
 import { Wordmark } from "@/components/wordmark";
-import { ADMIN_SECTIONS, ROLE_LABELS } from "@/lib/permissions";
+import { ADMIN_SECTIONS, REPORT_SECTIONS, ROLE_LABELS } from "@/lib/permissions";
 import { allows, getCurrentUser } from "@/lib/session";
 
 
@@ -29,6 +29,7 @@ function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
 export async function AppHeader() {
   const user = await getCurrentUser();
   const firstAdminSection = ADMIN_SECTIONS.find((section) => allows(user, section.capability));
+  const firstReport = REPORT_SECTIONS.find((section) => allows(user, section.capability));
   const tabs: NavItem[] = [
     { href: "/home", label: "Home", section: "/home" },
     ...(allows(user, "diagnostics.work") ? [{ href: "/diagnose", label: "Diagnose", section: "/diagnose" }] : []),
@@ -45,9 +46,9 @@ export async function AppHeader() {
           { href: "/sticker-plate-log", label: "Sticker & Plate log", section: "/sticker-plate-log" },
         ]
       : []),
-    // The salesmen's bonuses by week, month, quarter and year, just left of
-    // Library.
-    ...(allows(user, "sales.log") ? [{ href: "/reports", label: "Reports", section: "/reports" }] : []),
+    // The salesmen's bonuses and how long diagnoses take, just left of
+    // Library, opening on the first of them the user may see.
+    ...(firstReport ? [{ href: firstReport.href, label: "Reports", section: "/reports" }] : []),
     ...(allows(user, "library.read") ? [{ href: "/library", label: "Library", section: "/library" }] : []),
     ...(firstAdminSection
       ? [{ href: firstAdminSection.href, label: "System Admin", section: "/admin" }]

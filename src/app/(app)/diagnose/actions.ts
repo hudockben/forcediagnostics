@@ -15,6 +15,7 @@ import {
   requestStop,
   type ConversationDetail,
 } from "@/lib/diagnose";
+import type { ClockView } from "@/lib/diagnose-clock-rules";
 import type {
   CauseVerdict,
   ConversationView,
@@ -67,7 +68,8 @@ export async function markCauseAction(input: {
   index: number;
   verdict: CauseVerdict;
 }): Promise<
-  { feedback: FeedbackEntry[]; outcome: ConversationView["outcome"]; status: ConversationView["status"] } | Failed
+  | { feedback: FeedbackEntry[]; outcome: ConversationView["outcome"]; status: ConversationView["status"]; clock: ClockView | null }
+  | Failed
 > {
   const user = await requireCapability("diagnostics.work");
   return attempt("save cause feedback", () =>
@@ -89,7 +91,7 @@ export async function markStepAction(input: {
   done: boolean;
   result: StepResult | null;
   was: StepState;
-}): Promise<{ stepChecks: StepCheckEntry[]; stale?: true } | Failed> {
+}): Promise<{ stepChecks: StepCheckEntry[]; stale?: true; clock: ClockView | null } | Failed> {
   const user = await requireCapability("diagnostics.work");
   return attempt("save the step", () =>
     markStep(user, {
@@ -115,6 +117,7 @@ export async function changeUnitAction(input: {
       modelNumber: string | null;
       vehicle: UnitVehicle | null;
       model: UnitSpec | null;
+      clock: ClockView | null;
     }
   | Failed
 > {

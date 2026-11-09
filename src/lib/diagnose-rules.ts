@@ -5,6 +5,7 @@
 // code can use it.
 
 import type { ConversationCustomer } from "@/lib/customer-rules";
+import type { ClockView } from "@/lib/diagnose-clock-rules";
 import { inferSystem, listedSystem, type CauseSystem, type UnitVehicle } from "@/lib/diagnose-zones";
 import type { UnitSpec } from "@/lib/unit-vehicle";
 
@@ -743,6 +744,9 @@ export type ConversationView = {
   techMessages: number;
   // Why no more messages can be sent, if so.
   full: string | null;
+  // The clock on it, as the viewer sees it (src/lib/diagnose-clock-rules.ts);
+  // null for one started before the clock was added.
+  clock: ClockView | null;
 };
 
 export type StreamEvent =

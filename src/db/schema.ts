@@ -24,6 +24,7 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { MAX_VEHICLE_YEAR, MIN_VEHICLE_YEAR, VEHICLE_RELATIONS, type VehicleRelation } from "../lib/customer-rules";
+import { CLOCK_STOPS, type ClockStop } from "../lib/diagnose-clock-rules";
 import {
   CONVERSATION_STATUSES,
   TURN_STATUSES,
@@ -1329,6 +1330,70 @@ export const diagnosisTurns = pgTable(
       withCheck: sql`${t.shopId} = ${currentShopId}`,
     }),
     pgPolicy("diagnosis_turns_update_own_shop", {
+      for: "update",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
+// The clock on a diagnosis (src/lib/diagnose-clock-rules.ts): its stretches
+// of work, numbered from 1, each with who started it, when, its last use
+// (where it stopped, once it has) and why it stopped. Reports > Diagnosis
+// times adds them up. A stretch goes with its diagnosis.
+export const diagnosisTimeSpans = pgTable(
+  "diagnosis_time_spans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    seq: integer("seq").notNull(),
+    userId: text("user_id").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }).notNull(),
+    // Null while it's going.
+    stop: text("stop").$type<ClockStop>(),
+    // It began after a gap its person may still count (the stretch before
+    // ended here); null once they've answered.
+    gapFrom: timestamp("gap_from", { withTimezone: true }),
+  },
+  (t) => [
+    unique("diagnosis_time_spans_conversation_seq").on(t.conversationId, t.seq),
+    // A stretch only ever belongs to a diagnosis, and a person, of its own
+    // shop.
+    foreignKey({
+      name: "diagnosis_time_spans_conversation_shop_fk",
+      columns: [t.conversationId, t.shopId],
+      foreignColumns: [diagnosisConversations.id, diagnosisConversations.shopId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "diagnosis_time_spans_user_shop_fk",
+      columns: [t.userId, t.shopId],
+      foreignColumns: [users.id, users.shopId],
+    }).onDelete("cascade"),
+    index("diagnosis_time_spans_shop_ended").on(t.shopId, t.endedAt),
+    // One stretch going at a time.
+    uniqueIndex("diagnosis_time_spans_one_going").on(t.conversationId).where(sql`${t.stop} is null`),
+    check("diagnosis_time_spans_seq", sql`${t.seq} >= 1`),
+    check(
+      "diagnosis_time_spans_stop",
+      sql`${t.stop} in (${sql.raw(CLOCK_STOPS.map((s) => `'${s}'`).join(", "))})`,
+    ),
+    check("diagnosis_time_spans_times", sql`${t.endedAt} >= ${t.startedAt} and (${t.gapFrom} is null or ${t.gapFrom} < ${t.startedAt})`),
+    pgPolicy("diagnosis_time_spans_own_shop", {
+      for: "select",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    pgPolicy("diagnosis_time_spans_add_own_shop", {
+      for: "insert",
+      to: appUser,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+    // Which columns can change is set by the grant in
+    // drizzle/0046_diagnosis_clock_grants.sql.
+    pgPolicy("diagnosis_time_spans_update_own_shop", {
       for: "update",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,
