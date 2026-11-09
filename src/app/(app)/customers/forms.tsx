@@ -34,8 +34,9 @@ function Field({
   label,
   hint,
   optional = true,
+  defaultValue,
   ...props
-}: { id: string; label: string; hint?: string; optional?: boolean } & ComponentProps<"input">) {
+}: { id: string; label: string; hint?: string; optional?: boolean; defaultValue: string } & Omit<ComponentProps<"input">, "defaultValue">) {
   return (
     <div className="min-w-0">
       <label htmlFor={id} className={labelClass}>
@@ -43,10 +44,15 @@ function Field({
         {optional && <span className="font-normal text-ink-muted"> (optional)</span>}
       </label>
       <input
+        // Keyed on the saved value (see CustomerForm). Here rather than on
+        // each Field: fields side by side often hold the same value (a blank
+        // State and ZIP, say), and siblings' keys have to differ.
+        key={defaultValue}
         id={id}
         name={id}
         className={inputClass}
         aria-describedby={hint ? `${id}-hint` : undefined}
+        defaultValue={defaultValue}
         {...props}
       />
       {hint && (
@@ -102,11 +108,10 @@ type SavedCustomer = CustomerFields & { id: string };
 export function CustomerForm({ customer }: { customer?: SavedCustomer }) {
   const { state, pending, formProps } = useFormAction<FormState>(customer ? saveCustomer : addCustomer, {});
   const saved = (name: keyof CustomerFields) => customer?.[name] ?? "";
-  const keyed = (name: keyof CustomerFields) => ({ key: saved(name), defaultValue: saved(name) });
   return (
     <form {...formProps} className="space-y-4">
       {customer && <input type="hidden" name="id" value={customer.id} />}
-      <Field id="name" label="Name" optional={false} required autoComplete="off" maxLength={CUSTOMER_LIMITS.name} {...keyed("name")} />
+      <Field id="name" label="Name" optional={false} required autoComplete="off" maxLength={CUSTOMER_LIMITS.name} defaultValue={saved("name")} />
       <div className="grid gap-4 sm:grid-cols-2">
         <Field
           id="phone"
@@ -116,7 +121,7 @@ export function CustomerForm({ customer }: { customer?: SavedCustomer }) {
           autoComplete="off"
           maxLength={CUSTOMER_LIMITS.phone}
           placeholder="(555) 123-4567"
-          {...keyed("phone")}
+          defaultValue={saved("phone")}
         />
         <Field
           id="email"
@@ -126,23 +131,23 @@ export function CustomerForm({ customer }: { customer?: SavedCustomer }) {
           autoCapitalize="none"
           spellCheck={false}
           maxLength={CUSTOMER_LIMITS.email}
-          {...keyed("email")}
+          defaultValue={saved("email")}
         />
       </div>
-      <Field id="addressLine1" label="Street address" autoComplete="off" maxLength={CUSTOMER_LIMITS.addressLine} {...keyed("addressLine1")} />
+      <Field id="addressLine1" label="Street address" autoComplete="off" maxLength={CUSTOMER_LIMITS.addressLine} defaultValue={saved("addressLine1")} />
       <Field
         id="addressLine2"
         label="Apartment, suite or PO box"
         autoComplete="off"
         maxLength={CUSTOMER_LIMITS.addressLine}
-        {...keyed("addressLine2")}
+        defaultValue={saved("addressLine2")}
       />
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
         <div className="col-span-2 sm:col-span-1">
-          <Field id="city" label="City" autoComplete="off" maxLength={CUSTOMER_LIMITS.city} {...keyed("city")} />
+          <Field id="city" label="City" autoComplete="off" maxLength={CUSTOMER_LIMITS.city} defaultValue={saved("city")} />
         </div>
-        <Field id="state" label="State" autoComplete="off" maxLength={CUSTOMER_LIMITS.state} placeholder="PA" {...keyed("state")} />
-        <Field id="postalCode" label="ZIP" autoComplete="off" maxLength={CUSTOMER_LIMITS.postalCode} {...keyed("postalCode")} />
+        <Field id="state" label="State" autoComplete="off" maxLength={CUSTOMER_LIMITS.state} placeholder="PA" defaultValue={saved("state")} />
+        <Field id="postalCode" label="ZIP" autoComplete="off" maxLength={CUSTOMER_LIMITS.postalCode} defaultValue={saved("postalCode")} />
       </div>
       <NotesField defaultValue={saved("notes")} maxLength={CUSTOMER_LIMITS.notes} />
       <Feedback state={state} />
@@ -198,7 +203,6 @@ export function VehicleForm({ customerId, vehicle }: { customerId: string; vehic
     if (vehicle) setRelation(vehicle.relation);
   }
   const saved = (name: keyof VehicleFields) => String(vehicle?.[name] ?? "");
-  const keyed = (name: keyof VehicleFields) => ({ key: saved(name), defaultValue: saved(name) });
   const dateLabel = RELATION_DATE_LABELS[relation];
   return (
     <form {...formProps} className="space-y-4">
@@ -207,7 +211,7 @@ export function VehicleForm({ customerId, vehicle }: { customerId: string; vehic
       <RelationChoice value={relation} onChange={setRelation} />
       {dateLabel && (
         <div className="max-w-56">
-          <Field id="relationDate" label={dateLabel} type="date" {...keyed("relationDate")} />
+          <Field id="relationDate" label={dateLabel} type="date" defaultValue={saved("relationDate")} />
         </div>
       )}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-[minmax(0,7rem)_minmax(0,1fr)_minmax(0,2fr)]">
@@ -219,11 +223,11 @@ export function VehicleForm({ customerId, vehicle }: { customerId: string; vehic
           maxLength={4}
           autoComplete="off"
           placeholder="2021"
-          {...keyed("year")}
+          defaultValue={saved("year")}
         />
-        <Field id="make" label="Make" autoComplete="off" maxLength={VEHICLE_LIMITS.make} placeholder="Polaris" {...keyed("make")} />
+        <Field id="make" label="Make" autoComplete="off" maxLength={VEHICLE_LIMITS.make} placeholder="Polaris" defaultValue={saved("make")} />
         <div className="col-span-2 sm:col-span-1">
-          <Field id="model" label="Model" autoComplete="off" maxLength={VEHICLE_LIMITS.model} placeholder="Sportsman 850 Ultimate Trail" {...keyed("model")} />
+          <Field id="model" label="Model" autoComplete="off" maxLength={VEHICLE_LIMITS.model} placeholder="Sportsman 850 Ultimate Trail" defaultValue={saved("model")} />
         </div>
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -237,7 +241,7 @@ export function VehicleForm({ customerId, vehicle }: { customerId: string; vehic
           placeholder="A21SXZ85A1"
           hint="On the frame or VIN plate. Diagnose finds the unit's manuals by it."
           className={`${inputClass} font-mono uppercase placeholder:font-sans placeholder:normal-case`}
-          {...keyed("modelNumber")}
+          defaultValue={saved("modelNumber")}
         />
         <Field
           id="vin"
@@ -250,11 +254,11 @@ export function VehicleForm({ customerId, vehicle }: { customerId: string; vehic
           placeholder="17 characters"
           hint="A whole VIN: a serial number on its own goes in the notes."
           className={`${inputClass} font-mono tracking-wide uppercase placeholder:font-sans placeholder:tracking-normal placeholder:normal-case`}
-          {...keyed("vin")}
+          defaultValue={saved("vin")}
         />
       </div>
       <div className="max-w-xs">
-        <Field id="color" label="Color" autoComplete="off" maxLength={VEHICLE_LIMITS.color} {...keyed("color")} />
+        <Field id="color" label="Color" autoComplete="off" maxLength={VEHICLE_LIMITS.color} defaultValue={saved("color")} />
       </div>
       <NotesField defaultValue={saved("notes")} maxLength={VEHICLE_LIMITS.notes} />
       <Feedback state={state} />
