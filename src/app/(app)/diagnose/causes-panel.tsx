@@ -1168,7 +1168,7 @@ function ScopeCard({
   disabled,
 }: {
   conversation: ConversationView;
-  onScope: (update: Pick<ConversationView, "scope" | "unit" | "vin" | "modelNumber" | "vehicle" | "model">) => void;
+  onScope: (update: Pick<ConversationView, "scope" | "unit" | "vin" | "modelNumber" | "vehicle" | "model" | "clock">) => void;
   disabled: boolean;
 }) {
   const [editing, setEditing] = useState(false);
@@ -1199,6 +1199,7 @@ function ScopeCard({
       modelNumber: result.modelNumber,
       vehicle: result.vehicle,
       model: result.model,
+      clock: result.clock,
     });
     setEditing(false);
     setValue("");
@@ -1460,7 +1461,7 @@ export function CausesPanel({
       const turnId = replyTurnId;
       if ("error" in outcome) setTickError({ place, key, turnId, text: outcome.error });
       else {
-        onConversation({ stepChecks: outcome.stepChecks });
+        onConversation({ stepChecks: outcome.stepChecks, clock: outcome.clock });
         if (outcome.stale) setTickError({ place, key, turnId, text: "That step was changed on another device. This is how it stands now." });
       }
       settle();

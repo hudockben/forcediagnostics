@@ -34,6 +34,7 @@ import { VIN_LENGTH, checkVin, vinDisagreement } from "@/lib/vin";
 import { Chevron, vehicleOptions } from "../library/search-form";
 import { loadConversationAction, previewVinAction, stopTurnAction } from "./actions";
 import { CausesPanel } from "./causes-panel";
+import { DiagnosisClock } from "./clock";
 import { CustomerLine, CustomerName, CustomerVehiclePicker } from "./customer-picker";
 import { DeleteDiagnosis } from "./delete-diagnosis";
 import {
@@ -1323,6 +1324,7 @@ export function DiagnoseChat({
             canOpen={customerLinks}
             onChange={(customer) => setConversation((old) => (old ? { ...old, customer } : old))}
           />
+          <DiagnosisClock conversationId={conversation.id} clock={conversation.clock} busy={busy} />
         </div>
       </header>
 

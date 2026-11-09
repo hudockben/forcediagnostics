@@ -15,15 +15,16 @@ import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 
 import Anthropic from "@anthropic-ai/sdk";
-import { eq, sql } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 
 import { systemDb, withShop } from "../src/db";
 import { streamFromClaude } from "../src/lib/claude";
-import { attemptCounters, diagnosisConversations, diagnosisTurns, shops, users } from "../src/db/schema";
+import { attemptCounters, diagnosisConversations, diagnosisTimeSpans, diagnosisTurns, shops, users } from "../src/db/schema";
 import {
   STALE_AFTER_MS,
   carryOver,
   changeUnit,
+  deleteConversation,
   getConversation,
   isProblem,
   listConversations,
@@ -37,6 +38,7 @@ import {
   shopGlance,
   type TurnRequest,
 } from "../src/lib/diagnose";
+import { clockAction } from "../src/lib/diagnose-clock";
 import {
   FAILURE_MESSAGES,
   apiErrorDetail,
@@ -2744,5 +2746,186 @@ describe("the Diagnose list and Home", () => {
     // but the winch (2020) and 12. Solved this month, by when the fix was
     // confirmed: 0, 4, 8, 16 and the winch, not 12.
     assert.deepEqual(glance, { openThisWeek: 12, startedThisMonth: 17, solvedThisMonth: 5 });
+  });
+});
+
+describe("the clock on a diagnosis", () => {
+  // Their own techs, so the hourly allowance of the others isn't touched.
+  let cal: CurrentUser;
+  let dee: CurrentUser;
+  const PLUG = "Fouled spark plug";
+  const COIL = "Weak ignition coil";
+  const cause = (title: string, confidence: number) => ({
+    title,
+    system: "ignition",
+    confidence,
+    likelihood: confidence >= 60 ? "high" : "medium",
+    based_on: ["tech_report"],
+    why: "Fits a misfire under load.",
+    status: "open",
+    check_effort: "quick",
+    sources: [{ type: "general" }],
+  });
+  const quick = (action: string, causes: number[]) => ({ tier: "quick", action, causes, expected: "", sources: [{ type: "general" }] });
+  const reply = (input: Record<string, unknown> = {}) => () => message([submit(input)], "tool_use");
+  const spansOf = (conversationId: string) =>
+    systemDb.select().from(diagnosisTimeSpans).where(eq(diagnosisTimeSpans.conversationId, conversationId)).orderBy(asc(diagnosisTimeSpans.seq));
+  const minutes = (seconds: number | undefined) => Math.round((seconds ?? NaN) / 60);
+
+  before(async () => {
+    cal = await createUser(techA.shop, "tech", "Cal");
+    dee = await createUser(techA.shop, "tech", "Dee");
+  });
+
+  test("a new diagnosis starts its clock; messages, ticks and marks keep it going; This was it ends it, solved, and taking it back starts it again", async () => {
+    const first = await startTurn(cal, { start: { message: "Misfires under load" } }, [
+      reply({ likely_causes: [cause(PLUG, 70), cause(COIL, 40)], next_checks: [quick("Pull the plugs and look at them.", [1])] }),
+    ]);
+    const conversationId = first.conversation.id;
+    const turnId = first.turn.id;
+    // Started with the diagnosis, and Claude's answer kept it going.
+    assert.equal(first.prepared.conversationView.clock?.state, "running");
+    assert.deepEqual(
+      [first.conversation.clock?.state, first.conversation.clock?.mine, first.conversation.clock?.by, first.conversation.clock?.gap],
+      ["running", true, "Cal", null],
+    );
+    let spans = await spansOf(conversationId);
+    assert.deepEqual(spans.map((span) => [span.seq, span.userId, span.stop]), [[1, cal.id, null]]);
+    assert.ok(spans[0].endedAt > spans[0].startedAt);
+    // Someone else sees it running, and whose it is.
+    const seen = (await getConversation(dee, conversationId))!.conversation.clock;
+    assert.deepEqual([seen?.state, seen?.mine, seen?.by], ["running", false, "Cal"]);
+
+    const ticked = await markStep(cal, { conversationId, turnId, index: 0, done: true, result: "problem" });
+    assert.ok("clock" in ticked && ticked.clock?.state === "running", JSON.stringify(ticked));
+    const solved = await markCause(cal, { conversationId, turnId, index: 0, verdict: "confirmed" });
+    assert.ok("clock" in solved, JSON.stringify(solved));
+    assert.deepEqual([solved.status, solved.clock?.state, solved.clock?.solved], ["solved", "ended", true]);
+    // Work doesn't start it again, nor does ruling out another cause...
+    await markStep(cal, { conversationId, turnId, index: 0, done: false, result: null });
+    const ruledOut = await markCause(cal, { conversationId, turnId, index: 1, verdict: "ruled_out" });
+    assert.ok("clock" in ruledOut && ruledOut.clock?.state === "ended");
+    // ...taking This was it back does.
+    const undone = await markCause(cal, { conversationId, turnId, index: 0, verdict: "open" });
+    assert.ok("clock" in undone, JSON.stringify(undone));
+    assert.deepEqual([undone.status, undone.clock?.state], ["open", "running"]);
+    spans = await spansOf(conversationId);
+    assert.deepEqual(spans.map((span) => [span.seq, span.stop]), [
+      [1, "solved"],
+      [2, null],
+    ]);
+    // Back within a minute: it carried on as it was.
+    assert.equal(spans[1].startedAt.getTime(), spans[0].endedAt.getTime());
+    assert.equal(spans[1].gapFrom, null);
+  });
+
+  test("the page's use, Pause, End and Reopen, and looking at it, for the shop's own diagnoses only", async () => {
+    const started = await startTurn(cal, { start: { message: "Winch clicks but won't pull" } }, [reply()]);
+    const conversationId = started.conversation.id;
+    const act = (user: CurrentUser, action: Parameters<typeof clockAction>[1]["action"], ago?: number) => clockAction(user, { conversationId, action, ago });
+    let result = await act(cal, "use", 0);
+    assert.ok("clock" in result && result.clock?.state === "running", JSON.stringify(result));
+    result = await act(cal, "pause");
+    assert.ok("clock" in result && result.clock?.state === "paused");
+    // Using the page doesn't start a paused clock; looking changes nothing.
+    result = await act(cal, "use");
+    assert.ok("clock" in result && result.clock?.state === "paused");
+    result = await act(dee, "look");
+    assert.ok("clock" in result && result.clock);
+    assert.deepEqual([result.clock.state, result.clock.mine, result.clock.by], ["paused", false, "Cal"]);
+    result = await act(cal, "resume");
+    assert.ok("clock" in result && result.clock?.state === "running");
+    result = await act(cal, "end");
+    assert.ok("clock" in result && result.clock?.state === "ended" && !result.clock.solved);
+    // A message is work, but doesn't start an ended clock: Reopen does.
+    const after = await startTurn(cal, { conversationId, text: "Still clicks." }, [reply()]);
+    assert.equal(after.conversation.clock?.state, "ended");
+    result = await act(cal, "resume");
+    assert.ok("clock" in result && result.clock?.state === "running");
+    assert.deepEqual((await spansOf(conversationId)).map((span) => [span.seq, span.stop]), [
+      [1, "pause"],
+      [2, "end"],
+      [3, null],
+    ]);
+    // Not another shop's, nor anything else.
+    assert.deepEqual(await clockAction(techB, { conversationId, action: "pause" }), { error: "That diagnosis isn't in this shop.", status: 404 });
+    assert.equal((await spansOf(conversationId)).at(-1)!.stop, null);
+    assert.ok("error" in (await clockAction(cal, { conversationId, action: "reset" as "pause" })));
+    assert.ok("error" in (await clockAction(cal, { conversationId: "not-an-id", action: "look" })));
+  });
+
+  test("15 minutes without use stops it by itself, back at the last use; the tech who was working can count the gap", async () => {
+    const started = await startTurn(dee, { start: { message: "Speedo drops out" } }, [
+      reply({ likely_causes: [cause(PLUG, 50)], next_checks: [quick("Unplug the speed sensor connector and look for water.", [1])] }),
+    ]);
+    const conversationId = started.conversation.id;
+    // Ten minutes' work, and the tablet went quiet 40 minutes ago.
+    await systemDb
+      .update(diagnosisTimeSpans)
+      .set({ startedAt: sql`now() - interval '50 minutes'`, endedAt: sql`now() - interval '40 minutes'` })
+      .where(eq(diagnosisTimeSpans.conversationId, conversationId));
+    const stopped = (await getConversation(dee, conversationId))!.conversation.clock;
+    assert.deepEqual([stopped?.state, minutes(stopped?.seconds)], ["idle", 10]);
+    // Using the page doesn't start it again.
+    let result = await clockAction(dee, { conversationId, action: "use" });
+    assert.ok("clock" in result && result.clock?.state === "idle");
+    // Ticking the check off does, and asks Dee about the 40 minutes.
+    const ticked = await markStep(dee, { conversationId, turnId: started.turn.id, index: 0, done: true, result: "ok" });
+    assert.ok("clock" in ticked && ticked.clock, JSON.stringify(ticked));
+    assert.deepEqual([ticked.clock.state, minutes(ticked.clock.seconds), minutes(ticked.clock.gap?.seconds)], ["running", 10, 40]);
+    // Nobody else is asked, or can answer.
+    assert.equal((await getConversation(cal, conversationId))!.conversation.clock?.gap, null);
+    result = await clockAction(cal, { conversationId, action: "keep-gap" });
+    assert.ok("clock" in result && minutes(result.clock?.seconds) === 10);
+    result = await clockAction(dee, { conversationId, action: "keep-gap" });
+    assert.ok("clock" in result && result.clock);
+    assert.deepEqual([minutes(result.clock.seconds), result.clock.gap], [50, null]);
+    const spans = await spansOf(conversationId);
+    assert.deepEqual(spans.map((span) => [span.seq, span.stop, span.gapFrom]), [
+      [1, "idle", null],
+      [2, null, null],
+    ]);
+    assert.equal(spans[1].startedAt.getTime(), spans[0].endedAt.getTime());
+  });
+
+  test("a diagnosis started before the clock has none, and gets none", async () => {
+    const [row] = await systemDb
+      .insert(diagnosisConversations)
+      .values({ shopId: cal.shop.id, userId: cal.id, title: "From before the clock", webSearch: true })
+      .returning({ id: diagnosisConversations.id });
+    assert.equal((await getConversation(cal, row.id))!.conversation.clock, null);
+    assert.deepEqual(await clockAction(cal, { conversationId: row.id, action: "resume" }), { clock: null });
+    assert.equal((await spansOf(row.id)).length, 0);
+  });
+
+  test("the database keeps each shop's clock to itself, and a stretch goes with its diagnosis", async () => {
+    const started = await startTurn(cal, { start: { message: "Belt squeal" } }, [reply()]);
+    const conversationId = started.conversation.id;
+    const now = new Date();
+    // Stopped, so the one stretch going doesn't stand in the way first.
+    const stretch = (shopId: string, userId: string) => ({ shopId, conversationId, seq: 9, userId, startedAt: now, endedAt: now, stop: "end" as const });
+    // 42501: a row-level security policy or a missing grant; 23503: a
+    // foreign key (the diagnosis isn't in that shop).
+    const denied = (code: string) => (error: Error & { cause?: { code?: string } }) => error.cause?.code === code;
+    // Another shop sees none of it, and can't add to it, as itself or as
+    // the diagnosis's shop.
+    assert.deepEqual(await withShop(techB.shop.id, (tx) => tx.select().from(diagnosisTimeSpans).where(eq(diagnosisTimeSpans.conversationId, conversationId))), []);
+    await assert.rejects(withShop(techB.shop.id, (tx) => tx.insert(diagnosisTimeSpans).values(stretch(techB.shop.id, techB.id))), denied("23503"));
+    await assert.rejects(withShop(techB.shop.id, (tx) => tx.insert(diagnosisTimeSpans).values(stretch(cal.shop.id, techB.id))), denied("42501"));
+    // Nor can anyone in another shop be put on this one's.
+    await assert.rejects(withShop(cal.shop.id, (tx) => tx.insert(diagnosisTimeSpans).values(stretch(cal.shop.id, techB.id))), denied("23503"));
+    // Its own shop can't give a stretch to someone else, or take one away.
+    await assert.rejects(
+      withShop(cal.shop.id, (tx) => tx.update(diagnosisTimeSpans).set({ userId: dee.id }).where(eq(diagnosisTimeSpans.conversationId, conversationId))),
+      denied("42501"),
+    );
+    await assert.rejects(
+      withShop(cal.shop.id, (tx) => tx.delete(diagnosisTimeSpans).where(eq(diagnosisTimeSpans.conversationId, conversationId))),
+      denied("42501"),
+    );
+    // Deleting the diagnosis takes its clock with it.
+    const deleted = await deleteConversation(cal, { conversationId, reason: "Test" });
+    assert.ok("title" in deleted, JSON.stringify(deleted));
+    assert.equal((await spansOf(conversationId)).length, 0);
   });
 });

@@ -8,6 +8,8 @@ import { auditLog, customerVehicles, customers, diagnosisConversations, diagnosi
 import { giveBackAttempt, takeAttempt } from "@/lib/attempts";
 import { conversationCustomer, type ConversationCustomer } from "@/lib/customer-rules";
 import { customerOf, findChoice } from "@/lib/customers";
+import { moveClock, readClock, startClock } from "@/lib/diagnose-clock";
+import type { ClockEvent, ClockView } from "@/lib/diagnose-clock-rules";
 import { runDiagnosisLoop, type ClaudeStream, type LoopResult, type ToolHandler } from "@/lib/diagnose-loop";
 import { TOOL_NAMES, webSearchEnabled } from "@/lib/diagnose-prompt";
 import {
@@ -128,16 +130,18 @@ async function unitOf(shopId: string, conversation: ConversationRow) {
   return { scope, ...machine };
 }
 
-// What the screen shows of a conversation: its unit, and whose it is.
-async function viewOf(shopId: string, conversation: ConversationRow) {
+// What the screen shows of a conversation: its unit, whose it is, and its
+// clock as the viewer sees it.
+async function viewOf(shopId: string, conversation: ConversationRow, clock: ClockView | null) {
   const [unit, customer] = await Promise.all([unitOf(shopId, conversation), customerOf(shopId, conversation.customerVehicleId)]);
-  return toConversationView(conversation, unit, customer);
+  return toConversationView(conversation, unit, customer, clock);
 }
 
 function toConversationView(
   conversation: ConversationRow,
   { scope, vehicle, model }: { scope: ScopeView; vehicle: UnitVehicle | null; model: UnitSpec | null },
   customer: ConversationCustomer | null,
+  clock: ClockView | null,
 ): ConversationView {
   return {
     id: conversation.id,
@@ -155,6 +159,7 @@ function toConversationView(
     outcome: conversation.outcome ? { title: conversation.outcome.title, seq: conversation.outcome.seq } : null,
     techMessages: conversation.techMessages,
     full: fullReason(conversation),
+    clock,
   };
 }
 
@@ -346,11 +351,11 @@ export async function getConversation(user: CurrentUser, id: string): Promise<Co
       .where(eq(diagnosisTurns.conversationId, id))
       .orderBy(asc(diagnosisTurns.seq));
     const names = await userNames(tx, [...new Set(turns.map((turn) => turn.userId))]);
-    return { conversation, turns, names };
+    return { conversation, turns, names, clock: await readClock(tx, id, user) };
   });
   if (!found) return null;
   return {
-    conversation: await viewOf(user.shop.id, found.conversation),
+    conversation: await viewOf(user.shop.id, found.conversation, found.clock),
     turns: found.turns.map((turn) => toTurnView(turn, found.names.get(turn.userId) ?? "")),
     startedBy: found.conversation.userId,
   };
@@ -447,6 +452,9 @@ type Prepared = {
   feedbackSent: Set<string>;
   stepsSent: Set<string>;
   removeWebSearch: boolean;
+  // The clock as the sender sees it, once the message has started or kept
+  // it going.
+  clock: ClockView | null;
   conversationView: ConversationView;
   turnView: TurnView;
 };
@@ -848,6 +856,8 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
         })
         .returning();
     }
+    // A new diagnosis starts its clock; a message is work on one.
+    const clock = plan ? await startClock(tx, conversation, user) : await moveClock(tx, conversation, { kind: "work", userId: user.id }, user);
     const unsent = conversation.feedback.filter((entry) => entry.sentInSeq === null);
     // Every tick Claude hasn't heard is marked heard once this message is
     // done, also one the note leaves out (it put a check back as Claude
@@ -857,6 +867,7 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
       user,
       conversation,
       turn,
+      clock,
       history: done.flatMap((row) => (row.history ?? []) as MessageParam[]),
       previousSeen: mergeSeen(...done.map((row) => row.seen)),
       previousReply: done.at(-1)?.reply ?? null,
@@ -872,7 +883,7 @@ export async function prepareTurn(user: CurrentUser, request: TurnRequest): Prom
   }
   return {
     ...saved,
-    conversationView: await viewOf(shopId, saved.conversation),
+    conversationView: await viewOf(shopId, saved.conversation, saved.clock),
     turnView: toTurnView(saved.turn, user.name),
   };
 }
@@ -1119,10 +1130,13 @@ async function saveOutcome(
       })
       .where(eq(diagnosisConversations.id, conversation.id))
       .returning();
-    return { turn: savedTurn, conversation: updated };
+    // Claude's answer moves the diagnosis on: the clock keeps going, if it
+    // is (the tech may have paused or ended it meanwhile).
+    const clock = await moveClock(tx, current, { kind: "touch" }, user);
+    return { turn: savedTurn, conversation: updated, clock };
   });
   const turnView = toTurnView(saved.turn, user.name);
-  const conversationView = await viewOf(user.shop.id, saved.conversation);
+  const conversationView = await viewOf(user.shop.id, saved.conversation, saved.clock);
   extra.emit({ type: "end", conversation: conversationView, turn: turnView });
   return { turn: turnView, conversation: conversationView };
 }
@@ -1144,11 +1158,16 @@ export async function requestStop(user: CurrentUser, turnId: string) {
 
 // "Ruled out" / "This was it" (or undoing either, "open") on a cause of one of
 // Claude's replies. Claude hears about it with the next message; "This was
-// it" also records the conversation's outcome for AI-accuracy figures.
+// it" also records the conversation's outcome for AI-accuracy figures, and
+// ends its clock (solved). Taking it back starts the clock again; any other
+// press is work on the diagnosis.
 export async function markCause(
   user: CurrentUser,
   input: { conversationId: string; turnId: string; index: number; verdict: CauseVerdict },
-): Promise<{ feedback: FeedbackEntry[]; outcome: ConversationView["outcome"]; status: ConversationView["status"] } | { error: string }> {
+): Promise<
+  | { feedback: FeedbackEntry[]; outcome: ConversationView["outcome"]; status: ConversationView["status"]; clock: ClockView | null }
+  | { error: string }
+> {
   const { conversationId, turnId, index, verdict } = input;
   if (!isUuid(conversationId) || !isUuid(turnId) || !Number.isInteger(index) || index < 0) {
     return { error: "That cause isn't there any more. Reload the page." };
@@ -1194,10 +1213,18 @@ export async function markCause(
       .set({ feedback, outcome, status: outcome ? "solved" : "open" })
       .where(eq(diagnosisConversations.id, conversationId))
       .returning();
+    const clockEvent: ClockEvent =
+      verdict === "confirmed"
+        ? { kind: "stop", userId: user.id, stop: "solved" }
+        : conversation.outcome && !outcome
+          ? { kind: "resume", userId: user.id }
+          : { kind: "work", userId: user.id };
+    const clock = await moveClock(tx, conversation, clockEvent, user);
     return {
       feedback: updated.feedback,
       outcome: updated.outcome ? { title: updated.outcome.title, seq: updated.outcome.seq } : null,
       status: updated.status,
+      clock,
     };
   });
 }
@@ -1210,11 +1237,12 @@ export async function markCause(
 // is how the check stood on the screen it was tapped on: when another device
 // has changed it since (a Problem found the office PC hasn't seen), nothing
 // is saved and the screen gets how it stands now (stale), rather than wipe
-// out what the other one said.
+// out what the other one said. A tap on a check is work on the diagnosis,
+// for its clock.
 export async function markStep(
   user: CurrentUser,
   input: { conversationId: string; turnId: string; index: number; done: boolean; result: StepResult | null; was?: StepState | null },
-): Promise<{ stepChecks: StepCheckEntry[]; stale?: true } | { error: string }> {
+): Promise<{ stepChecks: StepCheckEntry[]; stale?: true; clock: ClockView | null } | { error: string }> {
   const { conversationId, turnId, index, done } = input;
   if (!isUuid(conversationId) || !isUuid(turnId) || !Number.isInteger(index) || index < 0) {
     return { error: "That step isn't there any more. Reload the page." };
@@ -1234,9 +1262,12 @@ export async function markStep(
       .where(and(eq(diagnosisTurns.id, turnId), eq(diagnosisTurns.conversationId, conversationId)));
     const check = turn?.reply?.nextChecks[index];
     if (!conversation || !turn || !check) return { error: "That step isn't there any more. Reload the page." };
+    const clock = await moveClock(tx, conversation, { kind: "work", userId: user.id }, user);
     const now = stepStateOf(stepStates(conversation.stepChecks), check.action);
     if (was && !sameState(was, now)) {
-      return sameState(now, { done, result: done ? result : null }) ? { stepChecks: conversation.stepChecks } : { stepChecks: conversation.stepChecks, stale: true };
+      return sameState(now, { done, result: done ? result : null })
+        ? { stepChecks: conversation.stepChecks, clock }
+        : { stepChecks: conversation.stepChecks, stale: true, clock };
     }
     // A message with Claude now read the ticks it hasn't heard when it
     // started (the conversation's row is locked while one starts).
@@ -1269,7 +1300,7 @@ export async function markStep(
       .set({ stepChecks: applyStepCheck(conversation.stepChecks, entry, { inFlight: Boolean(running) }) })
       .where(eq(diagnosisConversations.id, conversationId))
       .returning({ stepChecks: diagnosisConversations.stepChecks });
-    return { stepChecks: updated.stepChecks };
+    return { stepChecks: updated.stepChecks, clock };
   });
 }
 
@@ -1277,7 +1308,7 @@ export async function markStep(
 // messages, by model number or VIN. Claude is told with the next message.
 // The VIN goes with the unit: a VIN sets it; a model number its VIN doesn't
 // agree with clears it; the whole library leaves it (the unit is the same,
-// only the manuals change).
+// only the manuals change). It's work on the diagnosis, for its clock.
 export async function changeUnit(
   user: CurrentUser,
   input: { conversationId: string; modelNumber?: string; wholeLibrary?: boolean },
@@ -1289,6 +1320,7 @@ export async function changeUnit(
       modelNumber: string | null;
       vehicle: UnitVehicle | null;
       model: UnitSpec | null;
+      clock: ClockView | null;
     }
   | { error: string }
 > {
@@ -1365,11 +1397,12 @@ export async function changeUnit(
       })
       .where(eq(diagnosisConversations.id, input.conversationId))
       .returning();
-    return row;
+    return { row, clock: await moveClock(tx, row, { kind: "work", userId: user.id }, user) };
   });
   if (!updated) return { error: "That diagnosis isn't in this shop." };
-  const { scope, vehicle, model } = await unitOf(shopId, updated);
-  return { scope, unit: updated.unitLabel, vin: updated.unitVin, modelNumber: updated.unitModelNumber, vehicle, model };
+  const { row, clock } = updated;
+  const { scope, vehicle, model } = await unitOf(shopId, row);
+  return { scope, unit: row.unitLabel, vin: row.unitVin, modelNumber: row.unitModelNumber, vehicle, model, clock };
 }
 
 // Ties a conversation to a customer's vehicle, or to none (vehicleId

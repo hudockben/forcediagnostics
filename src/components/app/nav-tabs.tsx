@@ -4,7 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useLayoutEffect, useRef } from "react";
 
-export type NavItem = { href: string; label: string; section: string };
+// `exact`: only the section's own address marks it current, not the pages
+// under it (a section at the top of others, such as /reports).
+export type NavItem = { href: string; label: string; section: string; exact?: boolean };
 
 const styles = {
   tabs: {
@@ -55,7 +57,7 @@ function TabList({ items, label, variant = "tabs", pathname }: Props & { pathnam
         {items.map((item) => {
           const active =
             pathname !== null &&
-            (pathname === item.section || pathname.startsWith(`${item.section}/`));
+            (pathname === item.section || (!item.exact && pathname.startsWith(`${item.section}/`)));
           // "page" only for the exact page; otherwise it marks the current section.
           const current = active ? (pathname === item.href ? "page" : "true") : undefined;
           return (

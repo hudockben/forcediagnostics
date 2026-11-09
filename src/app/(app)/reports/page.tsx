@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { Suspense, type ReactNode } from "react";
 
 import { LoadingLine, Notice, PageHeading } from "@/components/app/ui";
@@ -27,7 +28,7 @@ import {
   type ReportView,
 } from "@/lib/report-rules";
 import { bonusSales } from "@/lib/reports";
-import { requireCapability } from "@/lib/session";
+import { allows, getCurrentUser } from "@/lib/session";
 
 import { WidePage } from "../nusr/forms";
 
@@ -59,7 +60,10 @@ const textLink = "text-sm text-glow/90 hover:text-glow hover:underline focus-vis
 type Href = (change: Partial<ReportParams>) => string;
 
 async function Reports({ searchParams }: { searchParams: PageProps<"/reports">["searchParams"] }) {
-  const user = await requireCapability("sales.log");
+  const user = await getCurrentUser();
+  // A manager on a bay tablet sees how long diagnoses take, not the bonuses
+  // (the NUSR's figures need a password sign-in).
+  if (!allows(user, "sales.log")) redirect(allows(user, "reports.kpis") ? "/reports/diagnosis-times" : "/home");
   const today = shopToday();
   const params = parseReportParams(await searchParams, today);
   const result = await bonusSales(user, params);

@@ -48,9 +48,10 @@ export type Sheet = {
 // The shop's spreadsheet's own number formats: amounts in Excel's
 // Accounting style without a dollar sign (1,234.56, (142.61) for a minus, a
 // dash for zero), dates month first, and a change with its sign. Whole
-// numbers and percentages are Excel's built-in formats, which follow the
-// computer's way of writing numbers.
-const NUMBER_FORMATS = { general: 0, integer: 3, percent: 10, money: 164, date: 165, change: 166 } as const;
+// numbers, percentages and hours (decimal, as labor is booked: 1.25) are
+// Excel's built-in formats, which follow the computer's way of writing
+// numbers.
+const NUMBER_FORMATS = { general: 0, hours: 2, integer: 3, percent: 10, money: 164, date: 165, change: 166 } as const;
 const FORMAT_CODES: [number, string][] = [
   [NUMBER_FORMATS.money, '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)'],
   [NUMBER_FORMATS.date, "m/d/yyyy"],
@@ -87,6 +88,8 @@ const STYLES = {
   totalPercent: { font: "bold", border: "top", format: "percent" },
   totalInteger: { font: "bold", border: "top", format: "integer" },
   totalChange: { font: "bold", border: "top", format: "change" },
+  hours: { format: "hours" },
+  totalHours: { font: "bold", border: "top", format: "hours" },
 } as const satisfies Record<string, StyleSpec>;
 
 export type CellStyle = keyof typeof STYLES;
