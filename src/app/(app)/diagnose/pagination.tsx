@@ -10,21 +10,26 @@ const pageLink = `${pageControl} text-ink-muted hover:bg-white/5 hover:text-ink`
 
 // Previous, the page numbers and Next, 44px to tap. On a phone only the
 // first, last and current page numbers show; wider, one either side too.
-// The Diagnose list's, and the Customers tab's at its own path.
+// The Diagnose list's, and the Customers tab's at its own path. With
+// `heading`, the id of the list's heading, the next page opens there
+// rather than at the top (Rebates' Saved rebates, under New invoices).
 export function Pagination({
   query,
   page,
   pages,
   label,
   path = "/diagnose",
+  heading,
 }: {
   query: string;
   page: number;
   pages: number;
   label: string;
   path?: string;
+  heading?: string;
 }) {
   if (pages <= 1) return null;
+  const pageHref = (item: number) => `${listHref(query, item, path)}${heading ? `#${heading}` : ""}`;
   const numbers = (around: number, only: string) =>
     pageItems(page, pages, around).map((item, index) => (
       <li key={`${only}-${index}`} className={only}>
@@ -38,7 +43,7 @@ export function Pagination({
             {item}
           </span>
         ) : (
-          <Link href={listHref(query, item, path)} data-page={item} className={`${pageLink} font-mono`}>
+          <Link href={pageHref(item)} data-page={item} className={`${pageLink} font-mono`}>
             <span className="sr-only">Page </span>
             {item}
           </Link>
@@ -60,7 +65,7 @@ export function Pagination({
         {content}
       </span>
     ) : (
-      <Link href={listHref(query, to, path)} rel={rel} data-page-step={rel} className={pageLink}>
+      <Link href={pageHref(to)} rel={rel} data-page-step={rel} className={pageLink}>
         {content}
       </Link>
     );

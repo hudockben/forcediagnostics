@@ -19,16 +19,20 @@ import { Pagination } from "../diagnose/pagination";
 import { LogFilter } from "../nusr/forms";
 import { OpenInvoiceLink, RemoveInvoice } from "./saved-actions";
 
-// Saved rebates, at the top of the Rebates tab: the invoices saved under
-// New invoices and their lines, by the filters in the address (the year and month
+// Saved rebates, under New invoices on the Rebates tab: the invoices saved
+// there and their lines, by the filters in the address (the year and month
 // of the invoice's date, the column its amounts went in, the salesman and
 // category of each line's sale, whether it was found, and a search), what
-// they come to, and the workbook of them.
+// they come to, and the workbook of them. Picking a filter leaves the page
+// where it is, and another page of rebates opens at their heading.
 
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 const columnName = (column: RebateColumn) => REBATE_COLUMN_LABELS[column];
 const savedDay = (at: Date) => at.toLocaleDateString("en-US", { timeZone: SHOP_TIME_ZONE });
 const invoiceName = (invoice: Pick<SavedInvoice, "number" | "fileName">) => (invoice.number ? `invoice ${invoice.number}` : invoice.fileName);
+
+// The rebates' heading, where another page of them opens.
+const LINES_HEADING = "saved-rebate-lines";
 
 const downloadClass =
   "inline-flex min-h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
@@ -66,6 +70,7 @@ export function SavedRebatesSection({
       <div className="flex flex-wrap items-center gap-3" data-rebates-filters>
         <LogFilter
           path="/rebates"
+          scroll={false}
           name="year"
           label="Year"
           search={search}
@@ -82,6 +87,7 @@ export function SavedRebatesSection({
         {filters.year !== null && (
           <LogFilter
             path="/rebates"
+            scroll={false}
             name="month"
             label="Month"
             search={search}
@@ -91,6 +97,7 @@ export function SavedRebatesSection({
         )}
         <LogFilter
           path="/rebates"
+          scroll={false}
           name="column"
           label="Column"
           search={search}
@@ -99,6 +106,7 @@ export function SavedRebatesSection({
         />
         <LogFilter
           path="/rebates"
+          scroll={false}
           name="salesperson"
           label="Salesman"
           search={search}
@@ -110,6 +118,7 @@ export function SavedRebatesSection({
         />
         <LogFilter
           path="/rebates"
+          scroll={false}
           name="category"
           label="Category"
           search={search}
@@ -118,6 +127,7 @@ export function SavedRebatesSection({
         />
         <LogFilter
           path="/rebates"
+          scroll={false}
           name="status"
           label="Found in the NUSR or not"
           search={search}
@@ -266,7 +276,9 @@ function SavedResults({ filters, thisYear, invoices, saved }: { filters: RebateF
 
           {saved.total > 0 && (
             <>
-              <h3 className="mt-6 text-sm font-semibold text-ink">Rebates</h3>
+              <h3 id={LINES_HEADING} className="mt-6 scroll-mt-4 text-sm font-semibold text-ink">
+                Rebates
+              </h3>
               <div className="relative -mx-5 mt-2 overflow-x-auto border-y border-white/10 sm:-mx-6">
                 <table className="w-full min-w-[56rem] text-sm" data-rebates-saved-lines>
                   <caption className="sr-only">The saved rebates the filters find, and the sales they were found as</caption>
@@ -341,6 +353,7 @@ function SavedResults({ filters, thisYear, invoices, saved }: { filters: RebateF
                   pages={saved.pages}
                   label="Pages of saved rebates"
                   path={`/rebates${rebateFiltersSearch({ ...filters, query: "" }, thisYear)}`}
+                  heading={LINES_HEADING}
                 />
               </div>
             </>
