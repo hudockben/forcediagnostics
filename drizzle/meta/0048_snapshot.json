@@ -1,6 +1,6 @@
 {
-  "id": "b3d1591a-7a13-4e84-8016-11354346c2aa",
-  "prevId": "1b00c79e-4aac-4a1c-96fd-98323af6afca",
+  "id": "d885ba92-b8a2-4c04-b9c5-3032015a3949",
+  "prevId": "ca4ac2af-1f62-460a-a2c1-bfbeefa9c5be",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1685,6 +1685,277 @@
         "diagnosis_turns_status": {
           "name": "diagnosis_turns_status",
           "value": "\"diagnosis_turns\".\"status\" in ('running', 'done', 'failed', 'stopped')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.loc_units": {
+      "name": "loc_units",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "shop_id": {
+          "name": "shop_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stock_number": {
+          "name": "stock_number",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "vin": {
+          "name": "vin",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit_year": {
+          "name": "unit_year",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "category": {
+          "name": "category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "condition": {
+          "name": "condition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cost_cents": {
+          "name": "cost_cents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "free_floor_ends": {
+          "name": "free_floor_ends",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_on": {
+          "name": "received_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "on_loc": {
+          "name": "on_loc",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "paid_off_on": {
+          "name": "paid_off_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sold_on": {
+          "name": "sold_on",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "notes": {
+          "name": "notes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "trade_sale_id": {
+          "name": "trade_sale_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by_user_id": {
+          "name": "created_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "loc_units_shop_stock": {
+          "name": "loc_units_shop_stock",
+          "columns": [
+            {
+              "expression": "shop_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "lower(\"stock_number\")",
+              "isExpression": true,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "with": {},
+          "method": "btree",
+          "where": "\"loc_units\".\"stock_number\" is not null and (\"loc_units\".\"sold_on\" is null or \"loc_units\".\"on_loc\")",
+          "concurrently": false
+        },
+        "loc_units_shop_sold": {
+          "name": "loc_units_shop_sold",
+          "columns": [
+            {
+              "expression": "shop_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sold_on",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "loc_units_trade_sale": {
+          "name": "loc_units_trade_sale",
+          "columns": [
+            {
+              "expression": "trade_sale_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "loc_units_shop_id_shops_id_fk": {
+          "name": "loc_units_shop_id_shops_id_fk",
+          "tableFrom": "loc_units",
+          "columnsFrom": [
+            "shop_id"
+          ],
+          "tableTo": "shops",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "loc_units_created_by_user_id_users_id_fk": {
+          "name": "loc_units_created_by_user_id_users_id_fk",
+          "tableFrom": "loc_units",
+          "columnsFrom": [
+            "created_by_user_id"
+          ],
+          "tableTo": "users",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "set null"
+        },
+        "loc_units_trade_sale_shop_fk": {
+          "name": "loc_units_trade_sale_shop_fk",
+          "tableFrom": "loc_units",
+          "columnsFrom": [
+            "trade_sale_id",
+            "shop_id"
+          ],
+          "tableTo": "unit_sales",
+          "columnsTo": [
+            "id",
+            "shop_id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {
+        "loc_units_own_shop": {
+          "name": "loc_units_own_shop",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "app_user"
+          ],
+          "using": "\"loc_units\".\"shop_id\" = nullif(current_setting('app.shop_id', true), '')::uuid",
+          "withCheck": "\"loc_units\".\"shop_id\" = nullif(current_setting('app.shop_id', true), '')::uuid"
+        }
+      },
+      "checkConstraints": {
+        "loc_units_condition": {
+          "name": "loc_units_condition",
+          "value": "\"loc_units\".\"condition\" in ('new', 'used')"
+        },
+        "loc_units_model": {
+          "name": "loc_units_model",
+          "value": "length(\"loc_units\".\"model\") between 1 and 120"
+        },
+        "loc_units_stock_number": {
+          "name": "loc_units_stock_number",
+          "value": "length(\"loc_units\".\"stock_number\") between 1 and 20"
+        },
+        "loc_units_vin": {
+          "name": "loc_units_vin",
+          "value": "length(\"loc_units\".\"vin\") between 1 and 30"
+        },
+        "loc_units_unit_year": {
+          "name": "loc_units_unit_year",
+          "value": "\"loc_units\".\"unit_year\" between 1950 and 2100"
+        },
+        "loc_units_cost": {
+          "name": "loc_units_cost",
+          "value": "\"loc_units\".\"cost_cents\" between 0 and 1000000000"
+        },
+        "loc_units_paid_off": {
+          "name": "loc_units_paid_off",
+          "value": "not (\"loc_units\".\"on_loc\" and \"loc_units\".\"paid_off_on\" is not null)"
         }
       },
       "isRLSEnabled": false
@@ -3781,263 +4052,6 @@
         "sticker_plate_log_sticker_number": {
           "name": "sticker_plate_log_sticker_number",
           "value": "length(\"sticker_plate_log\".\"sticker_number\") between 1 and 40"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.stock_units": {
-      "name": "stock_units",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "shop_id": {
-          "name": "shop_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "vin": {
-          "name": "vin",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "unit_year": {
-          "name": "unit_year",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model_number": {
-          "name": "model_number",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "engine_number": {
-          "name": "engine_number",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "received_on": {
-          "name": "received_on",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "cost_cents": {
-          "name": "cost_cents",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "list_price_cents": {
-          "name": "list_price_cents",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "sold_on": {
-          "name": "sold_on",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "notes": {
-          "name": "notes",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "invoice_number": {
-          "name": "invoice_number",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "invoice_date": {
-          "name": "invoice_date",
-          "type": "date",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "file_name": {
-          "name": "file_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_by_user_id": {
-          "name": "created_by_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "stock_units_shop_vin": {
-          "name": "stock_units_shop_vin",
-          "columns": [
-            {
-              "expression": "shop_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "vin",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        },
-        "stock_units_shop_received": {
-          "name": "stock_units_shop_received",
-          "columns": [
-            {
-              "expression": "shop_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "received_on",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        },
-        "stock_units_shop_model_number": {
-          "name": "stock_units_shop_model_number",
-          "columns": [
-            {
-              "expression": "shop_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "model_number",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "with": {},
-          "method": "btree",
-          "concurrently": false
-        }
-      },
-      "foreignKeys": {
-        "stock_units_shop_id_shops_id_fk": {
-          "name": "stock_units_shop_id_shops_id_fk",
-          "tableFrom": "stock_units",
-          "columnsFrom": [
-            "shop_id"
-          ],
-          "tableTo": "shops",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "cascade"
-        },
-        "stock_units_created_by_user_id_users_id_fk": {
-          "name": "stock_units_created_by_user_id_users_id_fk",
-          "tableFrom": "stock_units",
-          "columnsFrom": [
-            "created_by_user_id"
-          ],
-          "tableTo": "users",
-          "columnsTo": [
-            "id"
-          ],
-          "onUpdate": "no action",
-          "onDelete": "set null"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {
-        "stock_units_own_shop": {
-          "name": "stock_units_own_shop",
-          "as": "PERMISSIVE",
-          "for": "ALL",
-          "to": [
-            "app_user"
-          ],
-          "using": "\"stock_units\".\"shop_id\" = nullif(current_setting('app.shop_id', true), '')::uuid",
-          "withCheck": "\"stock_units\".\"shop_id\" = nullif(current_setting('app.shop_id', true), '')::uuid"
-        }
-      },
-      "checkConstraints": {
-        "stock_units_vin": {
-          "name": "stock_units_vin",
-          "value": "length(\"stock_units\".\"vin\") between 1 and 30"
-        },
-        "stock_units_model": {
-          "name": "stock_units_model",
-          "value": "length(\"stock_units\".\"model\") between 1 and 120"
-        },
-        "stock_units_unit_year": {
-          "name": "stock_units_unit_year",
-          "value": "\"stock_units\".\"unit_year\" between 1950 and 2100"
-        },
-        "stock_units_texts": {
-          "name": "stock_units_texts",
-          "value": "length(\"stock_units\".\"model_number\") between 1 and 20 and length(\"stock_units\".\"description\") between 1 and 120 and length(\"stock_units\".\"engine_number\") between 1 and 30 and length(\"stock_units\".\"notes\") between 1 and 1000"
-        },
-        "stock_units_invoice": {
-          "name": "stock_units_invoice",
-          "value": "length(\"stock_units\".\"invoice_number\") between 1 and 20 and length(\"stock_units\".\"file_name\") between 1 and 200"
-        },
-        "stock_units_amounts": {
-          "name": "stock_units_amounts",
-          "value": "\"stock_units\".\"cost_cents\" between 0 and 1000000000 and \"stock_units\".\"list_price_cents\" between 0 and 1000000000"
         }
       },
       "isRLSEnabled": false

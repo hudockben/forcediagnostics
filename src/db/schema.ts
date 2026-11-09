@@ -37,8 +37,9 @@ import {
   type TurnStatus,
   type TurnUsage,
 } from "../lib/diagnose-rules";
+import { LOC_LIMITS, MAX_LOC_YEAR, MIN_LOC_YEAR } from "../lib/loc-rules";
 import { PAGE_FACTS_STATUSES, type PageFacts, type PageFactsStatus } from "../lib/manual-facts-rules";
-import { UNIT_CONDITIONS, UNIT_TYPES, type UnitCondition, type UnitType } from "../lib/nusr-rules";
+import { MAX_AMOUNT_CENTS, UNIT_CONDITIONS, UNIT_TYPES, type UnitCondition, type UnitType } from "../lib/nusr-rules";
 import { MATCH_HOWS, REBATE_COLUMNS, type MatchHow, type RebateColumn } from "../lib/rebate-rules";
 import { PLATE_CLASSES, type PlateClass } from "../lib/sticker-log-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
@@ -1147,6 +1148,80 @@ export const rebateLines = pgTable(
   ],
 );
 
+// The LOC tab (src/lib/loc.ts): the units on the shop's line of credit (its
+// floor plan) and the ones it owns, as its LOC spreadsheet kept them. A
+// unit is on the list while it's in stock and, once sold, until it's paid
+// off the LOC; it's kept after that, sold, for looking back. Cost is whole
+// cents. A trade-in logged with a NUSR sale comes on as a unit we own, tied
+// to that sale (trade_sale_id); its value is the LOC's, never the sale's,
+// so the sale's profit and bonuses don't change for it.
+export const locUnits = pgTable(
+  "loc_units",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    shopId: uuid("shop_id")
+      .notNull()
+      .references(() => shops.id, { onDelete: "cascade" }),
+    // As the shop writes it, kept as text: "099837" keeps its zero, and
+    // it's six digits on most units, seven on some models.
+    stockNumber: text("stock_number"),
+    // Upper-cased; a whole VIN, or a trailer's or an old unit's serial.
+    vin: text("vin"),
+    unitYear: integer("unit_year"),
+    // As the sheet writes it, colour and all.
+    model: text("model").notNull(),
+    category: text("category"),
+    condition: text("condition").notNull().$type<UnitCondition>(),
+    costCents: integer("cost_cents").notNull(),
+    // Its last day of free flooring.
+    freeFloorEnds: date("free_floor_ends"),
+    receivedOn: date("received_on"),
+    // Owed on the line of credit, or the shop's own (paid off, or a trade-in).
+    onLoc: boolean("on_loc").notNull(),
+    paidOffOn: date("paid_off_on"),
+    soldOn: date("sold_on"),
+    notes: text("notes"),
+    // The NUSR sale it was traded in on.
+    tradeSaleId: uuid("trade_sale_id"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    // A trade-in can only be tied to a sale of its own shop. Removing the
+    // sale unties it first (removeSale in src/lib/nusr.ts): the unit's
+    // still on the lot.
+    foreignKey({
+      name: "loc_units_trade_sale_shop_fk",
+      columns: [t.tradeSaleId, t.shopId],
+      foreignColumns: [unitSales.id, unitSales.shopId],
+    }),
+    // A stock # is on the list once: a unit still in stock, or sold and
+    // still owed, has a stock # no other such unit has (without case).
+    uniqueIndex("loc_units_shop_stock")
+      .on(t.shopId, sql`lower(${t.stockNumber})`)
+      .where(sql`${t.stockNumber} is not null and (${t.soldOn} is null or ${t.onLoc})`),
+    index("loc_units_shop_sold").on(t.shopId, t.soldOn),
+    index("loc_units_trade_sale").on(t.tradeSaleId),
+    check("loc_units_condition", sql`${t.condition} in (${sql.raw(UNIT_CONDITIONS.map((c) => `'${c}'`).join(", "))})`),
+    check("loc_units_model", sql`length(${t.model}) between 1 and ${sql.raw(String(LOC_LIMITS.model))}`),
+    check("loc_units_stock_number", sql`length(${t.stockNumber}) between 1 and ${sql.raw(String(LOC_LIMITS.stockNumber))}`),
+    check("loc_units_vin", sql`length(${t.vin}) between 1 and ${sql.raw(String(LOC_LIMITS.vin))}`),
+    check("loc_units_unit_year", sql`${t.unitYear} between ${sql.raw(String(MIN_LOC_YEAR))} and ${sql.raw(String(MAX_LOC_YEAR))}`),
+    check("loc_units_cost", sql`${t.costCents} between 0 and ${sql.raw(String(MAX_AMOUNT_CENTS))}`),
+    // Paid off the LOC, it isn't on it.
+    check("loc_units_paid_off", sql`not (${t.onLoc} and ${t.paidOffOn} is not null)`),
+    // Which columns can change is set by the grant in
+    // drizzle/0048_loc_units_grants.sql.
+    pgPolicy("loc_units_own_shop", {
+      for: "all",
+      to: appUser,
+      using: sql`${t.shopId} = ${currentShopId}`,
+      withCheck: sql`${t.shopId} = ${currentShopId}`,
+    }),
+  ],
+);
+
 // Unit List (the Unit List tab, src/lib/unit-list.ts): the shop's units in
 // stock, as its spreadsheet kept them (Model, VIN, Received, Cost, List),
 // most added from Polaris's whole goods invoices dropped on the tab. A VIN
@@ -1202,7 +1277,7 @@ export const stockUnits = pgTable(
     check("stock_units_invoice", sql`length(${t.invoiceNumber}) between 1 and 20 and length(${t.fileName}) between 1 and 200`),
     check("stock_units_amounts", sql`${t.costCents} between 0 and 1000000000 and ${t.listPriceCents} between 0 and 1000000000`),
     // Which columns can change is set by the grant in
-    // drizzle/0048_stock_units_grants.sql.
+    // drizzle/0050_stock_units_grants.sql.
     pgPolicy("stock_units_own_shop", {
       for: "all",
       to: appUser,

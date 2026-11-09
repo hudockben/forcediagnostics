@@ -3,6 +3,7 @@
 // imports, so it's tested on its own (src/lib/audit-log.ts reads the log).
 
 import { RELATION_LABELS, type VehicleRelation } from "@/lib/customer-rules";
+import { LOC_LABELS, LOC_SECTION_LABELS } from "@/lib/loc-rules";
 import { SALE_LABELS, formatDay, formatMoney, type SaleFields } from "@/lib/nusr-rules";
 import { ROLE_LABELS } from "@/lib/permissions";
 import { ROLES, type Role } from "@/lib/roles";
@@ -17,6 +18,7 @@ export const AUDIT_AREAS = {
   nusr: { label: "NUSR", targetTypes: ["unit_sale"] },
   rebates: { label: "Rebates", targetTypes: ["rebate_invoice"] },
   unitList: { label: "Unit List", targetTypes: ["stock_unit"] },
+  loc: { label: "LOC", targetTypes: ["loc_unit"] },
   customers: { label: "Customers", targetTypes: ["customer", "customer_vehicle"] },
   stickers: { label: "Sticker & Plate log", targetTypes: ["sticker"] },
   suppliers: { label: "Supplier", targetTypes: ["supplier"] },
@@ -96,6 +98,13 @@ const STICKER_FIELD_WORDS: Record<string, string> = {
   plateClass: "type",
   customerId: "customer",
 };
+
+// A unit on the LOC's fields, by name, as an edit lists them.
+const LOC_FIELD_WORDS: Record<string, string> = { ...LOC_LABELS, cost: "Cost", onLoc: "On the LOC or ours" };
+const LOC_DATES = new Set(["freeFloorEnds", "receivedOn", "paidOffOn", "soldOn"]);
+
+// "2026 RZR 900 50\" - Zenith Blue (stock # 168072)".
+const locUnitWords = (d: Record<string, unknown>) => `${str(d.unit) || "a unit"}${str(d.stockNumber) ? ` (stock # ${str(d.stockNumber)})` : ""}`;
 
 // What an entry was: "sticker" (no class) or "Class 1 plate".
 const stickerOrPlate = (plateClass: unknown) => (plateClass === 1 || plateClass === 2 ? `Class ${plateClass} plate` : "sticker");
@@ -248,6 +257,7 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         fact("Salesman", d.salesperson);
         fact("VIN", d.vin);
         if (typeof d.salesPrice === "number") fact("Sales Price", formatMoney(d.salesPrice));
+        if (str(d.tradeIn)) fact("Trade-in, onto the LOC", `${str(d.tradeIn)}${str(d.tradeInStockNumber) ? ` (stock # ${str(d.tradeInStockNumber)})` : ""}`);
         return `Logged the sale of ${str(d.unit) || "a unit"} to ${str(d.customerName)}`;
       case "unit_sale.updated": {
         const changes = (d.changes ?? {}) as Record<string, { from?: unknown; to?: unknown }>;
@@ -265,6 +275,7 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         fact("VIN", d.vin);
         if (typeof d.salesPrice === "number") fact("Sales Price", formatMoney(d.salesPrice));
         if (typeof d.totalProfit === "number") fact("Total profit", formatMoney(d.totalProfit));
+        if (Array.isArray(d.tradeInsKept) && d.tradeInsKept.length > 0) fact("Its trade-in, kept on the LOC", inWords(d.tradeInsKept.map(str)));
         return `Removed the sale of ${str(d.unit) || "a unit"} to ${str(d.customerName)} from the NUSR`;
       case "unit_sales.imported":
         fact("Added", num(d.added));
@@ -329,6 +340,44 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         fact("Sold", formatDay(str(d.soldOn)));
         fact("Invoice", d.invoiceNumber);
         return `Removed ${str(d.unit) || "a unit"} from the Unit List`;
+      // LOC
+      case "loc_unit.added": {
+        if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
+        fact("Free floor ends", formatDay(str(d.freeFloorEnds)));
+        if (d.from === "NUSR") {
+          fact("Traded in on", d.sale);
+          return `Put the trade-in ${locUnitWords(d)} on the LOC, as ours`;
+        }
+        return `Added ${locUnitWords(d)} ${d.section === "owned" ? "to the units we own" : "to the LOC"}`;
+      }
+      case "loc_unit.updated": {
+        const changes = (d.changes ?? {}) as Record<string, { from?: unknown; to?: unknown }>;
+        for (const [key, change] of Object.entries(changes)) {
+          const shown = (value: unknown) => (value === null || value === undefined || value === "" ? "blank" : LOC_DATES.has(key) ? formatDay(str(value)) || str(value) : str(value));
+          fact(LOC_FIELD_WORDS[key] ?? key, `${shown(change.from)} → ${shown(change.to)}`);
+        }
+        const unlisted = (Array.isArray(d.fields) ? d.fields : []).filter((key): key is string => typeof key === "string" && !(key in changes));
+        if (unlisted.length) fact("Also changed", inWords(unlisted.map((key) => (LOC_FIELD_WORDS[key] ?? key).toLowerCase())));
+        return `Corrected ${locUnitWords(d)} on the LOC`;
+      }
+      case "loc_unit.paid_off":
+        if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
+        fact("Paid off", formatDay(str(d.paidOffOn)));
+        return `Marked ${locUnitWords(d)} paid off the LOC${d.sold === true ? "" : ": it's ours now"}`;
+      case "loc_unit.sold":
+        if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
+        fact("Sold", formatDay(str(d.soldOn)));
+        return `Marked ${locUnitWords(d)} sold${d.section === "loc" ? ", still owed on the LOC" : ""}`;
+      case "loc_unit.removed":
+        if (typeof d.cost === "number") fact("Cost", formatMoney(d.cost));
+        if (d.section === "loc" || d.section === "owned") fact("Was", LOC_SECTION_LABELS[d.section]);
+        return `Removed ${locUnitWords(d)} from the LOC`;
+      case "loc_units.imported":
+        fact("Added", num(d.added));
+        fact("Already on the LOC", num(d.already));
+        if (num(d.failed) > 0) fact("Left out", num(d.failed));
+        if (num(d.cost) > 0) fact("What they cost", formatMoney(num(d.cost)));
+        return `Imported units onto the LOC from ${str(d.fileName) || "a file"}`;
 
       // Diagnoses
       case "diagnosis.deleted": {

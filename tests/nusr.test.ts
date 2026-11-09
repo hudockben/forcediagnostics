@@ -130,6 +130,7 @@ describe("reading what's typed", () => {
 
   test("categories and the kind of deal from the model, as the shop writes it", () => {
     assert.equal(guessCategory("Rngr 570 NS"), "UTV");
+    assert.equal(guessCategory("Rng 1000 XP NS - Stealth Gray"), "UTV");
     assert.equal(guessCategory("Xpedition ADV 5P NS"), "UTV");
     assert.equal(guessCategory("General XP 1000 Prem"), "UTV");
     assert.equal(guessCategory("Spmn 570 EPS X2"), "ATV");
@@ -439,7 +440,7 @@ describe("the log", () => {
   test("removed, with what it was kept", async () => {
     const id = await log(manager, { soldOn: "2026-03-02", customerName: "Removed Later", unitModel: "Spmn 570", salesPrice: "9000", dealerCost: "8000" });
     const result = await removeSale(manager, id);
-    assert.deepEqual(result, { ok: true, label: "Spmn 570 to Removed Later" });
+    assert.deepEqual(result, { ok: true, label: "Spmn 570 to Removed Later", tradeIns: [] });
     assert.equal(await getSale(manager.shop.id, id), null);
     const [entry] = await systemDb.select().from(auditLog).where(and(eq(auditLog.targetId, id), eq(auditLog.action, "unit_sale.removed")));
     assert.equal((entry.details as { totalProfit: number }).totalProfit, 100000);

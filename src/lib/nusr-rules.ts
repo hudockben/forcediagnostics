@@ -49,7 +49,7 @@ export function guessCategory(model: string | null): string | null {
   if (!model) return null;
   if (/\brzr\b/i.test(model)) return "RZR";
   if (TRAILER_MODEL.test(model) && !/\b(?:spm|spmn|6x6)\b/i.test(model)) return "Trailer";
-  if (/\b(?:rngr|ranger|rnger|general|gen\b|xpedition|xped|teryx|wolverine|maverick|talon|krx|uforce|rhino|pro ?xd)/i.test(model)) return "UTV";
+  if (/\b(?:rngr|ranger|rnger|rng\b|general|gen\b|xpedition|xped|teryx|wolverine|maverick|talon|krx|uforce|rhino|pro ?xd)/i.test(model)) return "UTV";
   if (/\b(?:spm|spmn|sptm|sportsman|scrambler|outlaw|phoenix|magnum)/i.test(model)) return "ATV";
   return null;
 }
