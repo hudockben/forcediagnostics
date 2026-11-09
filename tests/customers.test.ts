@@ -426,8 +426,13 @@ describe("Diagnose and customers' vehicles", () => {
     assert.deepEqual(await ids(""), []);
     const [choice] = await searchCustomerVehicles(tech.shop.id, "whitfield");
     assert.equal(choice.label, "2021 Polaris Sportsman 850");
-    assert.ok(!JSON.stringify(choice).includes("dana@example.com"));
-    assert.ok(!JSON.stringify(choice).includes("555"));
+    // Neither the email nor the phone, in any of its forms. The phone itself,
+    // not any "555": about one run in a hundred, a random id has one.
+    const shown = JSON.stringify(choice);
+    assert.ok(!shown.includes("dana@example.com"));
+    assert.ok(!shown.includes("(814) 555-0199"), "the phone as the shop writes it");
+    assert.ok(!shown.includes("814-555-0199"), "the phone as typed");
+    assert.ok(!shown.includes("8145550199"), "the phone's digits");
   });
 
   test("a diagnosis started on a customer's vehicle is listed on their record with its fix", async () => {
