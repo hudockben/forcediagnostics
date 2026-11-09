@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   createContext,
@@ -19,6 +20,7 @@ import {
 
 import { Notice } from "@/components/app/ui";
 import { inputBaseClass, inputClass, labelClass, primaryButtonClass, primaryLinkClass, secondaryButtonClass } from "@/components/hud";
+import { TRADE_IN_KEYS, TRADE_IN_LABELS, checkTradeIn, stockFromVin, type TradeInKey } from "@/lib/loc-rules";
 import type { BuyerChoice, SaleCustomer, VinDecode } from "@/lib/nusr";
 import {
   CATEGORIES,
@@ -429,9 +431,10 @@ function CustomerSearch({ onPick, inputRef }: { onPick: (choice: BuyerChoice) =>
 
 // --- The sale ----------------------------------------------------------------------------
 
-// What's wrong in each box, as the form reads it or as the server said:
-// shown under the box, and tied to it for screen readers.
-const ProblemsContext = createContext<Partial<Record<keyof SaleValues, string>>>({});
+// What's wrong in each box (the sale's, or its trade-in's), as the form
+// reads it or as the server said: shown under the box, and tied to it for
+// screen readers.
+const ProblemsContext = createContext<Partial<Record<keyof SaleValues | TradeInKey, string>>>({});
 
 // The days between two days ("2026-10-01"), whichever comes first; NaN for
 // a day that isn't one.
@@ -508,6 +511,199 @@ function MoneyField({ name, values, set }: { name: MoneyField; values: SaleValue
   );
 }
 
+// --- The trade-in ----------------------------------------------------------------------
+
+type TradeValues = Record<TradeInKey, string>;
+const blankTrade = () => Object.fromEntries(TRADE_IN_KEYS.map((key) => [key, ""])) as TradeValues;
+
+// A trade-in's box, as Field is for the sale's (an amount box says what a
+// sum comes to).
+function TradeField({
+  name,
+  values,
+  set,
+  hint,
+  wide = false,
+  money = false,
+  ...props
+}: {
+  name: TradeInKey;
+  values: TradeValues;
+  set: (name: TradeInKey, value: string) => void;
+  hint?: ReactNode;
+  wide?: boolean;
+  money?: boolean;
+} & Omit<InputHTMLAttributes<HTMLInputElement>, "name" | "value" | "onChange">) {
+  const id = `sale-${name}`;
+  const problem = useContext(ProblemsContext)[name];
+  const parsed = money ? parseMoney(values[name]) : null;
+  const sum = parsed && !("error" in parsed) && parsed.cents !== null && /\d\s*[+-]/.test(values[name]) ? `= ${formatMoney(parsed.cents)}` : null;
+  const shownHint = problem ? <span className="text-trail">{problem}</span> : (sum ?? hint);
+  return (
+    <div className={wide ? "sm:col-span-2" : undefined}>
+      <label htmlFor={id} className={labelClass}>
+        {TRADE_IN_LABELS[name]}
+      </label>
+      <input
+        id={id}
+        name={name}
+        value={values[name]}
+        onChange={(event) => set(name, event.target.value)}
+        autoComplete="off"
+        className={money ? `${inputClass} text-right tabular-nums` : inputClass}
+        aria-describedby={shownHint ? `${id}-hint` : undefined}
+        aria-invalid={problem ? true : undefined}
+        {...(money ? { inputMode: "decimal" as const, spellCheck: false, autoCapitalize: "off" } : {})}
+        {...props}
+      />
+      {shownHint && (
+        <p id={`${id}-hint`} className={hintClass}>
+          {shownHint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// What a trade-in's VIN says: on the LOC already, sold by the shop before,
+// on a customer's record, or in the model list.
+function tradeVinHint(decode: VinDecode): ReactNode {
+  return (
+    <>
+      {decode.onLoc ? (
+        <span className="text-trail" data-nusr-trade-on-loc>
+          On the LOC already{decode.onLoc.stockNumber ? ` as stock # ${decode.onLoc.stockNumber}` : ""} ({decode.onLoc.label}): check it isn&apos;t there twice.{" "}
+        </span>
+      ) : null}
+      {decode.sold ? `Sold ${decode.sold.condition === "new" ? "new" : "used"} ${formatDay(decode.sold.soldOn)} to ${decode.sold.customerName}. ` : ""}
+      {decode.onFile ? `On file: ${decode.onFile.label}, of ${decode.onFile.customerName}. ` : ""}
+      {!decode.sold && !decode.onFile && decode.model ? `Model list: ${[decode.year, decode.model].filter(Boolean).join(" ")}. ` : ""}
+      {!decode.checkDigitOk ? "Its check digit doesn't match: a character may be off." : ""}
+    </>
+  );
+}
+
+export type SaleTradeIn = { id: string; label: string; stockNumber: string | null; cost: number };
+
+// The unit a customer trades in on the deal. It goes on the LOC tab as a
+// unit we own, at its value, tied to the sale; it's kept apart from the
+// sale, so the sale's figures, profit and bonuses don't change for it. A
+// sale being corrected lists the trade-ins it brought in (each corrected on
+// the LOC) and can take another.
+function TradeInSection({
+  existing,
+  trading,
+  onStart,
+  onStop,
+  values,
+  set,
+  decode,
+  stockFromVin,
+  theirVehicles,
+  onPickVehicle,
+}: {
+  existing: SaleTradeIn[];
+  trading: boolean;
+  onStart: () => void;
+  onStop: () => void;
+  values: TradeValues;
+  set: (name: TradeInKey, value: string) => void;
+  decode: VinDecode | null;
+  // The stock # shown is the one its VIN gives.
+  stockFromVin: boolean;
+  theirVehicles: SaleCustomer["vehicles"];
+  onPickVehicle: (vehicle: SaleCustomer["vehicles"][number]) => void;
+}) {
+  const startClass =
+    "inline-flex min-h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
+  return (
+    <fieldset className={sectionClass} data-nusr-trade-in>
+      <legend className={legendClass}>Trade-in</legend>
+      <div className="clear-both space-y-4">
+        {existing.length > 0 && (
+          <ul className="space-y-1 text-sm" data-nusr-trade-ins>
+            {existing.map((unit) => (
+              <li key={unit.id} className="text-ink">
+                Traded in on this sale:{" "}
+                <Link href={`/loc/${unit.id}`} className="font-medium text-glow/90 hover:text-glow hover:underline">
+                  {unit.label}
+                </Link>
+                <span className="text-ink-muted">
+                  {unit.stockNumber ? ` · Stock # ${unit.stockNumber}` : ""} · {formatMoney(unit.cost)} on the LOC
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {trading ? (
+          <>
+            {theirVehicles.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="text-ink-muted">Theirs:</span>
+                {theirVehicles.map((vehicle) => (
+                  <button
+                    key={vehicle.id}
+                    type="button"
+                    onClick={() => onPickVehicle(vehicle)}
+                    className="min-h-11 rounded-lg border border-white/10 px-3 text-left text-ink transition hover:border-glow/40 hover:bg-glow/5 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+                  >
+                    Trade in the {vehicle.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <TradeField
+                name="tradeVin"
+                values={values}
+                set={set}
+                wide
+                maxLength={36}
+                spellCheck={false}
+                autoCapitalize="characters"
+                className={`${inputClass} font-mono tracking-wide uppercase`}
+                hint={decode ? tradeVinHint(decode) : "A whole VIN fills in the year, model and stock #."}
+              />
+              <TradeField name="tradeYear" values={values} set={set} inputMode="numeric" maxLength={4} />
+              <TradeField name="tradeModel" values={values} set={set} maxLength={120} wide />
+              <TradeField
+                name="tradeStockNumber"
+                values={values}
+                set={set}
+                maxLength={20}
+                spellCheck={false}
+                autoCapitalize="characters"
+                className={`${inputClass} font-mono`}
+                hint={stockFromVin ? "From the VIN's last digits." : "As you number trade-ins."}
+              />
+              <TradeField name="tradeValue" values={values} set={set} money hint="What it goes on the LOC at." />
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="max-w-xl text-xs leading-5 text-ink-muted">
+                It goes on the LOC as a unit we own, at this value. It&apos;s kept apart from the sale: the profit and bonuses don&apos;t change for it.
+              </p>
+              <button
+                type="button"
+                onClick={onStop}
+                className="min-h-11 rounded-lg px-3 text-sm font-medium text-ink-muted hover:text-ink hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+              >
+                No trade-in
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button type="button" onClick={onStart} className={startClass} data-nusr-add-trade-in>
+              {existing.length > 0 ? "Add another trade-in" : "The customer is trading in a unit"}
+            </button>
+            <p className="text-xs leading-5 text-ink-muted">It goes on the LOC; the sale&apos;s profit and bonuses don&apos;t change.</p>
+          </div>
+        )}
+      </div>
+    </fieldset>
+  );
+}
+
 function Section({ title, children, columns = "sm:grid-cols-2 xl:grid-cols-3" }: { title: string; children: ReactNode; columns?: string }) {
   return (
     <fieldset className={sectionClass}>
@@ -554,6 +750,7 @@ export function SaleForm({
   defaults,
   suggestions,
   back = "",
+  tradeIns = [],
 }: {
   sale: SaleFormSale | null;
   // The log as it was before the sale was opened ("?year=2025…").
@@ -562,6 +759,8 @@ export function SaleForm({
   initialCustomer?: { choice: CustomerChoice; details: SaleCustomer } | null;
   defaults: { soldOn: string; holdbackRateBp: number; bonusRateBp: number };
   suggestions: SaleSuggestionLists;
+  // The trade-ins the sale being corrected brought in, on the LOC.
+  tradeIns?: SaleTradeIn[];
 }) {
   const { state, pending, formProps } = useFormAction<SaleFormState>(saveSaleAction, {});
   const fresh = () => blankSaleValues(defaults);
@@ -602,6 +801,26 @@ export function SaleForm({
     setServerProblem((old) => (old?.field === name ? null : old));
   };
 
+  // A trade-in, typed in its own boxes: they're only on the form (and sent)
+  // while "The customer is trading in a unit" is open.
+  const [trading, setTrading] = useState(false);
+  const [trade, setTrade] = useState<TradeValues>(blankTrade);
+  const [tradeTouched, setTradeTouched] = useState<Set<TradeInKey>>(() => new Set());
+  const [tradeDecode, setTradeDecode] = useState<VinDecode | null>(null);
+  // The picked customer's vehicles: one of them is often the trade-in.
+  const [theirVehicles, setTheirVehicles] = useState<SaleCustomer["vehicles"]>(initialCustomer?.details.vehicles ?? []);
+  const setTradeBox = (name: TradeInKey, value: string) => {
+    setTrade((old) => ({ ...old, [name]: value }));
+    setTradeTouched((old) => (old.has(name) ? old : new Set(old).add(name)));
+    setServerProblem((old) => (old?.field === name ? null : old));
+  };
+  const clearTrade = () => {
+    setTrading(false);
+    setTrade(blankTrade());
+    setTradeTouched(new Set());
+    setTradeDecode(null);
+  };
+
   // What came back: after logging one with "Log and start another", say so
   // and clear the sale, keeping the day, salesman and rates.
   const [seen, setSeen] = useState(state);
@@ -616,6 +835,8 @@ export function SaleForm({
       setDecode(null);
       setAddCustomer(true);
       setAddVehicle(true);
+      clearTrade();
+      setTheirVehicles([]);
     }
   }
   useEffect(() => {
@@ -651,6 +872,36 @@ export function SaleForm({
     };
   }, [wholeVin, sale?.id]);
   const shownDecode = decode && decode.vin === wholeVin ? decode : null;
+
+  // The trade-in's VIN, once it's a whole one: what it says about the unit
+  // (the shop's earlier sale of it, a customer's record of it, the model
+  // list), filling in its year and model where nothing's typed.
+  const tradeVin = cleanVin(trade.tradeVin);
+  const tradeWholeVin = trading && "vin" in tradeVin && tradeVin.vin?.length === 17 ? tradeVin.vin : null;
+  useEffect(() => {
+    if (!tradeWholeVin) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const found = await decodeVinAction(tradeWholeVin, "").catch(() => null);
+      if (cancelled || !found) return;
+      setTradeDecode(found);
+      setTrade((old) => ({
+        ...old,
+        tradeYear: old.tradeYear || String(found.year ?? found.sold?.year ?? found.onFile?.year ?? ""),
+        tradeModel: old.tradeModel || found.sold?.model || found.onFile?.model || found.model || "",
+      }));
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [tradeWholeVin]);
+  const shownTradeDecode = tradeDecode && tradeDecode.vin === tradeWholeVin ? tradeDecode : null;
+  // Its stock # is the one its VIN gives until one's typed: worked out, not
+  // written in, so a VIN typed again takes it back.
+  const tradeStockFromVin = !tradeTouched.has("tradeStockNumber") && !trade.tradeStockNumber ? stockFromVin(tradeWholeVin) : null;
+  const tradeShown: TradeValues = { ...trade, tradeStockNumber: tradeStockFromVin ?? trade.tradeStockNumber };
+  const tradeCheck = trading ? checkTradeIn(tradeShown) : { tradeIn: null };
   const soldBefore = shownDecode?.sold ?? null;
   const earlier = earlierSale(soldBefore, values.soldOn);
   // The prices of the last of this model sold, to use with a click where
@@ -677,9 +928,13 @@ export function SaleForm({
   const shown: SaleValues = { ...values, category, unitType, holdbackRateBp: holdbackRate, condition };
 
   const { sale: amounts, problems } = readSaleValues(shown);
-  const boxProblems: Partial<Record<keyof SaleValues, string>> = {
+  // A trade-in's box that doesn't read shows as it's typed; one still to
+  // fill in (its model, its value) only when the sale's sent.
+  const tradeProblem = "error" in tradeCheck && !/^Enter /.test(tradeCheck.error) ? { [tradeCheck.field]: tradeCheck.error } : {};
+  const boxProblems: Partial<Record<keyof SaleValues | TradeInKey, string>> = {
     ...problems,
     ...("error" in vin ? { vin: vin.error } : {}),
+    ...tradeProblem,
     ...(serverProblem ? { [serverProblem.field]: serverProblem.error } : {}),
   };
   const figures = saleFigures(amounts);
@@ -691,6 +946,7 @@ export function SaleForm({
       // they're added to Customers unless that's unticked.
       picked.current = null;
       setCustomer(null);
+      setTheirVehicles([]);
       setValues((old) => ({ ...old, customerName: choice.name, customerPhone: choice.phone ?? "", customerAddress: choice.address ?? "" }));
       return;
     }
@@ -700,6 +956,7 @@ export function SaleForm({
     requestAnimationFrame(() => document.getElementById("sale-customerName")?.focus());
     const details: SaleCustomer | null = await customerForSaleAction(choice.id).catch(() => null);
     if (picked.current !== choice.id) return;
+    setTheirVehicles(details?.vehicles ?? []);
     // Their details as they're on file, blank where they have none; what
     // was typed stays only if they couldn't be loaded.
     setValues((old) => ({
@@ -719,10 +976,17 @@ export function SaleForm({
       onSubmit={(event) => {
         event.preventDefault();
         if (sending.current) return;
-        const first = (Object.keys(boxProblems) as (keyof SaleValues)[])[0];
+        const first = (Object.keys(boxProblems) as (keyof SaleValues | TradeInKey)[])[0];
         if (first && first !== serverProblem?.field) {
           setMessage({ error: boxProblems[first] });
           focusBox(first);
+          return;
+        }
+        // A trade-in still to fill in: its model, its value.
+        if ("error" in tradeCheck) {
+          setMessage({ error: tradeCheck.error });
+          setServerProblem({ field: tradeCheck.field, error: tradeCheck.error });
+          focusBox(tradeCheck.field);
           return;
         }
         sending.current = true;
@@ -831,6 +1095,7 @@ export function SaleForm({
                     // Their details go with them: the next customer is picked or typed afresh.
                     picked.current = null;
                     setCustomer(null);
+                    setTheirVehicles([]);
                     setValues((old) => ({ ...old, customerName: "", customerPhone: "", customerAddress: "" }));
                     requestAnimationFrame(() => customerInput.current?.focus());
                   }}
@@ -859,7 +1124,7 @@ export function SaleForm({
               Add them to Customers, so the next sale finds them
             </label>
           )}
-          {onFileOrNew && wholeVin && (
+          {onFileOrNew && (wholeVin || tradeWholeVin) && (
             <label className="flex min-h-11 items-center gap-3 text-sm text-ink sm:col-span-2">
               <input
                 type="checkbox"
@@ -869,7 +1134,11 @@ export function SaleForm({
                 onChange={(event) => setAddVehicle(event.target.checked)}
                 className="size-5 accent-glow"
               />
-              Add the unit to their vehicles as bought from us (unless it&apos;s there already)
+              {wholeVin && tradeWholeVin
+                ? "Add the unit to their vehicles as bought from us, and the trade-in as sold to us"
+                : tradeWholeVin
+                  ? "Add the trade-in to their vehicles as sold to us"
+                  : "Add the unit to their vehicles as bought from us (unless it's there already)"}
             </label>
           )}
         </Section>
@@ -907,6 +1176,12 @@ export function SaleForm({
                         ? `A ${shownDecode.year}; not in the model list.`
                         : ""}
                   {shownDecode.onFile ? ` On file: ${shownDecode.onFile.label}, ${shownDecode.onFile.relation === "sold" ? "sold to us by" : "of"} ${shownDecode.onFile.customerName}.` : ""}
+                  {shownDecode.onLoc ? (
+                    <span data-nusr-vin-on-loc>
+                      {` On the LOC${shownDecode.onLoc.stockNumber ? ` as stock # ${shownDecode.onLoc.stockNumber}` : ""}: `}
+                      {shownDecode.onLoc.onLoc ? `${formatMoney(shownDecode.onLoc.cost)} owed on the line, to pay off once it's sold.` : "a unit we own."}
+                    </span>
+                  ) : null}
                   {!shownDecode.checkDigitOk ? " Its check digit doesn't match: a character may be off." : ""}
                 </>
               ) : (
@@ -940,6 +1215,26 @@ export function SaleForm({
             <MoneyField key={name} name={name} values={values} set={set} />
           ))}
         </Section>
+
+        <TradeInSection
+          existing={tradeIns}
+          trading={trading}
+          onStart={() => {
+            setTrading(true);
+            requestAnimationFrame(() => document.getElementById("sale-tradeVin")?.focus());
+          }}
+          onStop={clearTrade}
+          values={tradeShown}
+          set={setTradeBox}
+          decode={shownTradeDecode}
+          stockFromVin={tradeStockFromVin !== null}
+          theirVehicles={theirVehicles.filter((vehicle) => vehicle.relation !== "sold")}
+          onPickVehicle={(vehicle) => {
+            setTrade((old) => ({ ...old, tradeVin: vehicle.vin ?? "", tradeYear: vehicle.year === null ? "" : String(vehicle.year), tradeModel: vehicle.model ?? "" }));
+            setTradeTouched((old) => new Set([...old, "tradeVin", "tradeYear", "tradeModel"]));
+            requestAnimationFrame(() => document.getElementById(vehicle.vin ? "sale-tradeValue" : "sale-tradeVin")?.focus());
+          }}
+        />
 
         <Section title="Accessories">
           {(["accPrice", "accCost", "accLabor"] as const).map((name) => (

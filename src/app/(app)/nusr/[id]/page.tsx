@@ -5,6 +5,8 @@ import { Suspense } from "react";
 
 import { Card, LoadingLine, PageHeading } from "@/components/app/ui";
 import { LocalTime } from "@/components/app/local-time";
+import { tradeInsForSale } from "@/lib/loc";
+import { locUnitLabel } from "@/lib/loc-rules";
 import { getSale, saleSuggestions } from "@/lib/nusr";
 import { DEFAULT_BONUS_RATE_BP, DEFAULT_HOLDBACK_RATE_BP, formatDay, logSearch, saleValues, shopToday, shopYear, unitLabel } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
@@ -30,9 +32,10 @@ async function SaleScreen({ params, searchParams }: { params: PageProps<"/nusr/[
   const back = logSearch(query.back, shopYear());
   const sale = await getSale(user.shop.id, id);
   if (!sale) notFound();
-  const [suggestions, customer] = await Promise.all([
+  const [suggestions, customer, tradeIns] = await Promise.all([
     saleSuggestions(user.shop.id),
     sale.customerId ? getCustomerChoice(user.shop.id, sale.customerId) : Promise.resolve(null),
+    tradeInsForSale(user.shop.id, sale.id),
   ]);
   const label = `${unitLabel(sale)} to ${sale.customerName}`;
   return (
@@ -67,6 +70,7 @@ async function SaleScreen({ params, searchParams }: { params: PageProps<"/nusr/[
         key={sale.updatedAt.toISOString()}
         sale={{ id: sale.id, values: saleValues(sale), customer }}
         back={back}
+        tradeIns={tradeIns.map((unit) => ({ id: unit.id, label: locUnitLabel(unit), stockNumber: unit.stockNumber, cost: unit.cost }))}
         defaults={{ soldOn: shopToday(), holdbackRateBp: DEFAULT_HOLDBACK_RATE_BP, bonusRateBp: DEFAULT_BONUS_RATE_BP }}
         suggestions={{
           salespeople: suggestions.salespeople,

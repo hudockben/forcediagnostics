@@ -41,6 +41,10 @@ export default function NusrPage(props: PageProps<"/nusr">) {
 
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
 
+// The trade-ins a removed sale left on the LOC (?kept=, one each), as
+// removeSaleAction named them.
+const keptTradeIns = (value: string | string[] | undefined) => (Array.isArray(value) ? value : value ? [value] : []).slice(0, 5).map((label) => label.slice(0, 200));
+
 const linkButton =
   "inline-flex min-h-11 items-center rounded-lg border border-glow/30 px-4 text-sm font-medium text-glow transition hover:border-glow/50 hover:bg-glow/10 focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none";
 
@@ -88,7 +92,20 @@ async function Nusr({ searchParams }: { searchParams: PageProps<"/nusr">["search
           </Link>
         </Notice>
       )}
-      {typeof params.removed === "string" && <Notice>Removed the sale of {params.removed} from the NUSR.</Notice>}
+      {typeof params.removed === "string" && (
+        <Notice>
+          Removed the sale of {params.removed} from the NUSR.
+          {keptTradeIns(params.kept).map((label) => (
+            <span key={label} className="block">
+              Its trade-in, {label}, stays on the{" "}
+              <Link href="/loc" className="font-medium underline">
+                LOC
+              </Link>
+              : remove it there if it came in by mistake too.
+            </span>
+          ))}
+        </Notice>
+      )}
       {typeof params.paid === "string" && /^\d+$/.test(params.paid) && (
         <Notice>
           Marked {plural(Number(params.paid), "unit", "units")} paid off.
