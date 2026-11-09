@@ -731,14 +731,14 @@ describe("the workbook", () => {
       ["Not in the NUSR", 1, 0, 0, 100],
       ["UTV", 1, 979.96, 0, 796.22],
     ]);
-    // One invoice: its salesmen are the Salesman table's, not again.
+    // One invoice: its salesmen and categories are those tables', not again.
     assert.equal(
-      rows.some((row) => row[0] === "Invoice 314886"),
+      rows.some((row) => typeof row[0] === "string" && row[0].startsWith("Invoice 314886")),
       false,
     );
   });
 
-  test("with several invoices, each one's rebates by salesman, with what it comes to", () => {
+  test("with several invoices, each one's rebates by salesman and by category, with what it comes to", () => {
     const rewards: RebateInvoice = {
       fileName: "rewards.pdf",
       number: "314990",
@@ -763,20 +763,33 @@ describe("the workbook", () => {
       ["Sam Ortiz", 2, 279.96, 500, 227.47],
       ["Not in the NUSR", 1, 0, 0, 100],
     ]);
-    // Then each invoice's own, under the Category table, with its total.
-    assert.deepEqual(block("Invoice 314886"), [
-      ["Invoice 314886", "Units", "Holdback", "Retail Rwds", "Add'l Hlbk"],
+    // Then each invoice's own under its name, date and column, under the
+    // Category table: by salesman and by category, each with its total.
+    const heading = ["Units", "Holdback", "Retail Rwds", "Add'l Hlbk"];
+    assert.deepEqual(block("Invoice 314886 · 10/29/2026 · Add'l Hlbk (AQ)"), [
+      ["Invoice 314886 · 10/29/2026 · Add'l Hlbk (AQ)"],
+      ["Salesman", ...heading],
       ["Lee Brandvold", 1, 979.96, 0, 796.22],
       ["Not in the NUSR", 1, 0, 0, 100],
       ["Sam Ortiz", 1, 279.96, 0, 227.47],
       ["Total", 3, 1259.92, 0, 1123.69],
+      ["Category", ...heading],
+      ["ATV", 1, 279.96, 0, 227.47],
+      ["Not in the NUSR", 1, 0, 0, 100],
+      ["UTV", 1, 979.96, 0, 796.22],
+      ["Total", 3, 1259.92, 0, 1123.69],
     ]);
-    assert.deepEqual(block("Invoice 314990").slice(1), [
+    assert.deepEqual(block("Invoice 314990 · 10/30/2026 · Retail Rwds (AP)").slice(1), [
+      ["Salesman", ...heading],
       ["Lee Brandvold", 1, 0, 250, 0],
       ["Sam Ortiz", 1, 0, 500, 0],
       ["Total", 2, 0, 750, 0],
+      ["Category", ...heading],
+      ["ATV", 1, 0, 500, 0],
+      ["UTV", 1, 0, 250, 0],
+      ["Total", 2, 0, 750, 0],
     ]);
-    assert.ok(rows.findIndex((row) => row[0] === "Category") < rows.findIndex((row) => row[0] === "Invoice 314886"));
+    assert.ok(rows.findIndex((row) => row[0] === "Category") < rows.findIndex((row) => row[0] === "Invoice 314886 · 10/29/2026 · Add'l Hlbk (AQ)"));
   });
 
   test("with nothing found in the NUSR, only the Rebates sheet", () => {
@@ -1078,9 +1091,19 @@ describe("on the server: looking units up, the download, and Saved rebates", () 
         ],
         [saved.scan]: [{ label: "Not found", lines: 1, amount: 1500 }],
       },
+      byCategoryOf: {
+        [saved.a]: [
+          { label: "UTV", lines: 1, amount: 79622 },
+          { label: "ATV", lines: 1, amount: 22747 },
+          { label: "Not found", lines: 1, amount: 10000 },
+        ],
+        [saved.scan]: [{ label: "Not found", lines: 1, amount: 1500 }],
+      },
     });
     // Narrowed to a salesman, each invoice's are the lines found.
-    assert.deepEqual((await lines({ salesperson: "lee brandvold" })).totals.bySalesmanOf, { [saved.a]: [{ label: "Lee Brandvold", lines: 1, amount: 79622 }] });
+    const leeOnly = (await lines({ salesperson: "lee brandvold" })).totals;
+    assert.deepEqual(leeOnly.bySalesmanOf, { [saved.a]: [{ label: "Lee Brandvold", lines: 1, amount: 79622 }] });
+    assert.deepEqual(leeOnly.byCategoryOf, { [saved.a]: [{ label: "UTV", lines: 1, amount: 79622 }] });
     const dana = thisYear.items[0];
     assert.deepEqual(
       [dana.invoiceDate, dana.column, dana.vinRead, dana.amount, dana.sale?.customerName, dana.sale?.salesperson],

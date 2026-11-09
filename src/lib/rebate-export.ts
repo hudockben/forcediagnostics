@@ -5,7 +5,7 @@
 // sheet: each invoice and whether its lines add up to its total, every
 // line as read (its Description, Unit Price and Amount) beside the sale it
 // was found as, and the rebates by salesman and by category, then (with
-// several invoices) each invoice's own by salesman. Pure:
+// several invoices) each invoice's own by salesman and by category. Pure:
 // src/lib/rebates.ts gathers the sales, and src/lib/xlsx-write.ts writes
 // the sheets out.
 
@@ -163,8 +163,10 @@ function rebatesSheet(
   type Groups = Map<string, { label: string; group: Group }>;
   const bySalesman: Groups = new Map();
   const byCategory: Groups = new Map();
-  // Each invoice's own by salesman, so one invoice's can be checked alone.
+  // Each invoice's own by salesman and by category, so one invoice's can be
+  // checked alone.
   const bySalesmanOf = invoices.map((): Groups => new Map());
+  const byCategoryOf = invoices.map((): Groups => new Map());
   const add = (groups: Groups, label: string, shares: Shares) => {
     const key = label.trim().replace(/\s+/g, " ").toLowerCase();
     const entry = groups.get(key) ?? { label, group: { units: 0, shares: { holdback: 0, retailRewards: 0, addlHoldback: 0 } } };
@@ -212,7 +214,9 @@ function rebatesSheet(
       const salesman = sale ? sale.salesperson?.trim() || "No salesman" : "Not in the NUSR";
       add(bySalesman, salesman, shares);
       add(bySalesmanOf[index], salesman, shares);
-      add(byCategory, sale ? sale.category?.trim() || "No category" : "Not in the NUSR", shares);
+      const category = sale ? sale.category?.trim() || "No category" : "Not in the NUSR";
+      add(byCategory, category, shares);
+      add(byCategoryOf[index], category, shares);
     }
   }
   const last = rows.length;
@@ -227,9 +231,10 @@ function rebatesSheet(
 
   // The rebates by salesman and by category, the most units first, as the
   // shop added them up by hand under its sheet; then, with several
-  // invoices, each one's by salesman, with what it comes to.
+  // invoices, each one's under its name, date and column: by salesman and
+  // by category, each with what the invoice comes to.
   const sorted = (groups: Groups) => [...groups.values()].sort((a, b) => b.group.units - a.group.units || a.label.localeCompare(b.label));
-  const table = (heading: string, groups: Groups, total?: string) => {
+  const table = (heading: string, groups: Groups, { total, end = true }: { total?: string; end?: boolean } = {}) => {
     rows.push([heading, "Units", ...REBATE_COLUMNS.map((column) => REBATE_COLUMN_HEADINGS[column])].map((value): Cell => ({ value, style: "header" })));
     for (const { label, group } of sorted(groups)) {
       rows.push([label, { value: group.units, style: "integer" }, ...REBATE_COLUMNS.map((column): Cell => ({ value: group.shares[column] / 100, style: "money" }))]);
@@ -242,13 +247,21 @@ function rebatesSheet(
         ...REBATE_COLUMNS.map((column): Cell => ({ value: all.reduce((sum, { group }) => sum + group.shares[column], 0) / 100, style: "totalMoney" })),
       ]);
     }
-    rows.push([]);
+    if (end) rows.push([]);
   };
   table("Salesman", bySalesman);
   table("Category", byCategory);
   if (invoices.length > 1) {
     for (const [index, invoice] of invoices.entries()) {
-      table(invoice.number ? `Invoice ${invoice.number}` : invoice.fileName, bySalesmanOf[index], "Total");
+      const [year, month, date] = invoice.date?.split("-").map(Number) ?? [];
+      const name = [
+        invoice.number ? `Invoice ${invoice.number}` : invoice.fileName,
+        invoice.date ? `${month}/${date}/${year}` : null,
+        `${REBATE_COLUMN_HEADINGS[invoice.column]} (${REBATE_COLUMN_LETTERS[invoice.column]})`,
+      ];
+      rows.push([{ value: name.filter(Boolean).join(" · "), style: "bold" }]);
+      table("Salesman", bySalesmanOf[index], { total: "Total", end: false });
+      table("Category", byCategoryOf[index], { total: "Total" });
     }
   }
 
