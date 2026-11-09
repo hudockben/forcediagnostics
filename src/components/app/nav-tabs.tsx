@@ -10,8 +10,11 @@ export type NavItem = { href: string; label: string; section: string; exact?: bo
 
 const styles = {
   tabs: {
-    list: "-mb-px flex gap-1 overflow-x-auto",
-    link: "flex h-12 items-center border-b-2 px-4 text-sm font-medium whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none",
+    // Every tab fits across a computer's screen, an admin's eleven too (13px
+    // type, 10px either side). On a narrower one (a phone) they're swiped
+    // sideways, with no scroll bar showing; the current one is kept in view.
+    list: "-mb-px flex gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+    link: "flex h-12 items-center border-b-2 px-2.5 text-[13px] font-medium whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none",
     active: "border-glow text-ink",
     idle: "border-transparent text-ink-muted hover:text-ink",
   },
