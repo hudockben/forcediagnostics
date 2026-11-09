@@ -39,6 +39,7 @@ import {
   type TurnRequest,
 } from "../src/lib/diagnose";
 import { clockAction } from "../src/lib/diagnose-clock";
+import type { ClockStop } from "../src/lib/diagnose-clock-rules";
 import { estimateForStart } from "../src/lib/diagnosis-times";
 import {
   FAILURE_MESSAGES,
@@ -2920,6 +2921,37 @@ describe("the clock on a diagnosis", () => {
     assert.ok(estimate.count >= 2);
     // One the list doesn't have is taken as typed, and nothing goes by it.
     assert.equal(await estimateForStart(cal.shop.id, { unit: "Z19VDE99XX", codes: "" }), null);
+  });
+
+  test("the diagnosis list shows the time on each clock, counting on while it runs", async () => {
+    const tag = randomUUID().slice(0, 8);
+    const add = async (what: string, spans: { minutesAgo: number; minutes: number; stop: ClockStop | null }[]) => {
+      const [row] = await systemDb
+        .insert(diagnosisConversations)
+        .values({ shopId: cal.shop.id, userId: cal.id, title: `Clocklist ${tag} ${what}`, webSearch: true })
+        .returning({ id: diagnosisConversations.id });
+      if (spans.length === 0) return;
+      await systemDb.insert(diagnosisTimeSpans).values(
+        spans.map((span, index) => {
+          const startedAt = new Date(Date.now() - span.minutesAgo * 60_000);
+          return { shopId: cal.shop.id, conversationId: row.id, seq: index + 1, userId: cal.id, startedAt, endedAt: new Date(startedAt.getTime() + span.minutes * 60_000), stop: span.stop };
+        }),
+      );
+    };
+    await add("ended", [
+      { minutesAgo: 120, minutes: 30, stop: "idle" },
+      { minutesAgo: 60, minutes: 12, stop: "end" },
+    ]);
+    // 20 minutes to its last use 5 minutes ago, and the 5 since.
+    await add("running", [{ minutesAgo: 25, minutes: 20, stop: null }]);
+    // Last used 40 minutes ago: stopped by itself there.
+    await add("idle", [{ minutesAgo: 60, minutes: 20, stop: null }]);
+    await add("before", []);
+    const list = await listConversations(cal.shop.id, { query: `clocklist ${tag}` });
+    const minutesOf = Object.fromEntries(
+      list.items.map((item) => [item.title.split(" ").at(-1), item.clockSeconds === null ? null : Math.round(item.clockSeconds / 60)]),
+    );
+    assert.deepEqual(minutesOf, { ended: 42, running: 25, idle: 20, before: null });
   });
 
   test("a diagnosis started before the clock has none, and gets none", async () => {
