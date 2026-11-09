@@ -8,6 +8,8 @@ import { auditLog, customerVehicles, customers, rebateInvoices, rebateLines, uni
 import { checkCustomer, vehicleLabel } from "@/lib/customer-rules";
 import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib/diagnose-list-rules";
 import { isUuid } from "@/lib/diagnose-rules";
+import { addTradeIn, locUnitForVin, tradeInProblem, untieTradeIns } from "@/lib/loc";
+import { checkTradeIn, type TradeIn, type TradeInKey } from "@/lib/loc-rules";
 import { brandInfo } from "@/lib/manual-catalog-rules";
 import {
   DEFAULT_HOLDBACK_RATE_BP,
@@ -146,6 +148,10 @@ async function audit(tx: ShopTransaction, actor: CurrentUser, action: string, ta
 
 const isUniqueViolation = (error: unknown) =>
   ((error instanceof DrizzleQueryError ? error.cause : error) as { code?: string } | undefined)?.code === "23505";
+
+// The unique key a unique violation broke, if one did.
+const violatedKey = (error: unknown) =>
+  isUniqueViolation(error) ? (((error instanceof DrizzleQueryError ? error.cause : error) as { constraint?: string }).constraint ?? null) : null;
 
 const alreadyLogged = (sale: SaleFields): SaleProblem => ({
   field: "vin",
@@ -423,7 +429,13 @@ export type SaleInput = Record<keyof SaleFields, unknown> & {
   customerId?: unknown;
   addCustomer?: unknown;
   addVehicle?: unknown;
+  // A unit the customer trades in: its boxes (see checkTradeIn), all blank
+  // for none. It goes on the LOC tab, never into the sale's figures.
+  tradeIn?: unknown;
 };
+
+// What's wrong with a sale or its trade-in, and the box it's about.
+export type SaleInputProblem = SaleProblem | { error: string; field: TradeInKey };
 
 // "77 Foxglove Rd, Elmwood, PA 15999" -> its parts, as far as commas
 // tell them apart; all of it on the first line when they don't.
@@ -488,7 +500,60 @@ async function addBoughtVehicle(tx: ShopTransaction, actor: CurrentUser, custome
   });
 }
 
+// The trade-in on the customer's record as sold to the shop, on the day of
+// the sale: the vehicle they have on file with its VIN is changed to that
+// (they bought it from us, say, and now trade it back), or it's added. Only
+// a whole VIN finds it again, as for the unit they buy.
+async function addTradedVehicle(tx: ShopTransaction, actor: CurrentUser, customerId: string, soldOn: string, tradeIn: TradeIn) {
+  if (!tradeIn.vin || tradeIn.vin.length !== 17) return;
+  const [known] = await tx
+    .select({ id: customerVehicles.id, relation: customerVehicles.relation, relationDate: customerVehicles.relationDate, year: customerVehicles.year, make: customerVehicles.make, model: customerVehicles.model, modelNumber: customerVehicles.modelNumber, vin: customerVehicles.vin })
+    .from(customerVehicles)
+    .where(and(eq(customerVehicles.customerId, customerId), eq(customerVehicles.vin, tradeIn.vin)))
+    .orderBy(desc(customerVehicles.createdAt))
+    .limit(1);
+  if (known) {
+    if (known.relation === "sold") return;
+    await tx.update(customerVehicles).set({ relation: "sold", relationDate: soldOn }).where(eq(customerVehicles.id, known.id));
+    await tx.insert(auditLog).values({
+      shopId: actor.shop.id,
+      actorUserId: actor.id,
+      action: "vehicle.updated",
+      targetType: "customer_vehicle",
+      targetId: known.id,
+      details: { customerId, vehicle: vehicleLabel(known), fields: ["relation", "relationDate"], from: "NUSR" },
+    });
+    return;
+  }
+  const vehicle = { relation: "sold" as const, relationDate: soldOn, year: tradeIn.unitYear, make: null, model: tradeIn.model, modelNumber: null, vin: tradeIn.vin, color: null, notes: null };
+  const [row] = await tx.insert(customerVehicles).values({ ...vehicle, customerId, shopId: actor.shop.id }).returning({ id: customerVehicles.id });
+  await tx.insert(auditLog).values({
+    shopId: actor.shop.id,
+    actorUserId: actor.id,
+    action: "vehicle.added",
+    targetType: "customer_vehicle",
+    targetId: row.id,
+    details: { customerId, vehicle: vehicleLabel(vehicle), relation: "sold", from: "NUSR" },
+  });
+}
+
 const wanted = (value: unknown) => value === true || value === "on" || value === "true";
+
+// A trade-in's stock # taken by a unit on the LOC as the sale was saved
+// (another save got there first).
+const tradeStockTaken = (tradeIn: TradeIn): SaleInputProblem => ({
+  field: "tradeStockNumber",
+  error: `The trade-in's stock # ${tradeIn.stockNumber ?? ""} is already on the LOC. Give it a stock # of its own.`,
+});
+
+// The trade-in typed with a sale, checked, and checked against the LOC
+// before anything's saved; it goes on the LOC with the sale, in the same
+// transaction (logSale, updateSale).
+async function tradeInFor(tx: ShopTransaction, tradeIn: TradeIn | null): Promise<SaleInputProblem | null> {
+  if (!tradeIn) return null;
+  const problem = await tradeInProblem(tx, tradeIn);
+  return problem ? { error: problem, field: "tradeStockNumber" } : null;
+}
 
 // What the log says about a sale: enough to know it again, not every
 // amount (an edit says which changed, and how).
@@ -500,23 +565,42 @@ const saleSummary = (sale: SaleFields) => ({
   salesperson: sale.salesperson,
 });
 
-export async function logSale(actor: CurrentUser, input: SaleInput): Promise<{ id: string } | SaleProblem> {
+// Logs a sale, and with it any trade-in: onto the LOC as a unit we own, at
+// its value. The trade-in is kept apart from the sale (its own row on the
+// LOC, tied to the sale): nothing of it is in the sale's amounts, so the
+// sale's figures, profit and bonuses are what they'd be without it.
+export async function logSale(actor: CurrentUser, input: SaleInput): Promise<{ id: string } | SaleInputProblem> {
   const checked = checkSale(input);
   if ("error" in checked) return checked;
   const sale = checked.sale;
+  const trade = checkTradeIn(input.tradeIn as Record<TradeInKey, unknown> | undefined);
+  if ("error" in trade) return trade;
   try {
     return await withShop(actor.shop.id, async (tx) => {
+      // Before anything's saved, so a refusal leaves nothing half done.
+      const tradeProblem = await tradeInFor(tx, trade.tradeIn);
+      if (tradeProblem) return tradeProblem;
       const customer = await customerFor(tx, actor, sale, input);
       if ("error" in customer) return customer;
       const [row] = await tx
         .insert(unitSales)
         .values({ ...toColumns(sale), customerId: customer.id, shopId: actor.shop.id, createdByUserId: actor.id })
         .returning({ id: unitSales.id });
-      if (customer.id && wanted(input.addVehicle)) await addBoughtVehicle(tx, actor, customer.id, sale);
-      await audit(tx, actor, "unit_sale.logged", row.id, { ...saleSummary(sale), salesPrice: sale.salesPrice, customerId: customer.id });
+      const tradedIn = trade.tradeIn ? await addTradeIn(tx, actor, { id: row.id, soldOn: sale.soldOn, label: `${unitLabel(sale)} to ${sale.customerName}` }, trade.tradeIn) : null;
+      if (customer.id && wanted(input.addVehicle)) {
+        await addBoughtVehicle(tx, actor, customer.id, sale);
+        if (trade.tradeIn) await addTradedVehicle(tx, actor, customer.id, sale.soldOn, trade.tradeIn);
+      }
+      await audit(tx, actor, "unit_sale.logged", row.id, {
+        ...saleSummary(sale),
+        salesPrice: sale.salesPrice,
+        customerId: customer.id,
+        ...(tradedIn && trade.tradeIn ? { tradeIn: tradedIn.label, tradeInStockNumber: trade.tradeIn.stockNumber } : {}),
+      });
       return { id: row.id };
     });
   } catch (error) {
+    if (trade.tradeIn && violatedKey(error) === "loc_units_shop_stock") return tradeStockTaken(trade.tradeIn);
     if (isUniqueViolation(error)) return alreadyLogged(sale);
     throw error;
   }
@@ -545,31 +629,45 @@ function changesOf(before: SaleFields, after: SaleFields) {
   return { fields, changes };
 }
 
-export async function updateSale(actor: CurrentUser, id: string, input: SaleInput): Promise<{ ok: true } | SaleProblem> {
+// Saves a correction; a trade-in typed with it (one the sale didn't have
+// yet) goes on the LOC as logSale puts one there, the sale's figures
+// untouched by it.
+export async function updateSale(actor: CurrentUser, id: string, input: SaleInput): Promise<{ ok: true } | SaleInputProblem> {
   if (!isUuid(id)) return NOT_HERE;
   const checked = checkSale(input);
   if ("error" in checked) return checked;
   const sale = checked.sale;
+  const trade = checkTradeIn(input.tradeIn as Record<TradeInKey, unknown> | undefined);
+  if ("error" in trade) return trade;
   try {
     return await withShop(actor.shop.id, async (tx) => {
       const [before] = await tx.select(saleColumns).from(unitSales).leftJoin(users, eq(users.id, unitSales.createdByUserId)).where(eq(unitSales.id, id)).for("update", { of: unitSales });
       if (!before) return NOT_HERE;
+      const tradeProblem = await tradeInFor(tx, trade.tradeIn);
+      if (tradeProblem) return tradeProblem;
       const customer = await customerFor(tx, actor, sale, input);
       if ("error" in customer) return customer;
       const { fields, changes } = changesOf(before as SaleFields, sale);
       const relinked = before.customerId !== customer.id;
-      if (fields.length === 0 && !relinked) return { ok: true as const };
-      await tx.update(unitSales).set({ ...toColumns(sale), customerId: customer.id }).where(eq(unitSales.id, id));
-      if (customer.id && wanted(input.addVehicle)) await addBoughtVehicle(tx, actor, customer.id, sale);
-      await audit(tx, actor, "unit_sale.updated", id, {
-        ...saleSummary(sale),
-        fields: relinked ? [...fields, "customerId"] : fields,
-        changes,
-        ...(relinked ? { customerId: { from: before.customerId, to: customer.id } } : {}),
-      });
+      if (fields.length === 0 && !relinked && !trade.tradeIn) return { ok: true as const };
+      if (fields.length > 0 || relinked) await tx.update(unitSales).set({ ...toColumns(sale), customerId: customer.id }).where(eq(unitSales.id, id));
+      if (trade.tradeIn) await addTradeIn(tx, actor, { id, soldOn: sale.soldOn, label: `${unitLabel(sale)} to ${sale.customerName}` }, trade.tradeIn);
+      if (customer.id && wanted(input.addVehicle)) {
+        await addBoughtVehicle(tx, actor, customer.id, sale);
+        if (trade.tradeIn) await addTradedVehicle(tx, actor, customer.id, sale.soldOn, trade.tradeIn);
+      }
+      if (fields.length > 0 || relinked) {
+        await audit(tx, actor, "unit_sale.updated", id, {
+          ...saleSummary(sale),
+          fields: relinked ? [...fields, "customerId"] : fields,
+          changes,
+          ...(relinked ? { customerId: { from: before.customerId, to: customer.id } } : {}),
+        });
+      }
       return { ok: true as const };
     });
   } catch (error) {
+    if (trade.tradeIn && violatedKey(error) === "loc_units_shop_stock") return tradeStockTaken(trade.tradeIn);
     if (isUniqueViolation(error)) return alreadyLogged(sale);
     throw error;
   }
@@ -616,7 +714,9 @@ export async function markPaid(
 // Removes a sale logged by mistake; the Activity log keeps what it was,
 // and the sheet and row an import brought it in from, so importing the
 // workbook again doesn't bring it back (importSales in nusr-import.ts).
-export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: true; label: string } | { error: string }> {
+// A trade-in the sale brought in stays on the LOC (the unit came in all the
+// same): it's untied from the sale, and the answer says what stayed.
+export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: true; label: string; tradeIns: string[] } | { error: string }> {
   if (!isUuid(id)) return NOT_HERE;
   return withShop(actor.shop.id, async (tx) => {
     const [found] = await tx
@@ -644,6 +744,7 @@ export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: 
     // Where an import found it, even when that row was another sale's.
     const from = importRow ?? importRef;
     const sale = toSale(row);
+    const kept = (await untieTradeIns(tx, id)).map((unit) => [unit.label, unit.stockNumber && `stock # ${unit.stockNumber}`].filter(Boolean).join(", "));
     await tx.delete(unitSales).where(eq(unitSales.id, id));
     await audit(tx, actor, "unit_sale.removed", id, {
       ...saleSummary(sale),
@@ -651,8 +752,9 @@ export async function removeSale(actor: CurrentUser, id: string): Promise<{ ok: 
       totalProfit: sale.figures.totalProfit,
       customerId: sale.customerId,
       ...(from ? { importRef: from } : {}),
+      ...(kept.length > 0 ? { tradeInsKept: kept } : {}),
     });
-    return { ok: true as const, label: `${unitLabel(sale)} to ${sale.customerName}` };
+    return { ok: true as const, label: `${unitLabel(sale)} to ${sale.customerName}`, tradeIns: kept };
   });
 }
 
@@ -750,6 +852,9 @@ export type VinDecode = {
     dealerCost: number | null;
     rebate: number | null;
   } | null;
+  // The unit on the LOC tab, by its VIN (or the stock # its VIN gives): the
+  // one being sold, or a trade-in that's on the LOC already.
+  onLoc: { id: string; label: string; stockNumber: string | null; onLoc: boolean; cost: number } | null;
 };
 
 // What a VIN says about the unit: its model year (character 10); from the
@@ -774,6 +879,7 @@ export async function decodeSaleVin(shopId: string, text: string, exceptId: stri
     onFile: null,
     sold: null,
     sameModel: null,
+    onLoc: await locUnitForVin(shopId, check.vin),
   };
   const [sold, sameModel] = await withShop(shopId, async (tx) => {
     const [unit] = await tx

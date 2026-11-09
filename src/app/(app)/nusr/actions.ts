@@ -17,6 +17,7 @@ import {
   type SaleInput,
   type VinDecode,
 } from "@/lib/nusr";
+import { TRADE_IN_KEYS } from "@/lib/loc-rules";
 import { SALE_LABELS, logSearch, shopYear, type SaleFields } from "@/lib/nusr-rules";
 import { requireCapability } from "@/lib/session";
 
@@ -51,6 +52,8 @@ function saleInput(form: FormData): SaleInput {
     customerId: field(form, "customerId"),
     addCustomer: field(form, "addCustomer"),
     addVehicle: field(form, "addVehicle"),
+    // The trade-in's boxes, apart from the sale's: it goes on the LOC.
+    tradeIn: Object.fromEntries(TRADE_IN_KEYS.map((key) => [key, field(form, key)])),
   };
 }
 
@@ -88,9 +91,11 @@ export async function removeSaleAction(_previous: SaleFormState, form: FormData)
       const user = await requireCapability("sales.log");
       const result = await removeSale(user, field(form, "id"));
       if ("error" in result) return { error: result.error };
-      // Back to the log it was opened from, saying what went.
+      // Back to the log it was opened from, saying what went (and any
+      // trade-in that stays on the LOC).
       const back = logSearch(field(form, "back"), shopYear());
-      redirect(`/nusr${back}${back ? "&" : "?"}removed=${encodeURIComponent(result.label)}`, RedirectType.replace);
+      const kept = result.tradeIns.map((label) => `&kept=${encodeURIComponent(label)}`).join("");
+      redirect(`/nusr${back}${back ? "&" : "?"}removed=${encodeURIComponent(result.label)}${kept}`, RedirectType.replace);
     },
     { error: "Couldn't remove that. Check the connection and try again." },
   );
