@@ -208,6 +208,24 @@ function checkOf(loaded: Loaded, sales: Record<string, RebateSaleSummary>): Chec
   };
 }
 
+// An invoice's lines grouped by something about the sale each was found as
+// (its salesman, its category), however it's capitalised or spaced: each
+// group's units and what their amounts come to, the most first. A line not
+// found is "Not found".
+function linesBy(lines: readonly Line[], sales: Record<string, RebateSaleSummary>, of: (sale: RebateSaleSummary) => string | null, none: string) {
+  const groups = new Map<string, { label: string; units: number; amount: Cents }>();
+  for (const line of lines) {
+    const sale = line.saleId ? sales[line.saleId] : undefined;
+    const label = line.saleId ? (sale ? of(sale) : null)?.trim().replace(/\s+/g, " ") || none : "Not found";
+    const key = label.toLowerCase();
+    const group = groups.get(key) ?? { label, units: 0, amount: 0 };
+    group.units += 1;
+    group.amount += lineCents(line) ?? 0;
+    groups.set(key, group);
+  }
+  return [...groups.values()].sort((a, b) => b.amount - a.amount || a.label.localeCompare(b.label));
+}
+
 // Where an invoice on the page stands, in a word or two.
 function standing(loaded: Loaded, check: Check): { text: string; tone: "neutral" | "glow" | "trail" } {
   const { lookup, save } = loaded;
@@ -731,13 +749,11 @@ function InvoiceCard({
   const saveable = lookup.state === "done" && loaded.column !== null && badAmounts === 0;
   const name = invoice.number ? `Invoice ${invoice.number}` : "This invoice";
 
-  // What the lines found come to by category, as the shop notes on the
-  // invoice (ATV, RZR, UTV).
-  const byCategory = new Map<string, Cents>();
-  for (const line of lines) {
-    const category = line.saleId ? (sales[line.saleId]?.category ?? "No category") : "Not found";
-    byCategory.set(category, (byCategory.get(category) ?? 0) + (lineCents(line) ?? 0));
-  }
+  // What this invoice's lines come to by the salesman of the sale each was
+  // found as, and by category, as the shop notes on the invoice (ATV, RZR,
+  // UTV): as Saved rebates adds them up.
+  const bySalesman = linesBy(lines, sales, (sale) => sale.salesperson, "No salesman");
+  const byCategory = linesBy(lines, sales, (sale) => sale.category, "No category");
 
   return (
     <section
@@ -891,14 +907,13 @@ function InvoiceCard({
         )}
       </fieldset>
 
-      {byCategory.size > 0 && lookup.state === "done" && (
-        <p className="text-sm text-ink-muted" data-rebates-categories>
-          By category:{" "}
-          {[...byCategory.entries()]
-            .sort((a, b) => b[1] - a[1])
-            .map(([category, cents]) => `${category} ${formatMoney(cents)}`)
-            .join(" · ")}
-        </p>
+      {lines.length > 0 && lookup.state === "done" && (
+        <div className="space-y-1 text-sm text-ink-muted" data-rebates-groups>
+          <p data-rebates-salesmen>
+            By salesman: {bySalesman.map((group) => `${group.label} ${formatMoney(group.amount)} (${group.units.toLocaleString("en-US")})`).join(" · ")}
+          </p>
+          <p data-rebates-categories>By category: {byCategory.map((group) => `${group.label} ${formatMoney(group.amount)}`).join(" · ")}</p>
+        </div>
       )}
 
       <div className="-mx-5 overflow-x-auto sm:-mx-6">
