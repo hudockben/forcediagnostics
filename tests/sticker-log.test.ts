@@ -22,13 +22,16 @@ import { createCustomer, removeCustomer } from "../src/lib/customers";
 import { ADMIN_SECTIONS, needsPasswordSession } from "../src/lib/permissions";
 import type { CurrentUser } from "../src/lib/session";
 import {
+  MAX_LOG_CHECK,
   checkStickerImport,
   countByKind,
   findStickerHeader,
   parseKind,
   parsePlateClass,
+  importFate,
   personKey,
   planStickerImport,
+  sortAgainstLog,
   stickerColumns,
   stickerLists,
   type StickerImportRow,
@@ -41,6 +44,7 @@ import {
   importStickers,
   listStickerLog,
   logSticker,
+  numbersInLog,
   removeSticker,
   searchCustomersForLog,
   stickersForCustomer,
@@ -328,6 +332,27 @@ describe("importing a log: the rules", () => {
       ],
     );
     assert.deepEqual(plan.notes, []);
+  });
+
+  test("the preview sorts each entry by what importing it will do, from what the log has", () => {
+    const entry = (stickerNumber: string, customerName: string | null, plateClass: 1 | 2 | null = 1) => ({ row: 2, stickerNumber, customerName, phone: null, plateClass });
+    const logged = new Map([
+      ["90W14", { stickerNumber: "90W14", plateClass: 1 as const, onHand: false }],
+      ["7BP35", { stickerNumber: "7BP35", plateClass: 1 as const, onHand: true }],
+    ]);
+    assert.equal(importFate(entry("90W99", "Elkin, Tyler"), logged), "log");
+    assert.equal(importFate(entry("90W99", null), logged), "stock");
+    // On hand in the log, and the file names its customer: handed out.
+    assert.equal(importFate(entry("7BP35", "Elkin, Tyler"), logged), "handOut");
+    // Left as they are: on hand in both, handed out in the log, or as something else.
+    assert.equal(importFate(entry("7BP35", null), logged), "already");
+    assert.equal(importFate(entry("90W14", "Someone Else"), logged), "already");
+    assert.equal(importFate(entry("7BP35", "Elkin, Tyler", 2), logged), "already");
+    const sorted = sortAgainstLog([entry("90W99", "A B"), entry("90W14", "C D"), entry("7BP36", null)], [...logged.values()]);
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(sorted).map(([fate, entries]) => [fate, entries.map((each) => each.stickerNumber)])),
+      { log: ["90W99"], stock: ["7BP36"], handOut: [], already: ["90W14"] },
+    );
   });
 
   test("the server checks each entry again, as the form would", () => {
@@ -655,6 +680,44 @@ describe("the log", () => {
     assert.deepEqual(old.outcomes, [
       { row: 3, result: "already", customer: null, message: "T280378 is in the log already, as a sticker for Walt Ostrowski: left as it is." },
     ]);
+  });
+
+  test("the import's preview says what the log has already, as the import then finds it", async () => {
+    const shop = await createWriter(`sp${suffix}`);
+    const gus = await customer(shop, "Gus Novak");
+    assert.ok("id" in (await logSticker(shop, { stickerNumber: "90W14", plateClass: "1", customerId: gus })));
+    assert.ok("added" in (await addStock(shop, { kind: "1", from: "7BP35", to: "7BP36" })));
+    const looked = await numbersInLog(shop.shop.id, ["90w14", "7BP35", "7BP36", "NOPE-1", "=1+1", 7]);
+    assert.ok(Array.isArray(looked));
+    assert.deepEqual(
+      looked.map((entry) => [entry.stickerNumber, entry.plateClass, entry.onHand]).sort(),
+      [
+        ["7BP35", 1, true],
+        ["7BP36", 1, true],
+        ["90W14", 1, false],
+      ],
+    );
+    // Only this shop's log, and only so many at a time.
+    assert.deepEqual(await numbersInLog(other.shop.id, ["90W14", "7BP35"]), []);
+    assert.ok("error" in (await numbersInLog(shop.shop.id, Array.from({ length: MAX_LOG_CHECK + 1 }, (_, at) => `N${at}`))));
+    assert.ok("error" in (await numbersInLog(shop.shop.id, "90W14")));
+
+    // What the preview says each will do is what the import does.
+    const stickers: StickerImportRow[] = [
+      { row: 2, stickerNumber: "90W14", customerName: "Gus Novak", phone: null, plateClass: 1 },
+      { row: 3, stickerNumber: "7BP35", customerName: "Walt Ostrowski", phone: null, plateClass: 1 },
+      { row: 4, stickerNumber: "7BP36", customerName: null, phone: null, plateClass: 1 },
+      { row: 5, stickerNumber: "7BP37", customerName: null, phone: null, plateClass: 1 },
+      { row: 6, stickerNumber: "90W15", customerName: "Gus Novak", phone: null, plateClass: 1 },
+    ];
+    const inLog = await numbersInLog(shop.shop.id, stickers.map((entry) => entry.stickerNumber));
+    assert.ok(Array.isArray(inLog));
+    const predicted = stickers.map((entry) => importFate(entry, new Map(inLog.map((each) => [each.stickerNumber, each]))));
+    assert.deepEqual(predicted, ["already", "handOut", "already", "stock", "log"]);
+    const imported = await importStickers(shop, { importId: randomUUID(), fileName: "sheet.xlsx", stickers });
+    assert.ok("outcomes" in imported, JSON.stringify(imported));
+    const RESULT = { log: "logged", stock: "stocked", handOut: "logged", already: "already" } as const;
+    assert.deepEqual(imported.outcomes.map((outcome) => outcome.result), predicted.map((fate) => RESULT[fate]));
   });
 
   const row = (n: number, stickerNumber: string, customerName: string, plateClass: 1 | 2 | null, phone: string | null = null): StickerImportRow => ({

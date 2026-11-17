@@ -5,8 +5,17 @@ import { refresh } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { requireCapability } from "@/lib/session";
-import type { StickerImportOutcome } from "@/lib/sticker-import-rules";
-import { addStock, importStickers, logSticker, removeSticker, searchCustomersForLog, updateSticker, type CustomerChoice } from "@/lib/sticker-log";
+import type { LoggedNumber, StickerImportOutcome } from "@/lib/sticker-import-rules";
+import {
+  addStock,
+  importStickers,
+  logSticker,
+  numbersInLog,
+  removeSticker,
+  searchCustomersForLog,
+  updateSticker,
+  type CustomerChoice,
+} from "@/lib/sticker-log";
 
 export type FormState = { error?: string; success?: string; logged?: string; fromStock?: boolean };
 
@@ -72,6 +81,20 @@ export async function addStockAction(_previous: FormState, form: FormData): Prom
     refresh();
     return result.added > 0 ? { success: result.message } : { error: result.message };
   });
+}
+
+// For the import's preview: which of a file's numbers the log has already
+// (a batch at a time), so it can say what's new before anything is sent.
+export async function checkLogAction(numbers: unknown): Promise<{ logged: LoggedNumber[] } | { error: string }> {
+  try {
+    const user = await requireCapability("repair_orders.intake");
+    const logged = await numbersInLog(user.shop.id, numbers);
+    return Array.isArray(logged) ? { logged } : logged;
+  } catch (error) {
+    unstable_rethrow(error);
+    console.error("Couldn't check the log", error instanceof DrizzleQueryError ? error.cause : error);
+    return { error: "Couldn't check what's in the log already." };
+  }
 }
 
 // One batch of an import (see src/lib/sticker-import-rules.ts); the browser

@@ -9,6 +9,8 @@ import { inputBaseClass, labelClass, primaryLinkClass, secondaryButtonClass } fr
 import { parseCsv } from "@/lib/csv";
 import { pastedDelimiter, readSpreadsheet, reportCsv, type Sheet } from "@/lib/customer-import-rules";
 import {
+  IMPORT_FATES,
+  MAX_LOG_CHECK,
   MAX_STICKER_IMPORT_BATCH,
   STICKER_IMPORT_FIELDS,
   STICKER_IMPORT_LABELS,
@@ -17,15 +19,19 @@ import {
   isNumberField,
   listOf,
   planStickerImport,
+  sortAgainstLog,
   stickerColumns,
   stickerLists,
+  type ImportFate,
+  type LoggedNumber,
   type StickerImportField,
   type StickerImportOutcome,
+  type StickerImportPlan,
   type StickerImportRow,
 } from "@/lib/sticker-import-rules";
 import { ENTRY_KINDS, ENTRY_KIND_PLURALS, entryLabel, kindOf, type EntryKind } from "@/lib/sticker-log-rules";
 
-import { importStickersAction } from "../actions";
+import { checkLogAction, importStickersAction } from "../actions";
 
 // Importing the Sticker & Plate log, in the browser: a CSV or Excel file,
 // or rows pasted from a spreadsheet. Each column is matched to a field by
@@ -43,6 +49,19 @@ type Run =
 
 const selectClass = `${inputBaseClass} h-11 appearance-none pr-9 text-sm`;
 const plural = (count: number, one: string, many: string) => `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`;
+
+// "Import 17 stickers and plates", or "Import 10 Class 1 plates" when
+// they're all one kind; with fresh, "Import 17 new stickers and plates".
+function importLabel(entries: StickerImportRow[], fresh = false) {
+  const what =
+    new Set(entries.map((entry) => entry.plateClass)).size > 1
+      ? `${entries.length.toLocaleString("en-US")} stickers and plates`
+      : countByKind(entries);
+  return `Import ${fresh ? what.replace(/^([\d,]+) /, "$1 new ") : what}`;
+}
+
+// What importing each will do, in the preview.
+const FATE_LABELS: Record<ImportFate, string> = { log: "New: logged", stock: "New: on hand", handOut: "Handed out", already: "In the log already" };
 const columnLetter = (index: number) => {
   let name = "";
   for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) name = String.fromCharCode(65 + ((n - 1) % 26)) + name;
@@ -102,11 +121,50 @@ export function StickerImport() {
   // Handed out (a customer beside them), and on hand (none).
   const toLog = useMemo(() => plan?.stickers.filter((entry) => entry.customerName !== null) ?? [], [plan]);
   const toStock = useMemo(() => plan?.stickers.filter((entry) => entry.customerName === null) ?? [], [plan]);
-  // A few of each, for the preview.
-  const preview = useMemo(
-    () => (plan ? ENTRY_KINDS.flatMap((each) => plan.stickers.filter((entry) => kindOf(entry.plateClass) === each).slice(0, 4)) : []),
-    [plan],
+
+  // What the log has already of the plan's numbers, asked for (a batch at
+  // a time) once the plan settles, so the preview says what's new before
+  // anything is sent. The server checks again as it saves.
+  const [logCheck, setLogCheck] = useState<{ plan: StickerImportPlan; logged: LoggedNumber[] } | { plan: StickerImportPlan; error: string } | null>(null);
+  useEffect(() => {
+    if (!plan || planning || plan.stickers.length === 0) return;
+    let cancelled = false;
+    const numbers = plan.stickers.map((entry) => entry.stickerNumber);
+    void (async () => {
+      const logged: LoggedNumber[] = [];
+      for (let at = 0; at < numbers.length; at += MAX_LOG_CHECK) {
+        const result = await checkLogAction(numbers.slice(at, at + MAX_LOG_CHECK)).catch(() => ({ error: "The connection dropped." }));
+        if (cancelled) return;
+        if ("error" in result) {
+          setLogCheck({ plan, error: result.error });
+          return;
+        }
+        logged.push(...result.logged);
+      }
+      setLogCheck({ plan, logged });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [plan, planning]);
+  const currentCheck = logCheck?.plan === plan ? logCheck : null;
+  const checking = plan !== null && plan.stickers.length > 0 && currentCheck === null;
+  const sorted = useMemo(
+    () => (plan && currentCheck && "logged" in currentCheck ? sortAgainstLog(plan.stickers, currentCheck.logged) : null),
+    [plan, currentCheck],
   );
+  const fresh = useMemo(() => (sorted ? [...sorted.log, ...sorted.handOut, ...sorted.stock] : []), [sorted]);
+  const fateOf = useMemo(() => {
+    const fates = new Map<StickerImportRow, ImportFate>();
+    if (sorted) for (const fate of IMPORT_FATES) for (const entry of sorted[fate]) fates.set(entry, fate);
+    return fates;
+  }, [sorted]);
+  // A few of each, for the preview: what's new first, once the log's been checked.
+  const preview = useMemo(() => {
+    if (!plan) return [];
+    const from = sorted && fresh.length > 0 ? fresh : plan.stickers;
+    return ENTRY_KINDS.flatMap((each) => from.filter((entry) => kindOf(entry.plateClass) === each).slice(0, 4));
+  }, [plan, sorted, fresh]);
 
   useEffect(() => {
     if (!running) return;
@@ -511,16 +569,48 @@ export function StickerImport() {
         <section className="rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6">
           <h2 className="text-base font-semibold text-ink">3. Import</h2>
           <div aria-busy={planning} className={`mt-4 space-y-4 ${planning ? "opacity-60" : ""}`}>
-            <p className="text-sm leading-6 text-ink" data-sticker-import-summary>
-              {plural(plan.rowsRead, "row", "rows")} read: {countByKind(toLog)} to log
-              {toStock.length > 0 && <>, and {countByKind(toStock)} on hand (no customer beside {toStock.length === 1 ? "it" : "them"}: not handed out yet)</>}. A
-              number already in the log is left as it is, unless it&apos;s on hand there and this names its customer: then it&apos;s handed out. Each
-              customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.
-            </p>
+            {sorted ? (
+              <div className="space-y-2 text-sm leading-6 text-ink" data-sticker-import-summary>
+                <p>
+                  {plural(plan.rowsRead, "row", "rows")} read, checked against the log:
+                </p>
+                <ul className="list-disc space-y-0.5 pl-5" data-sticker-import-check>
+                  {sorted.log.length > 0 && <li data-fate="log">New, to log: {countByKind(sorted.log)}</li>}
+                  {sorted.stock.length > 0 && (
+                    <li data-fate="stock">
+                      New, on hand: {countByKind(sorted.stock)} (no customer beside {sorted.stock.length === 1 ? "it" : "them"}: not handed out yet)
+                    </li>
+                  )}
+                  {sorted.handOut.length > 0 && (
+                    <li data-fate="handOut">On hand in the log, handed out to the customer this names: {countByKind(sorted.handOut)}</li>
+                  )}
+                  {sorted.already.length > 0 && (
+                    <li data-fate="already" className="text-ink-muted">
+                      In the log already, left as {sorted.already.length === 1 ? "it is" : "they are"}: {countByKind(sorted.already)}
+                    </li>
+                  )}
+                </ul>
+                <p className="text-ink-muted">
+                  {fresh.length === 0
+                    ? "Everything in this file is in the log already: importing it changes nothing."
+                    : <>Each customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.</>}
+                </p>
+              </div>
+            ) : (
+              <p className="text-sm leading-6 text-ink" data-sticker-import-summary>
+                {plural(plan.rowsRead, "row", "rows")} read: {countByKind(toLog)} to log
+                {toStock.length > 0 && <>, and {countByKind(toStock)} on hand (no customer beside {toStock.length === 1 ? "it" : "them"}: not handed out yet)</>}. A
+                number already in the log is left as it is, unless it&apos;s on hand there and this names its customer: then it&apos;s handed out. Each
+                customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.{" "}
+                <span className="text-ink-muted" role="status">
+                  {checking ? "Checking what's in the log already…" : currentCheck && "error" in currentCheck ? `${currentCheck.error} Importing still leaves what's in the log as it is.` : ""}
+                </span>
+              </p>
+            )}
             {plan.stickers.length > 0 && (
               <div className="-mx-5 overflow-x-auto sm:-mx-6">
                 <table className="w-full min-w-[32rem] text-sm" data-sticker-preview>
-                  <caption className="sr-only">The first of each to be imported</caption>
+                  <caption className="sr-only">{sorted && fresh.length > 0 ? "The first of each that's new" : "The first of each to be imported"}</caption>
                   <thead>
                     <tr className="border-y border-white/10 text-left text-xs text-ink-muted">
                       <th scope="col" className="px-3 py-2 pl-5 font-medium sm:pl-6">
@@ -537,6 +627,11 @@ export function StickerImport() {
                           Phone
                         </th>
                       )}
+                      {sorted && (
+                        <th scope="col" className="px-3 py-2 pr-5 font-medium sm:pr-6">
+                          What happens
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/10">
@@ -546,24 +641,44 @@ export function StickerImport() {
                         <td className="px-3 py-2 font-mono break-words text-ink">{sticker.stickerNumber}</td>
                         <td className="px-3 py-2 break-words text-ink">{sticker.customerName ?? <span className="text-ink-muted">On hand</span>}</td>
                         {hasPhone && <td className="px-3 py-2 break-words text-ink">{sticker.phone ?? <span className="text-ink-muted">—</span>}</td>}
+                        {sorted && (
+                          <td className="px-3 py-2 pr-5 sm:pr-6">
+                            <Badge tone={fateOf.get(sticker) === "already" ? "neutral" : "glow"}>{FATE_LABELS[fateOf.get(sticker) ?? "already"]}</Badge>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                {plan.stickers.length > preview.length && (
-                  <p className="mt-2 px-5 text-xs text-ink-muted sm:px-6">…and {plural(plan.stickers.length - preview.length, "more", "more")}.</p>
+                {(sorted && fresh.length > 0 ? fresh : plan.stickers).length > preview.length && (
+                  <p className="mt-2 px-5 text-xs text-ink-muted sm:px-6">
+                    …and {plural((sorted && fresh.length > 0 ? fresh : plan.stickers).length - preview.length, "more", "more")}
+                    {sorted && fresh.length > 0 ? " new" : ""}.
+                  </p>
                 )}
               </div>
             )}
             <Notes notes={notes} />
           </div>
           <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-3">
-            <button type="button" onClick={start} disabled={running || planning || plan.stickers.length === 0} className={primaryLinkClass} data-sticker-import-start>
+            <button
+              type="button"
+              onClick={start}
+              disabled={running || planning || checking || plan.stickers.length === 0 || (sorted !== null && fresh.length === 0)}
+              className={primaryLinkClass}
+              data-sticker-import-start
+            >
               {running
                 ? "Importing…"
                 : planning
                   ? "Updating…"
-                  : `Import ${new Set(plan.stickers.map((entry) => entry.plateClass)).size > 1 ? `${plan.stickers.length.toLocaleString("en-US")} stickers and plates` : countByKind(plan.stickers)}`}
+                  : checking
+                    ? "Checking the log…"
+                    : sorted
+                      ? fresh.length === 0
+                        ? "Nothing new to import"
+                        : importLabel(fresh, true)
+                      : importLabel(plan.stickers)}
             </button>
             {run?.state === "running" && (
               <div className="min-w-56 flex-1" role="status">
