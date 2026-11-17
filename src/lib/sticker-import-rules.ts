@@ -300,3 +300,32 @@ export type StickerImportOutcome = {
   // Why it was left out, or how the log's entry differs from the file.
   message: string | null;
 };
+
+// --- Checking the log before importing ---------------------------------------
+
+// A number the log has already: what it is, and whether it's on hand (no
+// customer yet). The preview asks the server for these, MAX_LOG_CHECK
+// numbers at a time (well under the Server Action limit).
+export type LoggedNumber = { stickerNumber: string; plateClass: PlateClass | null; onHand: boolean };
+export const MAX_LOG_CHECK = 2_000;
+
+// What importing an entry will do, as importStickers does it: log it to its
+// customer (new), add it on hand (new, no customer), hand out one the log
+// has on hand that the file names a customer for, or leave one the log has
+// already as it is.
+export type ImportFate = "log" | "stock" | "handOut" | "already";
+export const IMPORT_FATES: readonly ImportFate[] = ["log", "stock", "handOut", "already"];
+
+export function importFate(entry: Pick<StickerImportRow, "stickerNumber" | "plateClass" | "customerName">, logged: ReadonlyMap<string, LoggedNumber>): ImportFate {
+  const already = logged.get(entry.stickerNumber);
+  if (!already) return entry.customerName === null ? "stock" : "log";
+  return already.onHand && entry.customerName !== null && already.plateClass === entry.plateClass ? "handOut" : "already";
+}
+
+// The plan's entries by what importing them will do.
+export function sortAgainstLog(stickers: StickerImportRow[], logged: LoggedNumber[]): Record<ImportFate, StickerImportRow[]> {
+  const byNumber = new Map(logged.map((entry) => [entry.stickerNumber, entry]));
+  const sorted: Record<ImportFate, StickerImportRow[]> = { log: [], stock: [], handOut: [], already: [] };
+  for (const entry of stickers) sorted[importFate(entry, byNumber)].push(entry);
+  return sorted;
+}

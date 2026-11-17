@@ -13,7 +13,15 @@ import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib
 import { isUuid } from "@/lib/diagnose-rules";
 import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
-import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, personKey, type StickerImportEntry, type StickerImportOutcome } from "@/lib/sticker-import-rules";
+import {
+  MAX_LOG_CHECK,
+  MAX_STICKER_IMPORT_BATCH,
+  checkStickerImport,
+  personKey,
+  type LoggedNumber,
+  type StickerImportEntry,
+  type StickerImportOutcome,
+} from "@/lib/sticker-import-rules";
 import {
   ENTRY_KINDS,
   ENTRY_KIND_LABELS,
@@ -462,6 +470,31 @@ const rowOf = (entry: unknown) => {
   const row = (entry as { row?: unknown } | null)?.row;
   return Number.isInteger(row) ? Number(row) : 0;
 };
+
+// Which of these numbers the log has already, what each is and whether
+// it's on hand: for the import's preview, before anything is sent. Up to
+// MAX_LOG_CHECK at a time; anything that isn't a number the log could hold
+// is left out.
+export async function numbersInLog(shopId: string, input: unknown): Promise<LoggedNumber[] | { error: string }> {
+  if (!Array.isArray(input) || input.length > MAX_LOG_CHECK) return { error: "Those numbers couldn't be checked. Reload the page and try again." };
+  const numbers = [
+    ...new Set(input.flatMap((number) => {
+      const checked = checkStickerEntry({ stickerNumber: number, plateClass: null });
+      return "entry" in checked ? [checked.entry.stickerNumber] : [];
+    })),
+  ];
+  if (numbers.length === 0) return [];
+  return withShop(shopId, (tx) =>
+    tx
+      .select({
+        stickerNumber: stickerPlateLog.stickerNumber,
+        plateClass: stickerPlateLog.plateClass,
+        onHand: sql<boolean>`${stickerPlateLog.customerId} is null`,
+      })
+      .from(stickerPlateLog)
+      .where(inArray(stickerPlateLog.stickerNumber, numbers)),
+  );
+}
 
 // Saves one batch of an imported Sticker & Plate log, each sticker and
 // plate checked as the form checks it. One without a customer is on hand:
