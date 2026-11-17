@@ -5,8 +5,10 @@ import { usePathname } from "next/navigation";
 import { Suspense, useLayoutEffect, useRef } from "react";
 
 // `exact`: only the section's own address marks it current, not the pages
-// under it (a section at the top of others, such as /reports).
-export type NavItem = { href: string; label: string; section: string; exact?: boolean };
+// under it (a section at the top of others, such as /reports). `alert`: a
+// small "Low" badge on the tab, with what it means for a screen reader and
+// on hover (the Sticker & Plate log when stock is getting low).
+export type NavItem = { href: string; label: string; section: string; exact?: boolean; alert?: string };
 
 const styles = {
   tabs: {
@@ -68,9 +70,20 @@ function TabList({ items, label, variant = "tabs", pathname }: Props & { pathnam
               <Link
                 href={item.href}
                 aria-current={current}
-                className={`${style.link} ${active ? style.active : style.idle}`}
+                title={item.alert}
+                // relative: the screen reader's words (absolutely placed)
+                // stay inside the sideways-scrolling bar, not past the page.
+                className={`relative ${style.link} ${active ? style.active : style.idle}`}
               >
                 {item.label}
+                {item.alert && (
+                  <>
+                    <span aria-hidden className="ml-1.5 rounded-full bg-trail/15 px-1.5 py-px text-[11px] leading-4 font-semibold text-trail" data-tab-alert>
+                      Low
+                    </span>
+                    <span className="sr-only">{` (${item.alert})`}</span>
+                  </>
+                )}
               </Link>
             </li>
           );

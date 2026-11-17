@@ -7,17 +7,27 @@ import { inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from
 import {
   ENTRY_KINDS,
   ENTRY_KIND_LABELS,
+  ENTRY_KIND_PLURALS,
   MAX_STICKER_LENGTH,
+  MAX_STOCK,
   classOf,
   entryWords,
   kindOf,
   normalizeSticker,
   type EntryKind,
   type PlateClass,
+  type StockMode,
 } from "@/lib/sticker-log-rules";
 import { useFormAction } from "@/lib/use-form-action";
 
-import { logStickerAction, removeStickerAction, saveStickerAction, searchLogCustomersAction, type FormState } from "./actions";
+import {
+  logStickerAction,
+  removeStickerAction,
+  saveStickerAction,
+  searchLogCustomersAction,
+  updateStockAction,
+  type FormState,
+} from "./actions";
 
 type CustomerChoice = { id: string; name: string; detail: string | null };
 // The customer picked: one on file, or a new one by name.
@@ -195,25 +205,54 @@ function CustomerBox({ picked, onPick }: { picked: Picked; onPick: (picked: Pick
   );
 }
 
-// A sticker, or a Class 1 or Class 2 plate.
-function KindChoice({ value, onChange }: { value: EntryKind | null; onChange: (value: EntryKind) => void }) {
+// One of a few choices, as a row of big radio buttons (a bay tablet's
+// fingers).
+function Choices<T extends string>({
+  legend,
+  name,
+  options,
+  value,
+  onChange,
+  columns = "grid-cols-[repeat(auto-fit,minmax(9rem,1fr))]",
+}: {
+  legend: string;
+  name: string;
+  options: { value: T; label: string }[];
+  value: T | null;
+  onChange: (value: T) => void;
+  columns?: string;
+}) {
   return (
     <fieldset>
-      <legend className={labelClass}>What it is</legend>
-      <div className="mt-1.5 grid grid-cols-3 gap-2">
-        {ENTRY_KINDS.map((kind) => (
+      <legend className={labelClass}>{legend}</legend>
+      <div className={`mt-1.5 grid gap-2 ${columns}`}>
+        {options.map((option) => (
           <label
-            key={kind}
+            key={option.value}
             className={`flex min-h-12 cursor-pointer items-center gap-2.5 rounded-lg border px-3.5 text-sm font-medium transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-glow/40 ${
-              value === kind ? "border-glow/50 bg-glow/10 text-ink" : "border-white/10 text-ink-muted hover:border-white/20"
+              value === option.value ? "border-glow/50 bg-glow/10 text-ink" : "border-white/10 text-ink-muted hover:border-white/20"
             }`}
           >
-            <input type="radio" name="plateClass" value={kind} checked={value === kind} onChange={() => onChange(kind)} required className="accent-glow" />
-            {ENTRY_KIND_LABELS[kind]}
+            <input type="radio" name={name} value={option.value} checked={value === option.value} onChange={() => onChange(option.value)} required className="accent-glow" />
+            {option.label}
           </label>
         ))}
       </div>
     </fieldset>
+  );
+}
+
+// A sticker, or a Class 1 or Class 2 plate.
+function KindChoice({ value, onChange }: { value: EntryKind | null; onChange: (value: EntryKind) => void }) {
+  return (
+    <Choices
+      legend="What it is"
+      name="plateClass"
+      options={ENTRY_KINDS.map((kind) => ({ value: kind, label: ENTRY_KIND_LABELS[kind] }))}
+      value={value}
+      onChange={onChange}
+      columns="grid-cols-3"
+    />
   );
 }
 
@@ -342,6 +381,59 @@ export function RemoveStickerForm({ entry }: { entry: { id: string; stickerNumbe
           Remove from the log
         </button>
       )}
+    </form>
+  );
+}
+
+const STOCK_MODE_OPTIONS: { value: StockMode; label: string }[] = [
+  { value: "received", label: "Received (add to stock)" },
+  { value: "counted", label: "Counted on hand" },
+];
+
+// Stock: stickers or a class of plates received (added to what's on hand)
+// or counted on the shelf (what's on hand now, from now on). After saving,
+// the number clears for the next; what it is and how stay.
+export function StockForm() {
+  const { state, pending, formProps } = useFormAction<FormState>(updateStockAction, {});
+  const [kind, setKind] = useState<EntryKind | null>(null);
+  const [mode, setMode] = useState<StockMode>("received");
+  const [quantity, setQuantity] = useState("");
+  const quantityId = useId();
+
+  const [seen, setSeen] = useState(state);
+  if (seen !== state) {
+    setSeen(state);
+    if (state.success) setQuantity("");
+  }
+
+  return (
+    <form {...formProps} className="space-y-4" data-stock-form>
+      <Choices legend="What" name="kind" options={ENTRY_KINDS.map((value) => ({ value, label: ENTRY_KIND_PLURALS[value] }))} value={kind} onChange={setKind} />
+      <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,10rem)] sm:items-end">
+        <Choices legend="How" name="mode" options={STOCK_MODE_OPTIONS} value={mode} onChange={setMode} />
+        <div>
+          <label htmlFor={quantityId} className={labelClass}>
+            How many
+          </label>
+          <input
+            id={quantityId}
+            name="quantity"
+            value={quantity}
+            onChange={(event) => setQuantity(event.target.value)}
+            required
+            inputMode="numeric"
+            pattern="[0-9,]*"
+            maxLength={String(MAX_STOCK).length + 2}
+            autoComplete="off"
+            className={`${inputClass} font-mono`}
+            data-stock-quantity
+          />
+        </div>
+      </div>
+      <Feedback state={state} />
+      <button type="submit" disabled={pending} className={secondaryButtonClass}>
+        {pending ? "Saving…" : "Save stock"}
+      </button>
     </form>
   );
 }

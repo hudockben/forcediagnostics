@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { DrizzleQueryError, and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { auditLog, customers, stickerPlateLog, users } from "@/db/schema";
+import { auditLog, customers, stickerPlateLog, stickerPlateStock, users } from "@/db/schema";
 import { matchCustomer } from "@/lib/customer-import-rules";
 import { checkCustomer } from "@/lib/customer-rules";
 import { personKeySql } from "@/lib/customers";
@@ -15,13 +15,19 @@ import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
 import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, personKey, type StickerImportOutcome } from "@/lib/sticker-import-rules";
 import {
+  ENTRY_KINDS,
+  MAX_STOCK,
   STICKER_LOG_PAGE_SIZE,
   checkStickerEntry,
+  checkStockUpdate,
   classOf,
   entryWords,
+  stockLeft,
+  stockWords,
   type EntryKind,
   type PlateClass,
   type StickerLogRow,
+  type StockLevel,
 } from "@/lib/sticker-log-rules";
 
 // The Sticker & Plate log tab: each registration sticker and plate the
@@ -316,6 +322,73 @@ export async function removeSticker(actor: CurrentUser, id: string): Promise<{ o
     if (!removed) return NOT_HERE;
     await audit(tx, actor, "sticker.removed", id, removed);
     return { ok: true as const, stickerNumber: removed.stickerNumber };
+  });
+}
+
+// --- Stock on hand ---------------------------------------------------------------
+
+// Each kind's stock the shop has counted, in the log's order (stickers, then
+// each class of plates): the count, when it was made, and how many of that
+// kind were logged after it, an import's too. Worked out as it's read, so a
+// correction (a sticker that was a plate) or a removal counts by itself.
+async function readStock(tx: ShopTransaction): Promise<StockLevel[]> {
+  const rows = await tx
+    .select({
+      kind: stickerPlateStock.kind,
+      counted: stickerPlateStock.counted,
+      countedAt: stickerPlateStock.countedAt,
+      used: sql<number>`(select count(*)::int from ${stickerPlateLog}
+        where ${stickerPlateLog.createdAt} > ${stickerPlateStock.countedAt}
+          and coalesce(${stickerPlateLog.plateClass}::text, 'sticker') = ${stickerPlateStock.kind})`,
+    })
+    .from(stickerPlateStock);
+  return ENTRY_KINDS.flatMap((kind) => rows.filter((row) => row.kind === kind));
+}
+
+export async function getStickerStock(shopId: string): Promise<StockLevel[]> {
+  return withShop(shopId, readStock);
+}
+
+// Records stock: a delivery received (added to what's on hand, the count's
+// date kept, so what's been logged since still comes off) or a count of
+// what's on the shelf now (replacing the count, from now). Says what's left
+// after it, and audits it with what the app had before.
+export async function updateStickerStock(
+  actor: CurrentUser,
+  input: { kind: unknown; mode: unknown; quantity: unknown },
+): Promise<{ left: number; message: string } | { error: string }> {
+  const checked = checkStockUpdate(input);
+  if ("error" in checked) return checked;
+  const { kind, mode, quantity } = checked.update;
+  return withShop(actor.shop.id, async (tx) => {
+    // Held to the end, so what's left before and after is this change's alone.
+    await tx.select({ kind: stickerPlateStock.kind }).from(stickerPlateStock).where(eq(stickerPlateStock.kind, kind)).for("update");
+    const before = (await readStock(tx)).find((level) => level.kind === kind);
+    const was = before ? stockLeft(before) : null;
+    if (mode === "received" && before && before.counted + quantity > MAX_STOCK) {
+      return { error: `That would be more than ${MAX_STOCK.toLocaleString("en-US")} on hand. Count what's on the shelf instead.` };
+    }
+    // The first delivery of a kind nobody has counted starts its count.
+    const set =
+      mode === "received"
+        ? { counted: sql`${stickerPlateStock.counted} + ${quantity}`, updatedByUserId: actor.id, updatedAt: sql`now()` }
+        : { counted: quantity, countedAt: sql`now()`, updatedByUserId: actor.id, updatedAt: sql`now()` };
+    await tx
+      .insert(stickerPlateStock)
+      .values({ shopId: actor.shop.id, kind, counted: quantity, updatedByUserId: actor.id })
+      .onConflictDoUpdate({ target: [stickerPlateStock.shopId, stickerPlateStock.kind], set });
+    const after = (await readStock(tx)).find((level) => level.kind === kind);
+    const left = after ? stockLeft(after) : quantity;
+    await tx.insert(auditLog).values({
+      shopId: actor.shop.id,
+      actorUserId: actor.id,
+      action: mode === "received" ? "sticker_stock.received" : "sticker_stock.counted",
+      targetType: "sticker_stock",
+      targetId: kind,
+      details: { kind, quantity, left, was },
+    });
+    const what = mode === "received" ? `Added ${stockWords(kind, quantity)}` : `Counted ${stockWords(kind, quantity)} on hand`;
+    return { left, message: mode === "received" ? `${what}: ${left.toLocaleString("en-US")} left.` : `${what}.` };
   });
 }
 

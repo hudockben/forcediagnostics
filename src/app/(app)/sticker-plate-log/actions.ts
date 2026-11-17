@@ -6,7 +6,7 @@ import { redirect, unstable_rethrow } from "next/navigation";
 
 import { requireCapability } from "@/lib/session";
 import type { StickerImportOutcome } from "@/lib/sticker-import-rules";
-import { importStickers, logSticker, removeSticker, searchCustomersForLog, updateSticker, type CustomerChoice } from "@/lib/sticker-log";
+import { importStickers, logSticker, removeSticker, searchCustomersForLog, updateSticker, updateStickerStock, type CustomerChoice } from "@/lib/sticker-log";
 
 export type FormState = { error?: string; success?: string; logged?: string };
 
@@ -59,6 +59,18 @@ export async function removeStickerAction(_previous: FormState, form: FormData):
     const result = await removeSticker(user, field(form, "id"));
     if ("error" in result) return { error: result.error };
     redirect(`/sticker-plate-log?removed=${encodeURIComponent(result.stickerNumber)}`);
+  });
+}
+
+// A delivery received, or a count of what's on the shelf. The refresh
+// brings the tab's badge and the log's warning up to date.
+export async function updateStockAction(_previous: FormState, form: FormData): Promise<FormState> {
+  return attempt("save the stock", async () => {
+    const user = await requireCapability("repair_orders.intake");
+    const result = await updateStickerStock(user, { kind: field(form, "kind"), mode: field(form, "mode"), quantity: field(form, "quantity") });
+    if ("error" in result) return { error: result.error };
+    refresh();
+    return { success: result.message };
   });
 }
 

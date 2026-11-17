@@ -84,3 +84,66 @@ export function stickerLogCsv(rows: StickerLogRow[], timeZone = "America/New_Yor
   ];
   return `﻿${lines.join("\r\n")}\r\n`;
 }
+
+// --- Stock on hand ------------------------------------------------------------
+
+// How many of each are on hand: the number counted on the shelf (plus any
+// received since), less each one logged after that count. A kind nobody
+// has counted isn't tracked, and never warns. Below LOW_STOCK_BELOW left,
+// the tab and the log say it's getting low.
+export const LOW_STOCK_BELOW = 10;
+export const MAX_STOCK = 100_000;
+
+export const STOCK_MODES = ["received", "counted"] as const;
+export type StockMode = (typeof STOCK_MODES)[number];
+
+export type StockUpdate = { kind: EntryKind; mode: StockMode; quantity: number };
+
+// What the stock form sends, checked: what it is, received (added to what's
+// on hand) or counted (what's on the shelf now), and how many.
+export function checkStockUpdate(input: { kind: unknown; mode: unknown; quantity: unknown }): { update: StockUpdate } | { error: string } {
+  const kind = parseKindFilter(input.kind);
+  if (!kind) return { error: "Pick what it is: stickers, or Class 1 or Class 2 plates." };
+  const mode = (STOCK_MODES as readonly unknown[]).includes(input.mode) ? (input.mode as StockMode) : null;
+  if (!mode) return { error: "Pick whether these were received or counted on hand." };
+  const text = String(input.quantity ?? "").replace(/,/g, "").trim();
+  if (!/^\d+$/.test(text)) return { error: "Enter how many, as a whole number." };
+  const quantity = Number(text);
+  if (mode === "received" && quantity === 0) return { error: "Enter how many were received." };
+  if (quantity > MAX_STOCK) return { error: `That's more than ${MAX_STOCK.toLocaleString("en-US")}.` };
+  return { update: { kind, mode, quantity } };
+}
+
+export type StockLevel = {
+  kind: EntryKind;
+  // On hand when last counted, plus any received since.
+  counted: number;
+  countedAt: Date;
+  // Logged since that count.
+  used: number;
+};
+
+// Left on the shelf; never below none (more logged than counted means a
+// delivery wasn't added or the count is off).
+export const stockLeft = (level: Pick<StockLevel, "counted" | "used">) => Math.max(0, level.counted - level.used);
+export const isLowStock = (level: Pick<StockLevel, "counted" | "used">) => level.counted - level.used < LOW_STOCK_BELOW;
+
+// "1 sticker", "7 stickers", "1 Class 1 plate", "0 Class 2 plates".
+export const stockWords = (kind: EntryKind, count: number) =>
+  `${count.toLocaleString("en-US")} ${entryWords(classOf(kind))}${count === 1 ? "" : "s"}`;
+
+const listWords = (items: string[]) =>
+  items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+
+// What's getting low, in the log's order (stickers, then each class of
+// plates); empty when nothing counted is.
+export const lowStock = (levels: StockLevel[]) =>
+  ENTRY_KINDS.flatMap((kind) => levels.filter((level) => level.kind === kind && isLowStock(level)));
+
+// "Getting low: 7 stickers and 0 Class 2 plates left." for the log, the
+// tab's badge and a screen reader; null when nothing counted is low.
+export function lowStockMessage(levels: StockLevel[]): string | null {
+  const low = lowStock(levels);
+  if (low.length === 0) return null;
+  return `Getting low: ${listWords(low.map((level) => stockWords(level.kind, stockLeft(level))))} left.`;
+}

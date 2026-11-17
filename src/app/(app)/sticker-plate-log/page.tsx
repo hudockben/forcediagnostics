@@ -6,12 +6,23 @@ import { LocalTime } from "@/components/app/local-time";
 import { Badge, Card, LoadingLine, Notice, PageHeading } from "@/components/app/ui";
 import { MAX_LIST_WORDS, cleanListQuery, listHref, listSearchIsCut, listSearchWords, parsePage } from "@/lib/diagnose-list-rules";
 import { requireCapability } from "@/lib/session";
-import { getCustomerChoice, listStickerLog, type StickerLog } from "@/lib/sticker-log";
-import { ENTRY_KINDS, ENTRY_KIND_PLURALS, entryLabel, parseKindFilter, type EntryKind } from "@/lib/sticker-log-rules";
+import { getCustomerChoice, getStickerStock, listStickerLog, type StickerLog } from "@/lib/sticker-log";
+import {
+  ENTRY_KINDS,
+  ENTRY_KIND_PLURALS,
+  LOW_STOCK_BELOW,
+  entryLabel,
+  isLowStock,
+  lowStockMessage,
+  parseKindFilter,
+  stockLeft,
+  type EntryKind,
+  type StockLevel,
+} from "@/lib/sticker-log-rules";
 
 import { ListSearch } from "../diagnose/list-search";
 import { Pagination } from "../diagnose/pagination";
-import { ExportLink, StickerForm } from "./forms";
+import { ExportLink, StickerForm, StockForm } from "./forms";
 
 export const metadata: Metadata = { title: "Sticker & Plate log" };
 
@@ -39,12 +50,14 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/st
   const params = await searchParams;
   const query = cleanListQuery(typeof params.q === "string" ? params.q : "");
   const kind = parseKindFilter(params.type);
-  const [log, customer] = await Promise.all([
+  const [log, customer, stock] = await Promise.all([
     listStickerLog(user.shop.id, { query, kind, page: parsePage(params.page) }),
     // "Log a sticker or plate" from a customer's record.
     typeof params.customer === "string" ? getCustomerChoice(user.shop.id, params.customer) : Promise.resolve(null),
+    getStickerStock(user.shop.id),
   ]);
   const searching = listSearchWords(query).length > 0 || kind !== null;
+  const low = lowStockMessage(stock);
 
   return (
     <div className="space-y-6">
@@ -58,11 +71,35 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/st
         }
       />
 
+      {low && (
+        <div data-low-stock>
+          <Notice tone="trail">
+            {low} Order more, then add them under{" "}
+            <a href="#stock" className="font-medium underline underline-offset-2">
+              Stock
+            </a>
+            .
+          </Notice>
+        </div>
+      )}
+
       {typeof params.removed === "string" && <Notice>{params.removed} removed from the log.</Notice>}
 
       <Card title="Log a sticker or plate">
         <StickerForm initialCustomer={customer} />
       </Card>
+
+      <div id="stock" className="scroll-mt-6">
+        <Card
+          title="Stock"
+          description={`What's on the shelf. Count each to start, then add each delivery as it comes in; every one logged after the count comes off. Under ${LOW_STOCK_BELOW} left, the tab says it's getting low.`}
+        >
+          <StockLevels stock={stock} />
+          <div className="mt-6 border-t border-white/10 pt-5">
+            <StockForm />
+          </div>
+        </Card>
+      </div>
 
       <Card>
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -99,6 +136,49 @@ async function StickerLogScreen({ searchParams }: { searchParams: PageProps<"/st
         </div>
       </Card>
     </div>
+  );
+}
+
+// Each kind's stock: what's left, a badge when it's low or out, and when it
+// was counted; a kind nobody has counted says so.
+function StockLevels({ stock }: { stock: StockLevel[] }) {
+  return (
+    <ul className="grid gap-3 sm:grid-cols-3" data-stock-levels>
+      {ENTRY_KINDS.map((kind) => {
+        const level = stock.find((each) => each.kind === kind);
+        const left = level ? stockLeft(level) : 0;
+        const over = level ? level.used - level.counted : 0;
+        return (
+          <li key={kind} className="rounded-lg border border-white/10 px-4 py-3" data-stock-kind={kind} data-stock-low={level && isLowStock(level) ? "" : undefined}>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-medium text-ink-muted">{ENTRY_KIND_PLURALS[kind]}</h3>
+              {level && isLowStock(level) && <Badge tone={left === 0 ? "suspect" : "trail"}>{left === 0 ? "Out" : "Getting low"}</Badge>}
+            </div>
+            {level ? (
+              <>
+                <p className="mt-1 text-ink">
+                  <span className="font-mono text-3xl font-semibold" data-stock-left>
+                    {left.toLocaleString("en-US")}
+                  </span>{" "}
+                  <span className="text-sm text-ink-muted">left</span>
+                </p>
+                <p className="mt-1 text-xs leading-5 text-ink-muted">
+                  Counted <LocalTime value={level.countedAt.toISOString()} />
+                  {level.used > 0 && ` · ${level.used.toLocaleString("en-US")} logged since`}
+                </p>
+                {over > 0 && (
+                  <p className="mt-1 text-xs leading-5 text-trail">
+                    {over.toLocaleString("en-US")} more logged than were on hand: add the delivery, or count the shelf again.
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="mt-2 text-sm leading-6 text-ink-muted">Not counted yet.</p>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
