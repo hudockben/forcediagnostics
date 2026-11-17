@@ -49,11 +49,12 @@ export function Card({
   );
 }
 
-export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "glow" | "trail" }) {
+export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "glow" | "trail" | "suspect" }) {
   const tones = {
     neutral: "bg-white/5 text-ink-muted",
     glow: "bg-glow/15 text-glow",
     trail: "bg-trail/15 text-trail",
+    suspect: "bg-suspect/15 text-suspect",
   };
   return (
     <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${tones[tone]}`}>

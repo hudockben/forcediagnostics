@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useDeferredValue, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Badge, Notice } from "@/components/app/ui";
@@ -113,6 +114,12 @@ export function StickerImport() {
   useEffect(() => {
     if (run && run.state !== "running") finished.current?.focus();
   }, [run]);
+  // What was logged comes off the stock: the tab's "Low" badge catches up.
+  const router = useRouter();
+  const ended = run !== null && run.state !== "running";
+  useEffect(() => {
+    if (ended) router.refresh();
+  }, [ended, router]);
 
   function show(next: Loaded, index: number) {
     const sheetRows = next.sheets[index]?.rows ?? [];

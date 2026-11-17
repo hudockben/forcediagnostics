@@ -112,6 +112,16 @@ describe("what the log says", () => {
         { label: "Customers added", value: "2" },
       ],
     });
+    assert.deepEqual(entry("sticker_stock.received", { kind: "sticker", quantity: 50, left: 57, was: 7 }), {
+      summary: "Added 50 stickers to the stock",
+      facts: [{ label: "Left after", value: "57" }],
+    });
+    assert.deepEqual(entry("sticker_stock.counted", { kind: "2", quantity: 1, left: 1, was: 3 }), {
+      summary: "Counted 1 Class 2 plate on hand",
+      facts: [{ label: "Left before the count", value: "3" }],
+    });
+    // The first count of a kind: nothing before it.
+    assert.deepEqual(entry("sticker_stock.counted", { kind: "1", quantity: 40, left: 40, was: null }), { summary: "Counted 40 Class 1 plates on hand", facts: [] });
     assert.equal(entry("supplier.updated", { supplierId: "V100", fields: ["supplierName", "categoryCode"] }).summary, "Changed supplier V100: Supplier Name and Category Code");
     assert.equal(entry("manual.ocr", { title: "RZR XP 1000 Service Manual", pages: [3, 4, 5], pagesGainedText: 2 }).summary, "Read 3 scanned pages of RZR XP 1000 Service Manual");
   });
@@ -164,6 +174,7 @@ describe("what the log says", () => {
     assert.equal(parseAreaFilter(["diagnoses"]), null);
     assert.equal(areaOf("customer_vehicle"), "customers");
     assert.equal(areaOf("user"), "accounts");
+    assert.equal(areaOf("sticker_stock"), "stickers");
     assert.equal(areaOf("estimate"), null);
   });
 

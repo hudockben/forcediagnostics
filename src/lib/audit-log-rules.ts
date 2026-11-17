@@ -20,7 +20,7 @@ export const AUDIT_AREAS = {
   unitList: { label: "Unit List", targetTypes: ["stock_unit"] },
   loc: { label: "LOC", targetTypes: ["loc_unit"] },
   customers: { label: "Customers", targetTypes: ["customer", "customer_vehicle"] },
-  stickers: { label: "Sticker & Plate log", targetTypes: ["sticker"] },
+  stickers: { label: "Sticker & Plate log", targetTypes: ["sticker", "sticker_stock"] },
   suppliers: { label: "Supplier", targetTypes: ["supplier"] },
   accounts: { label: "Accounts and PINs", targetTypes: ["user"] },
   tablets: { label: "Bay tablets", targetTypes: ["device"] },
@@ -108,6 +108,12 @@ const locUnitWords = (d: Record<string, unknown>) => `${str(d.unit) || "a unit"}
 
 // What an entry was: "sticker" (no class) or "Class 1 plate".
 const stickerOrPlate = (plateClass: unknown) => (plateClass === 1 || plateClass === 2 ? `Class ${plateClass} plate` : "sticker");
+
+// "50 stickers" or "1 Class 2 plate", from a stock entry's kind and count.
+const stockOf = (kind: unknown, count: unknown) => {
+  const what = kind === "1" || kind === "2" ? `Class ${kind} plate` : "sticker";
+  return `${num(count).toLocaleString("en-US")} ${what}${num(count) === 1 ? "" : "s"}`;
+};
 
 // The fields an edit changed, in words: the log names them, never what
 // they were or are.
@@ -216,6 +222,12 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         if (num(d.customersAdded) > 0) fact("Customers added", num(d.customersAdded));
         if (num(d.failed) > 0) fact("Left out", num(d.failed));
         return `Imported stickers and plates from ${str(d.fileName) || "a file"}`;
+      case "sticker_stock.received":
+        fact("Left after", num(d.left));
+        return `Added ${stockOf(d.kind, d.quantity)} to the stock`;
+      case "sticker_stock.counted":
+        if (d.was !== null && d.was !== undefined) fact("Left before the count", num(d.was));
+        return `Counted ${stockOf(d.kind, d.quantity)} on hand`;
 
       // Supplier
       case "supplier.created":

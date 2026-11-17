@@ -358,6 +358,20 @@
       "when": 1794248217309,
       "tag": "0050_stock_units_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1794929189276,
+      "tag": "0051_sticker_plate_stock",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1794929190083,
+      "tag": "0052_sticker_plate_stock_grants",
+      "breakpoints": true
     }
   ]
 }

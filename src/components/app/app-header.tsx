@@ -6,6 +6,20 @@ import { SignOutButton } from "@/components/sign-out-button";
 import { Wordmark } from "@/components/wordmark";
 import { ADMIN_SECTIONS, REPORT_SECTIONS, ROLE_LABELS } from "@/lib/permissions";
 import { allows, getCurrentUser } from "@/lib/session";
+import { getStickerStock } from "@/lib/sticker-log";
+import { lowStockMessage } from "@/lib/sticker-log-rules";
+
+// "Getting low: 7 stickers left." when stickers or plates the shop counted
+// are running low, for the Sticker & Plate log tab's badge. If the stock
+// can't be read, no badge: the header still shows.
+async function stickerStockAlert(shopId: string) {
+  try {
+    return lowStockMessage(await getStickerStock(shopId)) ?? undefined;
+  } catch (error) {
+    console.error("Couldn't read the sticker and plate stock", error);
+    return undefined;
+  }
+}
 
 
 function HeaderFrame({ user, tabs }: { user?: ReactNode; tabs?: ReactNode }) {
@@ -30,6 +44,7 @@ export async function AppHeader() {
   const user = await getCurrentUser();
   const firstAdminSection = ADMIN_SECTIONS.find((section) => allows(user, section.capability));
   const firstReport = REPORT_SECTIONS.find((section) => allows(user, section.capability));
+  const stockAlert = allows(user, "repair_orders.intake") ? await stickerStockAlert(user.shop.id) : undefined;
   const tabs: NavItem[] = [
     { href: "/home", label: "Home", section: "/home" },
     ...(allows(user, "diagnostics.work") ? [{ href: "/diagnose", label: "Diagnose", section: "/diagnose" }] : []),
@@ -48,7 +63,7 @@ export async function AppHeader() {
     ...(allows(user, "repair_orders.intake")
       ? [
           { href: "/customers", label: "Customers", section: "/customers" },
-          { href: "/sticker-plate-log", label: "Sticker & Plate log", section: "/sticker-plate-log" },
+          { href: "/sticker-plate-log", label: "Sticker & Plate log", section: "/sticker-plate-log", alert: stockAlert },
         ]
       : []),
     // The salesmen's bonuses and how long diagnoses take, just left of

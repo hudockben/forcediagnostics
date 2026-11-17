@@ -15,7 +15,7 @@ import { after, before, describe, test } from "node:test";
 import { and, eq, sql } from "drizzle-orm";
 
 import { systemDb, withShop } from "../src/db";
-import { auditLog, customers, shops, stickerPlateLog, users } from "../src/db/schema";
+import { auditLog, customers, shops, stickerPlateLog, stickerPlateStock, users } from "../src/db/schema";
 import { parseCsv } from "../src/lib/csv";
 import { detectDelimiter, pastedDelimiter, readSpreadsheet } from "../src/lib/customer-import-rules";
 import { createCustomer, removeCustomer } from "../src/lib/customers";
@@ -36,6 +36,7 @@ import {
 import {
   exportStickerLog,
   getStickerEntry,
+  getStickerStock,
   importStickers,
   listStickerLog,
   logSticker,
@@ -43,8 +44,21 @@ import {
   searchCustomersForLog,
   stickersForCustomer,
   updateSticker,
+  updateStickerStock,
 } from "../src/lib/sticker-log";
-import { checkStickerEntry, entryLabel, normalizeSticker, parseKindFilter, stickerLogCsv, type EntryKind } from "../src/lib/sticker-log-rules";
+import {
+  checkStickerEntry,
+  checkStockUpdate,
+  entryLabel,
+  isLowStock,
+  lowStockMessage,
+  normalizeSticker,
+  parseKindFilter,
+  stickerLogCsv,
+  stockLeft,
+  type EntryKind,
+  type StockLevel,
+} from "../src/lib/sticker-log-rules";
 
 const pasted = (lines: string[]) => {
   const text = lines.join("\n");
@@ -119,6 +133,38 @@ const SHEET = [
   "T280409\tHohman, Dennis\t\t4A774\tBenanti, Anthony - returned\t\t93Y39\tNeiderhiser, Charles",
   "\t\t\t\t\t\t93Y83\tPowell & Associates",
 ].join("\n");
+
+describe("the rules for stock on hand", () => {
+  test("stock is received (added) or counted (what's on the shelf), a whole number of stickers or one class of plates", () => {
+    assert.deepEqual(checkStockUpdate({ kind: "sticker", mode: "received", quantity: " 1,000 " }), { update: { kind: "sticker", mode: "received", quantity: 1000 } });
+    assert.deepEqual(checkStockUpdate({ kind: "2", mode: "counted", quantity: "0" }), { update: { kind: "2", mode: "counted", quantity: 0 } });
+    // A delivery of none is a mistake; a count of none is an empty shelf.
+    assert.deepEqual(checkStockUpdate({ kind: "1", mode: "received", quantity: "0" }), { error: "Enter how many were received." });
+    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "" }));
+    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "-3" }));
+    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "2.5" }));
+    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "100001" }));
+    assert.ok("error" in checkStockUpdate({ kind: "3", mode: "counted", quantity: "5" }));
+    assert.ok("error" in checkStockUpdate({ kind: "sticker", mode: "used", quantity: "5" }));
+  });
+
+  test("under 10 left is getting low, and says what's left of each", () => {
+    const level = (kind: EntryKind, counted: number, used: number): StockLevel => ({ kind, counted, used, countedAt: new Date() });
+    assert.equal(isLowStock(level("sticker", 20, 10)), false);
+    assert.equal(isLowStock(level("sticker", 20, 11)), true);
+    assert.equal(stockLeft(level("sticker", 20, 11)), 9);
+    // More logged than counted is none left, not fewer than none.
+    assert.equal(stockLeft(level("2", 3, 5)), 0);
+    assert.equal(lowStockMessage([]), null);
+    assert.equal(lowStockMessage([level("sticker", 50, 2), level("1", 10, 0)]), null);
+    assert.equal(lowStockMessage([level("sticker", 20, 11)]), "Getting low: 9 stickers left.");
+    // In the log's order, whatever order they come in.
+    assert.equal(
+      lowStockMessage([level("2", 3, 5), level("1", 1, 0), level("sticker", 7, 0)]),
+      "Getting low: 7 stickers, 1 Class 1 plate and 0 Class 2 plates left.",
+    );
+  });
+});
 
 describe("importing a log: the rules", () => {
   test("headings name the lists and their columns, side by side", () => {
@@ -458,6 +504,79 @@ describe("the log", () => {
     );
     const [{ count }] = await systemDb.select({ count: sql<number>`count(*)::int` }).from(stickerPlateLog).where(eq(stickerPlateLog.shopId, writer.shop.id));
     assert.ok(count >= 6);
+  });
+
+  test("stock: counted, then each one logged after comes off; deliveries add to it; under 10 is low", async () => {
+    const shop = await createWriter(`st${suffix}`);
+    const someone = await customer(shop, "Gus Novak");
+    const left = async () => Object.fromEntries((await getStickerStock(shop.shop.id)).map((level) => [level.kind, stockLeft(level)]));
+    const log = async (stickerNumber: string, plateClass: string) => {
+      const logged = await logSticker(shop, { stickerNumber, plateClass, customerId: someone });
+      assert.ok("id" in logged, JSON.stringify(logged));
+      return logged.id;
+    };
+    // Logged before anything is counted: nothing is tracked, so nothing warns.
+    await log("S-100", "sticker");
+    assert.deepEqual(await getStickerStock(shop.shop.id), []);
+
+    assert.deepEqual(await updateStickerStock(shop, { kind: "sticker", mode: "counted", quantity: "12" }), { left: 12, message: "Counted 12 stickers on hand." });
+    await log("S-101", "sticker");
+    await log("S-102", "sticker");
+    const third = await log("S-103", "sticker");
+    // A plate isn't a sticker, and plates aren't counted.
+    await log("P-1", "1");
+    assert.deepEqual(await left(), { sticker: 9 });
+    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), "Getting low: 9 stickers left.");
+
+    // A delivery adds to what's on hand; what's logged since the count still comes off.
+    assert.deepEqual(await updateStickerStock(shop, { kind: "sticker", mode: "received", quantity: "50" }), { left: 59, message: "Added 50 stickers: 59 left." });
+    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), null);
+    // A sticker corrected to a plate, or removed, goes back on the shelf.
+    assert.ok("ok" in (await updateSticker(shop, third, { stickerNumber: "S-103", plateClass: "2", customerId: someone })));
+    assert.deepEqual(await left(), { sticker: 60 });
+    assert.ok("ok" in (await removeSticker(shop, third)));
+    assert.deepEqual(await left(), { sticker: 60 });
+
+    // The first delivery of plates starts their count; an import's entries come off too.
+    assert.deepEqual(await updateStickerStock(shop, { kind: "2", mode: "received", quantity: "3" }), { left: 3, message: "Added 3 Class 2 plates: 3 left." });
+    const imported = await importStickers(shop, { importId: randomUUID(), fileName: "log.csv", stickers: [{ row: 2, stickerNumber: "P2-1", customerName: "Gus Novak", phone: null, plateClass: 2 }] });
+    assert.ok("outcomes" in imported, JSON.stringify(imported));
+    assert.deepEqual(await left(), { sticker: 60, 2: 2 });
+    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), "Getting low: 2 Class 2 plates left.");
+
+    // A count replaces it all, from now.
+    assert.deepEqual(await updateStickerStock(shop, { kind: "sticker", mode: "counted", quantity: "5" }), { left: 5, message: "Counted 5 stickers on hand." });
+    const [stickers] = await getStickerStock(shop.shop.id);
+    assert.deepEqual([stickers.kind, stickers.counted, stickers.used], ["sticker", 5, 0]);
+    assert.ok("error" in (await updateStickerStock(shop, { kind: "sticker", mode: "received", quantity: "0" })));
+    assert.ok("error" in (await updateStickerStock(shop, { kind: "sticker", mode: "received", quantity: "99999" })));
+
+    const history = await systemDb
+      .select({ action: auditLog.action, targetType: auditLog.targetType, details: auditLog.details })
+      .from(auditLog)
+      .where(and(eq(auditLog.shopId, shop.shop.id), eq(auditLog.targetType, "sticker_stock")))
+      .orderBy(auditLog.seq);
+    assert.deepEqual(history, [
+      { action: "sticker_stock.counted", targetType: "sticker_stock", details: { kind: "sticker", quantity: 12, left: 12, was: null } },
+      { action: "sticker_stock.received", targetType: "sticker_stock", details: { kind: "sticker", quantity: 50, left: 59, was: 9 } },
+      { action: "sticker_stock.received", targetType: "sticker_stock", details: { kind: "2", quantity: 3, left: 3, was: null } },
+      { action: "sticker_stock.counted", targetType: "sticker_stock", details: { kind: "sticker", quantity: 5, left: 5, was: 60 } },
+    ]);
+
+    // Another shop sees none of it, and its counts are its own.
+    assert.deepEqual(await getStickerStock(other.shop.id), []);
+    assert.ok("left" in (await updateStickerStock(other, { kind: "sticker", mode: "counted", quantity: "2" })));
+    assert.deepEqual(await left(), { sticker: 5, 2: 2 });
+    // A row never changes shop or what it counts, and isn't removed.
+    await assert.rejects(
+      withShop(shop.shop.id, (tx) => tx.update(stickerPlateStock).set({ kind: "1" }).where(eq(stickerPlateStock.kind, "sticker"))),
+      (error: unknown) => /permission denied/.test(String((error as { cause?: unknown }).cause)),
+    );
+    await assert.rejects(
+      withShop(shop.shop.id, (tx) => tx.delete(stickerPlateStock)),
+      (error: unknown) => /permission denied/.test(String((error as { cause?: unknown }).cause)),
+    );
+    await assert.rejects(withShop(shop.shop.id, (tx) => tx.insert(stickerPlateStock).values({ shopId: other.shop.id, kind: "1", counted: 4 })));
   });
 
   const row = (n: number, stickerNumber: string, customerName: string, plateClass: 1 | 2 | null, phone: string | null = null): StickerImportRow => ({
