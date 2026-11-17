@@ -112,6 +112,26 @@ describe("what the log says", () => {
         { label: "Customers added", value: "2" },
       ],
     });
+    assert.equal(
+      entry("sticker.logged", { stickerNumber: "T280377", plateClass: null, fromStock: true }).summary,
+      "Handed out sticker T280377 from stock",
+    );
+    assert.deepEqual(entry("stickers.stocked", { plateClass: 1, from: "90W10", to: "90W59", added: 48, already: 2 }), {
+      summary: "Added 48 Class 1 plates to stock",
+      facts: [
+        { label: "Numbers", value: "90W10 to 90W59" },
+        { label: "Already in the log", value: "2" },
+      ],
+    });
+    assert.deepEqual(entry("stickers.stocked", { plateClass: null, from: "T1", to: "T1", added: 1, already: 0 }), {
+      summary: "Added 1 sticker to stock",
+      facts: [{ label: "Numbers", value: "T1" }],
+    });
+    assert.deepEqual(entry("stickers.imported", { fileName: "sheet.xlsx", logged: 4, stocked: 30, already: 0, customersAdded: 0, failed: 0 }).facts, [
+      { label: "Logged", value: "4" },
+      { label: "On hand", value: "30" },
+      { label: "Already in the log", value: "0" },
+    ]);
     assert.deepEqual(entry("sticker_stock.received", { kind: "sticker", quantity: 50, left: 57, was: 7 }), {
       summary: "Added 50 stickers to the stock",
       facts: [{ label: "Left after", value: "57" }],

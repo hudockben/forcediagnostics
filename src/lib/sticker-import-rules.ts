@@ -6,7 +6,9 @@
 // plates in the next (Class 1 Plate, Customer Name) and Class 2 plates in
 // another, a row's sticker and plates nothing to do with each other. Each
 // number column is a list, and the Customer Name, Phone and Type columns
-// after it, up to the next number column, are its. No server imports: the
+// after it, up to the next number column, are its. A number with no
+// customer beside it is one the shop has on hand, not handed out yet. No
+// server imports: the
 // browser plans the import to show what will happen, and the server checks
 // every entry again as it saves them (importStickers in
 // src/lib/sticker-log.ts).
@@ -138,26 +140,28 @@ export { personKey } from "@/lib/customer-import-rules";
 
 // One sticker or plate of an import, as the browser sends it: the number
 // as the log keeps it, what it is (a plate's class, or null for a
-// sticker), and whose it is, with the sheet row it's on.
+// sticker), and whose it is (null for one on hand), with the sheet row
+// it's on.
 export type StickerImportRow = {
   row: number;
   stickerNumber: string;
-  customerName: string;
+  customerName: string | null;
   phone: string | null;
   plateClass: PlateClass | null;
 };
 export type StickerImportNote = { row: number; message: string };
 export type StickerImportPlan = { stickers: StickerImportRow[]; notes: StickerImportNote[]; rowsRead: number };
 
-export type StickerImportEntry = { stickerNumber: string; plateClass: PlateClass | null; customer: CustomerFields };
+export type StickerImportEntry = { stickerNumber: string; plateClass: PlateClass | null; customer: CustomerFields | null };
 
 // An entry checked the way the log's form checks one and Customers checks
-// a name and a phone number. The server checks each entry it's sent with
-// this, whatever the browser did.
+// a name and a phone number; no name is one on hand. The server checks
+// each entry it's sent with this, whatever the browser did.
 export function checkStickerImport(input: unknown): { entry: StickerImportEntry } | { error: string } {
   const value = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const sticker = checkStickerEntry({ stickerNumber: value.stickerNumber, plateClass: value.plateClass });
   if ("error" in sticker) return sticker;
+  if (value.customerName === null || value.customerName === undefined || value.customerName === "") return { entry: { ...sticker.entry, customer: null } };
   const customer = checkCustomer({
     name: value.customerName,
     phone: value.phone ?? "",
@@ -186,7 +190,8 @@ const RETURNED = /\b(?:returned|void(?:ed)?)\b/i;
 // row with nothing in a list's columns is no entry of that list. What an
 // entry is comes from the list's Type column, else its number column
 // (Sticker #, Class 1 or Class 2 Plate), else the choice on the page
-// (picked). An entry without a number, a name or a type, one marked
+// (picked). A number without a name is on hand: the shop has it, not
+// handed out yet. An entry without a number or a type, one marked
 // returned, or a number already on an earlier entry (only the first is
 // logged) is left out, with a note. A phone number that isn't one is left
 // out, keeping the entry.
@@ -229,10 +234,6 @@ export function planStickerImport(
         note(`No ${STICKER_IMPORT_LABELS[list.field]} for ${quoted(name)}: left out.`);
         continue;
       }
-      if (!name) {
-        note(`No Customer Name for ${what}: left out.`);
-        continue;
-      }
       if (RETURNED.test(name) || RETURNED.test(number)) {
         note(`${what.charAt(0).toUpperCase()}${what.slice(1)} is marked returned: left out.`);
         continue;
@@ -247,9 +248,10 @@ export function planStickerImport(
         note(`${ENTRY_KIND_LABELS[kind]} ${quoted(number)}: ${sticker.error} Left out.`);
         continue;
       }
-      const typedPhone = normalizePhone(phone);
+      // A phone number with nobody's name beside it is nobody's.
+      const typedPhone = name ? normalizePhone(phone) : { phone: null };
       if ("error" in typedPhone) note(`Phone ${quoted(phone)} left out: ${typedPhone.error}`);
-      const checked = checkStickerImport({ stickerNumber: number, customerName: name, phone: "error" in typedPhone ? "" : phone, plateClass });
+      const checked = checkStickerImport({ stickerNumber: number, customerName: name, phone: "error" in typedPhone || !name ? "" : phone, plateClass });
       if ("error" in checked) {
         note(`Customer Name ${quoted(name)}: ${checked.error} Left out.`);
         continue;
@@ -257,14 +259,15 @@ export function planStickerImport(
       const { stickerNumber, customer } = checked.entry;
       const earlier = byNumber.get(stickerNumber);
       if (earlier) {
+        const samePerson = earlier.customerName === null ? customer === null : customer !== null && personKey(earlier.customerName) === personKey(customer.name);
         note(
-          personKey(earlier.customerName) === personKey(customer.name) && earlier.plateClass === plateClass
+          samePerson && earlier.plateClass === plateClass
             ? `${entryLabel(plateClass)} ${stickerNumber} is on row ${earlier.row} too: logged once.`
-            : `${stickerNumber} is also on row ${earlier.row}, as a ${entryWords(earlier.plateClass)} for ${earlier.customerName}: only that one is logged.`,
+            : `${stickerNumber} is also on row ${earlier.row}, as a ${entryWords(earlier.plateClass)} ${earlier.customerName === null ? "on hand" : `for ${earlier.customerName}`}: only that one is logged.`,
         );
         continue;
       }
-      const entry: StickerImportRow = { row, stickerNumber, customerName: customer.name, phone: customer.phone, plateClass };
+      const entry: StickerImportRow = { row, stickerNumber, customerName: customer?.name ?? null, phone: customer?.phone ?? null, plateClass };
       byNumber.set(stickerNumber, entry);
       stickers.push(entry);
     }
@@ -288,9 +291,10 @@ export const MAX_STICKER_IMPORT_BATCH = 500;
 // What the server did with each entry of an import batch.
 export type StickerImportOutcome = {
   row: number;
-  // logged: added to the log; already: that number is in the log already
-  // (left as it is); failed: left out.
-  result: "logged" | "already" | "failed";
+  // logged: logged to its customer (added to the log, or handed out from
+  // stock); stocked: added on hand; already: that number is in the log
+  // already (left as it is); failed: left out.
+  result: "logged" | "stocked" | "already" | "failed";
   // For one logged: its customer was found on Customers, or added.
   customer: "found" | "added" | null;
   // Why it was left out, or how the log's entry differs from the file.

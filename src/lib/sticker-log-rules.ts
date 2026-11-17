@@ -59,7 +59,9 @@ export const parseKindFilter = (value: unknown): EntryKind | null =>
 
 export type StickerLogRow = {
   stickerNumber: string;
-  customerName: string;
+  // Null for one on hand (not handed out yet): a blank Customer Name, as
+  // the shop's sheet keeps them, so it comes back in on hand.
+  customerName: string | null;
   plateClass: PlateClass | null;
   createdAt: Date;
   createdBy: string | null;
@@ -79,7 +81,7 @@ export function stickerLogCsv(rows: StickerLogRow[], timeZone = "America/New_Yor
   const lines = [
     "Sticker / Plate #,Customer Name,Type,Logged,Logged by",
     ...rows.map((row) =>
-      [row.stickerNumber, row.customerName, entryLabel(row.plateClass), day.format(row.createdAt), row.createdBy ?? ""].map(field).join(","),
+      [row.stickerNumber, row.customerName ?? "", entryLabel(row.plateClass), day.format(row.createdAt), row.createdBy ?? ""].map(field).join(","),
     ),
   ];
   return `﻿${lines.join("\r\n")}\r\n`;
@@ -87,46 +89,25 @@ export function stickerLogCsv(rows: StickerLogRow[], timeZone = "America/New_Yor
 
 // --- Stock on hand ------------------------------------------------------------
 
-// How many of each are on hand: the number counted on the shelf (plus any
-// received since), less each one logged after that count. A kind nobody
-// has counted isn't tracked, and never warns. Below LOW_STOCK_BELOW left,
-// the tab and the log say it's getting low.
+// A sticker or plate on hand is one in the log with no customer yet: a
+// number the shop has, as its sheet lists them with the Customer Name
+// blank. Logging it for a customer hands it out. A kind the shop has kept
+// in stock (any of its numbers ever on hand) warns below LOW_STOCK_BELOW
+// on hand; a kind it never has, never does.
 export const LOW_STOCK_BELOW = 10;
-export const MAX_STOCK = 100_000;
 
-export const STOCK_MODES = ["received", "counted"] as const;
-export type StockMode = (typeof STOCK_MODES)[number];
-
-export type StockUpdate = { kind: EntryKind; mode: StockMode; quantity: number };
-
-// What the stock form sends, checked: what it is, received (added to what's
-// on hand) or counted (what's on the shelf now), and how many.
-export function checkStockUpdate(input: { kind: unknown; mode: unknown; quantity: unknown }): { update: StockUpdate } | { error: string } {
-  const kind = parseKindFilter(input.kind);
-  if (!kind) return { error: "Pick what it is: stickers, or Class 1 or Class 2 plates." };
-  const mode = (STOCK_MODES as readonly unknown[]).includes(input.mode) ? (input.mode as StockMode) : null;
-  if (!mode) return { error: "Pick whether these were received or counted on hand." };
-  const text = String(input.quantity ?? "").replace(/,/g, "").trim();
-  if (!/^\d+$/.test(text)) return { error: "Enter how many, as a whole number." };
-  const quantity = Number(text);
-  if (mode === "received" && quantity === 0) return { error: "Enter how many were received." };
-  if (quantity > MAX_STOCK) return { error: `That's more than ${MAX_STOCK.toLocaleString("en-US")}.` };
-  return { update: { kind, mode, quantity } };
-}
+// The log's ?status=: the stickers and plates handed out (the default), or
+// the ones on hand.
+export const parseOnHandFilter = (value: unknown) => value === "on-hand";
 
 export type StockLevel = {
   kind: EntryKind;
-  // On hand when last counted, plus any received since.
-  counted: number;
-  countedAt: Date;
-  // Logged since that count.
-  used: number;
+  onHand: number;
+  // The next to hand out: the first of them added (the sheet's order).
+  next: string | null;
 };
 
-// Left on the shelf; never below none (more logged than counted means a
-// delivery wasn't added or the count is off).
-export const stockLeft = (level: Pick<StockLevel, "counted" | "used">) => Math.max(0, level.counted - level.used);
-export const isLowStock = (level: Pick<StockLevel, "counted" | "used">) => level.counted - level.used < LOW_STOCK_BELOW;
+export const isLowStock = (level: Pick<StockLevel, "onHand">) => level.onHand < LOW_STOCK_BELOW;
 
 // "1 sticker", "7 stickers", "1 Class 1 plate", "0 Class 2 plates".
 export const stockWords = (kind: EntryKind, count: number) =>
@@ -136,14 +117,43 @@ const listWords = (items: string[]) =>
   items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 
 // What's getting low, in the log's order (stickers, then each class of
-// plates); empty when nothing counted is.
+// plates); empty when nothing kept in stock is.
 export const lowStock = (levels: StockLevel[]) =>
   ENTRY_KINDS.flatMap((kind) => levels.filter((level) => level.kind === kind && isLowStock(level)));
 
 // "Getting low: 7 stickers and 0 Class 2 plates left." for the log, the
-// tab's badge and a screen reader; null when nothing counted is low.
+// tab's badge and a screen reader; null when nothing kept in stock is low.
 export function lowStockMessage(levels: StockLevel[]): string | null {
   const low = lowStock(levels);
   if (low.length === 0) return null;
-  return `Getting low: ${listWords(low.map((level) => stockWords(level.kind, stockLeft(level))))} left.`;
+  return `Getting low: ${listWords(low.map((level) => stockWords(level.kind, level.onHand)))} left.`;
+}
+
+// Adding a delivery to stock: one number, or a run of them from the first
+// to the last ("T280400" to "T280449"), counting up the digits at the end
+// and keeping everything before them, and the first's leading zeros.
+export const MAX_STOCK_ADD = 500;
+
+export function stockRange(fromText: unknown, toText: unknown): { numbers: string[] } | { error: string } {
+  const from = normalizeSticker(fromText);
+  const to = normalizeSticker(toText);
+  if (!from) return { error: "Enter the first number." };
+  for (const number of to ? [from, to] : [from]) {
+    const checked = checkStickerEntry({ stickerNumber: number, plateClass: null });
+    if ("error" in checked) return { error: `${number}: ${checked.error}` };
+  }
+  if (!to || to === from) return { numbers: [from] };
+  const [, fromPrefix, fromDigits] = /^(.*?)(\d+)$/.exec(from) ?? [];
+  const [, toPrefix, toDigits] = /^(.*?)(\d+)$/.exec(to) ?? [];
+  if (fromDigits === undefined || toDigits === undefined) return { error: "A run of numbers ends in digits, to count up: T280400 to T280449." };
+  if (fromPrefix !== toPrefix) return { error: `${from} and ${to} don't start the same, so they aren't one run.` };
+  const [first, last] = [Number(fromDigits), Number(toDigits)];
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last)) return { error: "Those numbers are too long to count up." };
+  if (last < first) return { error: `${to} comes before ${from}.` };
+  if (last - first + 1 > MAX_STOCK_ADD) return { error: `That's ${(last - first + 1).toLocaleString("en-US")} numbers; add up to ${MAX_STOCK_ADD} at a time.` };
+  const numbers: string[] = [];
+  for (let at = first; at <= last; at++) numbers.push(`${fromPrefix}${String(at).padStart(fromDigits.length, "0")}`);
+  const tooLong = numbers.find((number) => number.length > MAX_STICKER_LENGTH);
+  if (tooLong) return { error: `${tooLong}: That number is too long.` };
+  return { numbers };
 }

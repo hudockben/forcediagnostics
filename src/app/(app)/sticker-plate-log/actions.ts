@@ -6,9 +6,9 @@ import { redirect, unstable_rethrow } from "next/navigation";
 
 import { requireCapability } from "@/lib/session";
 import type { StickerImportOutcome } from "@/lib/sticker-import-rules";
-import { importStickers, logSticker, removeSticker, searchCustomersForLog, updateSticker, updateStickerStock, type CustomerChoice } from "@/lib/sticker-log";
+import { addStock, importStickers, logSticker, removeSticker, searchCustomersForLog, updateSticker, type CustomerChoice } from "@/lib/sticker-log";
 
-export type FormState = { error?: string; success?: string; logged?: string };
+export type FormState = { error?: string; success?: string; logged?: string; fromStock?: boolean };
 
 const field = (form: FormData, name: string) => String(form.get(name) ?? "");
 
@@ -39,7 +39,7 @@ export async function logStickerAction(_previous: FormState, form: FormData): Pr
     const result = await logSticker(user, entryFields(form));
     if ("error" in result) return { error: result.error };
     refresh();
-    return { success: "Logged.", logged: result.id };
+    return { success: "Logged.", logged: result.id, fromStock: result.fromStock };
   });
 }
 
@@ -62,15 +62,15 @@ export async function removeStickerAction(_previous: FormState, form: FormData):
   });
 }
 
-// A delivery received, or a count of what's on the shelf. The refresh
+// A delivery added to stock: one number, or a run of them. The refresh
 // brings the tab's badge and the log's warning up to date.
-export async function updateStockAction(_previous: FormState, form: FormData): Promise<FormState> {
-  return attempt("save the stock", async () => {
+export async function addStockAction(_previous: FormState, form: FormData): Promise<FormState> {
+  return attempt("add to stock", async () => {
     const user = await requireCapability("repair_orders.intake");
-    const result = await updateStickerStock(user, { kind: field(form, "kind"), mode: field(form, "mode"), quantity: field(form, "quantity") });
+    const result = await addStock(user, { kind: field(form, "kind"), from: field(form, "from"), to: field(form, "to") });
     if ("error" in result) return { error: result.error };
     refresh();
-    return { success: result.message };
+    return result.added > 0 ? { success: result.message } : { error: result.message };
   });
 }
 

@@ -98,7 +98,10 @@ export function StickerImport() {
   // the choice on the page.
   const open = lists.filter((list) => list.field === "number");
   const needsKind = open.some((list) => list.type === null);
-  const ready = named.length > 0 && (!needsKind || kind !== null);
+  const ready = lists.length > 0 && (!needsKind || kind !== null);
+  // Handed out (a customer beside them), and on hand (none).
+  const toLog = useMemo(() => plan?.stickers.filter((entry) => entry.customerName !== null) ?? [], [plan]);
+  const toStock = useMemo(() => plan?.stickers.filter((entry) => entry.customerName === null) ?? [], [plan]);
   // A few of each, for the preview.
   const preview = useMemo(
     () => (plan ? ENTRY_KINDS.flatMap((each) => plan.stickers.filter((entry) => kindOf(entry.plateClass) === each).slice(0, 4)) : []),
@@ -240,6 +243,7 @@ export function StickerImport() {
     const count = (result: StickerImportOutcome["result"]) => run.outcomes.filter((outcome) => outcome.result === result).length;
     const customersAdded = run.outcomes.filter((outcome) => outcome.customer === "added").length;
     const logged = run.outcomes.flatMap((outcome, index) => (outcome.result === "logged" && run.entries[index] ? [run.entries[index]] : []));
+    const stocked = run.outcomes.flatMap((outcome, index) => (outcome.result === "stocked" && run.entries[index] ? [run.entries[index]] : []));
     return (
       <section className="space-y-4 rounded-xl border border-white/10 bg-charcoal-900/70 p-5 sm:p-6" data-sticker-import-finished={run.state}>
         <h2 ref={finished} tabIndex={-1} className="text-base font-semibold text-ink focus:outline-none">
@@ -255,6 +259,11 @@ export function StickerImport() {
           <li>
             <Badge tone="glow">{logged.length > 0 ? `${countByKind(logged)} logged` : "Nothing new logged"}</Badge>
           </li>
+          {stocked.length > 0 && (
+            <li>
+              <Badge tone="glow">{`${countByKind(stocked)} on hand`}</Badge>
+            </li>
+          )}
           <li>
             <Badge>{plural(count("already"), "already in the log", "already in the log")}</Badge>
           </li>
@@ -481,15 +490,17 @@ export function StickerImport() {
             <div className="mt-4">
               <Notice tone="trail">Pick the column with the numbers: Sticker #, Class 1 Plate # or Class 2 Plate #, with its Customer Name after it.</Notice>
             </div>
-          ) : named.length === 0 ? (
+          ) : needsKind && !kind ? (
             <div className="mt-4">
-              <Notice tone="trail">Pick the Customer Name column that goes with the numbers, after them.</Notice>
+              <Notice tone="trail">Nothing on this list says whether it&apos;s stickers or plates: pick what&apos;s on it above.</Notice>
             </div>
           ) : (
-            needsKind &&
-            !kind && (
+            named.length === 0 && (
               <div className="mt-4">
-                <Notice tone="trail">Nothing on this list says whether it&apos;s stickers or plates: pick what&apos;s on it above.</Notice>
+                <Notice tone="trail">
+                  No Customer Name column: every number comes in on hand, not handed out. If the sheet has the customers&apos; names, pick that column, after the
+                  numbers.
+                </Notice>
               </div>
             )
           )}
@@ -501,7 +512,9 @@ export function StickerImport() {
           <h2 className="text-base font-semibold text-ink">3. Import</h2>
           <div aria-busy={planning} className={`mt-4 space-y-4 ${planning ? "opacity-60" : ""}`}>
             <p className="text-sm leading-6 text-ink" data-sticker-import-summary>
-              {plural(plan.rowsRead, "row", "rows")} read: {countByKind(plan.stickers)} to log. A number already in the log is left as it is. Each
+              {plural(plan.rowsRead, "row", "rows")} read: {countByKind(toLog)} to log
+              {toStock.length > 0 && <>, and {countByKind(toStock)} on hand (no customer beside {toStock.length === 1 ? "it" : "them"}: not handed out yet)</>}. A
+              number already in the log is left as it is, unless it&apos;s on hand there and this names its customer: then it&apos;s handed out. Each
               customer is found on Customers by name{hasPhone ? " and phone number" : ""}; anyone who isn&apos;t there is added.
             </p>
             {plan.stickers.length > 0 && (
@@ -531,7 +544,7 @@ export function StickerImport() {
                       <tr key={`${sticker.row}-${sticker.stickerNumber}`}>
                         <td className="px-3 py-2 pl-5 text-ink-muted sm:pl-6">{entryLabel(sticker.plateClass)}</td>
                         <td className="px-3 py-2 font-mono break-words text-ink">{sticker.stickerNumber}</td>
-                        <td className="px-3 py-2 break-words text-ink">{sticker.customerName}</td>
+                        <td className="px-3 py-2 break-words text-ink">{sticker.customerName ?? <span className="text-ink-muted">On hand</span>}</td>
                         {hasPhone && <td className="px-3 py-2 break-words text-ink">{sticker.phone ?? <span className="text-ink-muted">—</span>}</td>}
                       </tr>
                     ))}

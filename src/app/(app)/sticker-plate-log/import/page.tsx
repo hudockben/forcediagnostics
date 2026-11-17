@@ -26,7 +26,7 @@ async function ImportStickers() {
       </Link>
       <PageHeading
         title="Import stickers and plates"
-        description="Bring in the stickers and plates kept in a spreadsheet: a CSV or Excel file, or the rows pasted from one. Lists side by side (stickers, Class 1 plates, Class 2 plates) come in together, each number with the customer beside it. Numbers already in the log are left as they are, so importing the same file again adds nothing new."
+        description="Bring in the stickers and plates kept in a spreadsheet: a CSV or Excel file, or the rows pasted from one. Lists side by side (stickers, Class 1 plates, Class 2 plates) come in together, each number with the customer beside it; a number with no customer beside it is one on hand, not handed out yet. Numbers already in the log are left as they are, so importing the same file again adds nothing new."
       />
       <StickerImport />
     </div>

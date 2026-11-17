@@ -9,23 +9,21 @@ import {
   ENTRY_KIND_LABELS,
   ENTRY_KIND_PLURALS,
   MAX_STICKER_LENGTH,
-  MAX_STOCK,
   classOf,
   entryWords,
   kindOf,
   normalizeSticker,
   type EntryKind,
   type PlateClass,
-  type StockMode,
 } from "@/lib/sticker-log-rules";
 import { useFormAction } from "@/lib/use-form-action";
 
 import {
+  addStockAction,
   logStickerAction,
   removeStickerAction,
   saveStickerAction,
   searchLogCustomersAction,
-  updateStockAction,
   type FormState,
 } from "./actions";
 
@@ -256,18 +254,32 @@ function KindChoice({ value, onChange }: { value: EntryKind | null; onChange: (v
   );
 }
 
-type SavedEntry = { id: string; stickerNumber: string; plateClass: PlateClass | null; customer: CustomerChoice };
+// customer: null for one on hand.
+type SavedEntry = { id: string; stickerNumber: string; plateClass: PlateClass | null; customer: CustomerChoice | null };
 
 // Logs a sticker or plate, or corrects one. After logging, the form is
 // ready for the next: the number and customer are cleared and what it is
-// stays, as a run is often all stickers or all one class of plate.
-export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; initialCustomer?: CustomerChoice | null }) {
+// stays, as a run is often all stickers or all one class of plate. A
+// number on hand is handed out by logging it: nextOnHand offers the next
+// of the kind picked. An entry on hand can be corrected with no customer
+// (it stays on hand), or handed out to the customer picked.
+export function StickerForm({
+  entry,
+  initialCustomer,
+  nextOnHand = {},
+}: {
+  entry?: SavedEntry;
+  initialCustomer?: CustomerChoice | null;
+  nextOnHand?: Partial<Record<EntryKind, string>>;
+}) {
   const { state, pending, formProps } = useFormAction<FormState>(entry ? saveStickerAction : logStickerAction, {});
   const [sticker, setSticker] = useState(entry?.stickerNumber ?? "");
   const [kind, setKind] = useState<EntryKind | null>(entry ? kindOf(entry.plateClass) : null);
   const [picked, setPicked] = useState<Picked>(
-    entry ? { kind: "existing", customer: entry.customer } : initialCustomer ? { kind: "existing", customer: initialCustomer } : null,
+    entry?.customer ? { kind: "existing", customer: entry.customer } : !entry && initialCustomer ? { kind: "existing", customer: initialCustomer } : null,
   );
+  const onHand = entry !== undefined && entry.customer === null;
+  const next = !entry && kind ? nextOnHand[kind] : undefined;
   const stickerInput = useRef<HTMLInputElement>(null);
   // What was sent, to say what was logged.
   const [sent, setSent] = useState("");
@@ -280,7 +292,7 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
   if (seen !== state) {
     setSeen(state);
     if (state.logged) {
-      setMessage({ success: `Logged ${sent}.` });
+      setMessage({ success: `Logged ${sent}${state.fromStock ? ", from stock" : ""}.` });
       setSticker("");
       setPicked(initialCustomer ? { kind: "existing", customer: initialCustomer } : null);
     } else {
@@ -297,7 +309,7 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
       onSubmit={(event) => {
         const name = picked?.kind === "existing" ? picked.customer.name : picked?.kind === "new" ? picked.name : "";
         setSent(`${kind ? entryWords(classOf(kind)) : "sticker"} ${normalizeSticker(sticker)} for ${name}`);
-        if (!picked) {
+        if (!picked && !onHand) {
           event.preventDefault();
           setMessage({ error: "Pick the customer it went to, or add them." });
           return;
@@ -329,9 +341,24 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
             className={`${inputClass} font-mono tracking-wide uppercase`}
             data-sticker-number
           />
+          {next && (
+            <p className={hintClass} data-next-on-hand>
+              Next on hand:{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setSticker(next);
+                  stickerInput.current?.focus();
+                }}
+                className="rounded font-mono text-glow hover:underline focus-visible:ring-2 focus-visible:ring-glow/40 focus-visible:outline-none"
+              >
+                {next}
+              </button>
+            </p>
+          )}
         </div>
         <div>
-          <span className={labelClass}>Customer name</span>
+          <span className={labelClass}>Customer name{onHand && " (to hand it out)"}</span>
           <CustomerBox picked={picked} onPick={setPicked} />
         </div>
       </div>
@@ -340,7 +367,7 @@ export function StickerForm({ entry, initialCustomer }: { entry?: SavedEntry; in
       </div>
       <Feedback state={message} />
       <button type="submit" disabled={pending} className={entry ? secondaryButtonClass : primaryButtonClass}>
-        {entry ? (pending ? "Saving…" : "Save changes") : pending ? "Logging…" : "Log it"}
+        {entry ? (pending ? "Saving…" : onHand && picked ? "Hand it out" : "Save changes") : pending ? "Logging…" : "Log it"}
       </button>
     </form>
   );
@@ -385,54 +412,53 @@ export function RemoveStickerForm({ entry }: { entry: { id: string; stickerNumbe
   );
 }
 
-const STOCK_MODE_OPTIONS: { value: StockMode; label: string }[] = [
-  { value: "received", label: "Received (add to stock)" },
-  { value: "counted", label: "Counted on hand" },
-];
-
-// Stock: stickers or a class of plates received (added to what's on hand)
-// or counted on the shelf (what's on hand now, from now on). After saving,
-// the number clears for the next; what it is and how stay.
-export function StockForm() {
-  const { state, pending, formProps } = useFormAction<FormState>(updateStockAction, {});
+// A delivery added to stock, on hand: what they are, and one number or the
+// first and last of a run (T280400 to T280449). After adding, the numbers
+// clear for the next; what they are stays.
+export function AddStockForm() {
+  const { state, pending, formProps } = useFormAction<FormState>(addStockAction, {});
   const [kind, setKind] = useState<EntryKind | null>(null);
-  const [mode, setMode] = useState<StockMode>("received");
-  const [quantity, setQuantity] = useState("");
-  const quantityId = useId();
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const fromId = useId();
+  const toId = useId();
 
   const [seen, setSeen] = useState(state);
   if (seen !== state) {
     setSeen(state);
-    if (state.success) setQuantity("");
+    if (state.success) {
+      setFrom("");
+      setTo("");
+    }
   }
 
+  const numberProps = {
+    maxLength: MAX_STICKER_LENGTH + 4,
+    autoComplete: "off",
+    autoCapitalize: "characters",
+    spellCheck: false,
+    className: `${inputClass} font-mono tracking-wide uppercase`,
+  } as const;
   return (
-    <form {...formProps} className="space-y-4" data-stock-form>
+    <form {...formProps} className="space-y-4" data-add-stock-form>
       <Choices legend="What" name="kind" options={ENTRY_KINDS.map((value) => ({ value, label: ENTRY_KIND_PLURALS[value] }))} value={kind} onChange={setKind} />
-      <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,10rem)] sm:items-end">
-        <Choices legend="How" name="mode" options={STOCK_MODE_OPTIONS} value={mode} onChange={setMode} />
+      <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label htmlFor={quantityId} className={labelClass}>
-            How many
+          <label htmlFor={fromId} className={labelClass}>
+            First #
           </label>
-          <input
-            id={quantityId}
-            name="quantity"
-            value={quantity}
-            onChange={(event) => setQuantity(event.target.value)}
-            required
-            inputMode="numeric"
-            pattern="[0-9,]*"
-            maxLength={String(MAX_STOCK).length + 2}
-            autoComplete="off"
-            className={`${inputClass} font-mono`}
-            data-stock-quantity
-          />
+          <input id={fromId} name="from" value={from} onChange={(event) => setFrom(event.target.value)} {...numberProps} required data-stock-from />
+        </div>
+        <div>
+          <label htmlFor={toId} className={labelClass}>
+            Last # <span className="font-normal text-ink-muted">(for a run)</span>
+          </label>
+          <input id={toId} name="to" value={to} onChange={(event) => setTo(event.target.value)} {...numberProps} data-stock-to />
         </div>
       </div>
       <Feedback state={state} />
       <button type="submit" disabled={pending} className={secondaryButtonClass}>
-        {pending ? "Saving…" : "Save stock"}
+        {pending ? "Adding…" : "Add to stock"}
       </button>
     </form>
   );
@@ -442,7 +468,7 @@ const subscribe = () => () => {};
 
 // Download the log (as searched and filtered) as CSV, its dates in the
 // viewer's own time zone.
-export function ExportLink({ query, kind }: { query: string; kind: EntryKind | null }) {
+export function ExportLink({ query, kind, onHand }: { query: string; kind: EntryKind | null; onHand: boolean }) {
   const timeZone = useSyncExternalStore(
     subscribe,
     () => Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -451,6 +477,7 @@ export function ExportLink({ query, kind }: { query: string; kind: EntryKind | n
   const params = new URLSearchParams();
   if (query) params.set("q", query);
   if (kind) params.set("type", kind);
+  if (onHand) params.set("status", "on-hand");
   if (timeZone) params.set("tz", timeZone);
   const search = params.toString();
   return (
