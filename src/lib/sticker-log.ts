@@ -2,10 +2,10 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
-import { DrizzleQueryError, and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
+import { DrizzleQueryError, and, asc, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 
 import { withShop, type ShopTransaction } from "@/db";
-import { auditLog, customers, stickerPlateLog, stickerPlateStock, users } from "@/db/schema";
+import { auditLog, customers, stickerPlateLog, users } from "@/db/schema";
 import { matchCustomer } from "@/lib/customer-import-rules";
 import { checkCustomer } from "@/lib/customer-rules";
 import { personKeySql } from "@/lib/customers";
@@ -13,16 +13,17 @@ import { containsPattern, listPage, listSearchWords, type ListPage } from "@/lib
 import { isUuid } from "@/lib/diagnose-rules";
 import { cutText } from "@/lib/manual-rules";
 import type { CurrentUser } from "@/lib/session";
-import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, personKey, type StickerImportOutcome } from "@/lib/sticker-import-rules";
+import { MAX_STICKER_IMPORT_BATCH, checkStickerImport, personKey, type StickerImportEntry, type StickerImportOutcome } from "@/lib/sticker-import-rules";
 import {
   ENTRY_KINDS,
-  MAX_STOCK,
+  ENTRY_KIND_LABELS,
   STICKER_LOG_PAGE_SIZE,
   checkStickerEntry,
-  checkStockUpdate,
   classOf,
   entryWords,
-  stockLeft,
+  kindOf,
+  parseKindFilter,
+  stockRange,
   stockWords,
   type EntryKind,
   type PlateClass,
@@ -31,17 +32,21 @@ import {
 } from "@/lib/sticker-log-rules";
 
 // The Sticker & Plate log tab: each registration sticker and plate the
-// shop hands out, tied to the customer it went to; a plate is Class 1 or
-// Class 2, a sticker has no class. Callers check repair_orders.intake first;
-// everything here runs inside withShop for the user's own shop, and every
-// change is written to audit_log.
+// shop hands out, tied to the customer it went to, and the ones it has on
+// hand (no customer yet); a plate is Class 1 or Class 2, a sticker has no
+// class. Callers check repair_orders.intake first; everything here runs
+// inside withShop for the user's own shop, and every change is written to
+// audit_log.
 
 export type StickerEntry = {
   id: string;
   stickerNumber: string;
   plateClass: PlateClass | null;
-  customerId: string;
-  customerName: string;
+  // Both null while it's on hand.
+  customerId: string | null;
+  customerName: string | null;
+  // When it came into stock; null for one logged straight to a customer.
+  receivedAt: Date | null;
   createdAt: Date;
   createdBy: string | null;
 };
@@ -57,6 +62,7 @@ const entryColumns = {
   plateClass: stickerPlateLog.plateClass,
   customerId: stickerPlateLog.customerId,
   customerName: customers.name,
+  receivedAt: stickerPlateLog.receivedAt,
   createdAt: stickerPlateLog.createdAt,
   createdBy: users.name,
 };
@@ -88,25 +94,30 @@ const ofKind = (kind: EntryKind | null) => {
   return plateClass === null ? isNull(stickerPlateLog.plateClass) : eq(stickerPlateLog.plateClass, plateClass);
 };
 
-const filters = (query: string, kind: EntryKind | null) => and(logSearch(query), ofKind(kind));
+// The ones handed out (to a customer), or the ones on hand.
+const filters = (query: string, kind: EntryKind | null, onHand: boolean) =>
+  and(logSearch(query), ofKind(kind), onHand ? isNull(stickerPlateLog.customerId) : isNotNull(stickerPlateLog.customerId));
 
-// One page of the log, the newest first, or of what a search (and a class)
-// finds. A page past the end gives the last one.
+// One page of the log, or of what a search (and a class) finds: the ones
+// handed out, the newest first; or the ones on hand, the next to hand out
+// first (the order they came in, as the shop's sheet lists them). A page
+// past the end gives the last one.
 export async function listStickerLog(
   shopId: string,
   {
     query = "",
     kind = null,
+    onHand = false,
     page = 1,
     perPage = STICKER_LOG_PAGE_SIZE,
-  }: { query?: string; kind?: EntryKind | null; page?: number; perPage?: number } = {},
+  }: { query?: string; kind?: EntryKind | null; onHand?: boolean; page?: number; perPage?: number } = {},
 ): Promise<StickerLog> {
-  const where = filters(query, kind);
+  const where = filters(query, kind, onHand);
   return withShop(shopId, async (tx) => {
     const [{ total }] = await tx
       .select({ total: sql<number>`count(*)::int` })
       .from(stickerPlateLog)
-      .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+      .leftJoin(customers, eq(customers.id, stickerPlateLog.customerId))
       .where(where);
     const at = listPage(total, page, perPage);
     const items =
@@ -115,10 +126,10 @@ export async function listStickerLog(
         : await tx
             .select(entryColumns)
             .from(stickerPlateLog)
-            .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+            .leftJoin(customers, eq(customers.id, stickerPlateLog.customerId))
             .leftJoin(users, eq(users.id, stickerPlateLog.createdByUserId))
             .where(where)
-            .orderBy(desc(stickerPlateLog.createdAt), desc(stickerPlateLog.id))
+            .orderBy(...(onHand ? [asc(stickerPlateLog.createdAt), asc(stickerPlateLog.id)] : [desc(stickerPlateLog.createdAt), desc(stickerPlateLog.id)]))
             .limit(perPage)
             .offset(at.offset);
     return { ...at, total, items };
@@ -127,11 +138,11 @@ export async function listStickerLog(
 
 export const MAX_EXPORT_ROWS = 100_000;
 
-// Everything a search (and a class) finds, for the CSV download, the
-// oldest first, as a log is read.
+// Everything a search (and a class) finds, handed out or on hand, for the
+// CSV download, the oldest first, as a log is read.
 export async function exportStickerLog(
   shopId: string,
-  { query = "", kind = null }: { query?: string; kind?: EntryKind | null } = {},
+  { query = "", kind = null, onHand = false }: { query?: string; kind?: EntryKind | null; onHand?: boolean } = {},
 ): Promise<StickerLogRow[]> {
   return withShop(shopId, (tx) =>
     tx
@@ -143,9 +154,9 @@ export async function exportStickerLog(
         createdBy: users.name,
       })
       .from(stickerPlateLog)
-      .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+      .leftJoin(customers, eq(customers.id, stickerPlateLog.customerId))
       .leftJoin(users, eq(users.id, stickerPlateLog.createdByUserId))
-      .where(filters(query, kind))
+      .where(filters(query, kind, onHand))
       .orderBy(stickerPlateLog.createdAt, stickerPlateLog.id)
       .limit(MAX_EXPORT_ROWS),
   );
@@ -157,7 +168,7 @@ export async function getStickerEntry(shopId: string, id: string): Promise<Stick
     const [row] = await tx
       .select(entryColumns)
       .from(stickerPlateLog)
-      .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+      .leftJoin(customers, eq(customers.id, stickerPlateLog.customerId))
       .leftJoin(users, eq(users.id, stickerPlateLog.createdByUserId))
       .where(eq(stickerPlateLog.id, id));
     return row ?? null;
@@ -210,13 +221,16 @@ export async function getCustomerChoice(shopId: string, id: string): Promise<Cus
   return row ? { id: row.id, name: row.name, detail: [row.phone, row.city].filter(Boolean).join(" · ") || null } : null;
 }
 
+const PICK_CUSTOMER = { error: "Pick the customer it went to, or add them." };
+
 // The customer an entry is for: one of the shop's, or a new one added by
 // name from the log's form (they can be filled in on Customers later).
+// Null when the form names nobody.
 async function customerFor(
   tx: ShopTransaction,
   actor: CurrentUser,
   input: { customerId?: unknown; newCustomerName?: unknown },
-): Promise<{ id: string; name: string } | { error: string }> {
+): Promise<{ id: string; name: string } | null | { error: string }> {
   if (typeof input.customerId === "string" && input.customerId) {
     if (!isUuid(input.customerId)) return NO_CUSTOMER;
     const [found] = await tx.select({ id: customers.id, name: customers.name }).from(customers).where(eq(customers.id, input.customerId));
@@ -239,39 +253,65 @@ async function customerFor(
     });
     return made;
   }
-  return { error: "Pick the customer it went to, or add them." };
+  return null;
+}
+
+// "a Class 1 plate for Dana Whitfield" or "a sticker on hand".
+const whatAndWhose = (entry: { plateClass: PlateClass | null; customerName: string | null }) =>
+  `a ${entryWords(entry.plateClass)} ${entry.customerName === null ? "on hand" : `for ${entry.customerName}`}`;
+
+// The entry with this number, what it is and whose.
+async function findNumber(tx: ShopTransaction, stickerNumber: string) {
+  const [found] = await tx
+    .select({ id: stickerPlateLog.id, plateClass: stickerPlateLog.plateClass, customerId: stickerPlateLog.customerId, customerName: customers.name })
+    .from(stickerPlateLog)
+    .leftJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+    .where(eq(stickerPlateLog.stickerNumber, stickerNumber))
+    .for("update", { of: stickerPlateLog });
+  return found ?? null;
 }
 
 // Another entry with this number, said what it is and whom it went to.
 async function alreadyLogged(tx: ShopTransaction, stickerNumber: string, except?: string) {
-  const [other] = await tx
-    .select({ id: stickerPlateLog.id, plateClass: stickerPlateLog.plateClass, customerName: customers.name })
-    .from(stickerPlateLog)
-    .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
-    .where(eq(stickerPlateLog.stickerNumber, stickerNumber));
-  return other && other.id !== except
-    ? { error: `${stickerNumber} is already in the log, as a ${entryWords(other.plateClass)} for ${other.customerName}.` }
-    : null;
+  const other = await findNumber(tx, stickerNumber);
+  return other && other.id !== except ? { error: `${stickerNumber} is already in the log, as ${whatAndWhose(other)}.` } : null;
 }
 
 export type StickerInput = { stickerNumber: unknown; plateClass: unknown; customerId?: unknown; newCustomerName?: unknown };
 
-export async function logSticker(actor: CurrentUser, input: StickerInput): Promise<{ id: string; customerId: string } | { error: string }> {
+// Logs a sticker or plate for its customer. One on hand (that number, that
+// kind) is handed out: logged to them, now, by whoever logs it.
+export async function logSticker(
+  actor: CurrentUser,
+  input: StickerInput,
+): Promise<{ id: string; customerId: string; fromStock: boolean } | { error: string }> {
   const checked = checkStickerEntry(input);
   if ("error" in checked) return checked;
   const { stickerNumber, plateClass } = checked.entry;
   try {
     return await withShop(actor.shop.id, async (tx) => {
-      const taken = await alreadyLogged(tx, stickerNumber);
-      if (taken) return taken;
+      const found = await findNumber(tx, stickerNumber);
+      if (found && found.customerId !== null) return { error: `${stickerNumber} is already in the log, as ${whatAndWhose(found)}.` };
+      if (found && found.plateClass !== plateClass) {
+        return { error: `${stickerNumber} is on hand as a ${entryWords(found.plateClass)}: pick ${ENTRY_KIND_LABELS[kindOf(found.plateClass)]}.` };
+      }
       const customer = await customerFor(tx, actor, input);
+      if (customer === null) return PICK_CUSTOMER;
       if ("error" in customer) return customer;
+      if (found) {
+        await tx
+          .update(stickerPlateLog)
+          .set({ customerId: customer.id, createdAt: sql`now()`, createdByUserId: actor.id })
+          .where(eq(stickerPlateLog.id, found.id));
+        await audit(tx, actor, "sticker.logged", found.id, { stickerNumber, plateClass, customerId: customer.id, fromStock: true });
+        return { id: found.id, customerId: customer.id, fromStock: true };
+      }
       const [row] = await tx
         .insert(stickerPlateLog)
         .values({ shopId: actor.shop.id, customerId: customer.id, stickerNumber, plateClass, createdByUserId: actor.id })
         .returning({ id: stickerPlateLog.id });
       await audit(tx, actor, "sticker.logged", row.id, { stickerNumber, plateClass, customerId: customer.id });
-      return { id: row.id, customerId: customer.id };
+      return { id: row.id, customerId: customer.id, fromStock: false };
     });
   } catch (error) {
     // Logged by someone else a moment ago.
@@ -280,7 +320,9 @@ export async function logSticker(actor: CurrentUser, input: StickerInput): Promi
   }
 }
 
-// Corrects an entry: its number, what it is (a sticker or a plate's class) or its customer.
+// Corrects an entry: its number, what it is (a sticker or a plate's class)
+// or its customer. One on hand can be corrected and stay on hand (no
+// customer picked), or be handed out to the customer picked, logged now.
 export async function updateSticker(actor: CurrentUser, id: string, input: StickerInput): Promise<{ ok: true } | { error: string }> {
   if (!isUuid(id)) return NOT_HERE;
   const checked = checkStickerEntry(input);
@@ -297,12 +339,26 @@ export async function updateSticker(actor: CurrentUser, id: string, input: Stick
       const taken = await alreadyLogged(tx, stickerNumber, id);
       if (taken) return taken;
       const customer = await customerFor(tx, actor, input);
-      if ("error" in customer) return customer;
-      const after = { stickerNumber, plateClass, customerId: customer.id };
+      // One handed out stays someone's.
+      if (customer === null && before.customerId !== null) return PICK_CUSTOMER;
+      if (customer !== null && "error" in customer) return customer;
+      const after = { stickerNumber, plateClass, customerId: customer?.id ?? null };
       const fields = (Object.keys(after) as (keyof typeof after)[]).filter((key) => before[key] !== after[key]);
       if (fields.length === 0) return { ok: true as const };
-      await tx.update(stickerPlateLog).set(after).where(eq(stickerPlateLog.id, id));
-      await audit(tx, actor, "sticker.updated", id, { stickerNumber, fields, ...(fields.includes("stickerNumber") ? { was: before.stickerNumber } : {}) });
+      const handedOut = before.customerId === null && after.customerId !== null;
+      await tx
+        .update(stickerPlateLog)
+        .set({ ...after, ...(handedOut ? { createdAt: sql`now()`, createdByUserId: actor.id } : {}) })
+        .where(eq(stickerPlateLog.id, id));
+      await audit(
+        tx,
+        actor,
+        handedOut ? "sticker.logged" : "sticker.updated",
+        id,
+        handedOut
+          ? { stickerNumber, plateClass, customerId: after.customerId, fromStock: true }
+          : { stickerNumber, fields, ...(fields.includes("stickerNumber") ? { was: before.stickerNumber } : {}) },
+      );
       return { ok: true as const };
     });
   } catch (error) {
@@ -311,7 +367,8 @@ export async function updateSticker(actor: CurrentUser, id: string, input: Stick
   }
 }
 
-// Removes an entry logged by mistake; the audit log keeps what it was.
+// Removes an entry logged by mistake, or one on hand that's damaged or
+// void; the audit log keeps what it was.
 export async function removeSticker(actor: CurrentUser, id: string): Promise<{ ok: true; stickerNumber: string } | { error: string }> {
   if (!isUuid(id)) return NOT_HERE;
   return withShop(actor.shop.id, async (tx) => {
@@ -327,68 +384,73 @@ export async function removeSticker(actor: CurrentUser, id: string): Promise<{ o
 
 // --- Stock on hand ---------------------------------------------------------------
 
-// Each kind's stock the shop has counted, in the log's order (stickers, then
-// each class of plates): the count, when it was made, and how many of that
-// kind were logged after it, an import's too. Worked out as it's read, so a
-// correction (a sticker that was a plate) or a removal counts by itself.
-async function readStock(tx: ShopTransaction): Promise<StockLevel[]> {
-  const rows = await tx
-    .select({
-      kind: stickerPlateStock.kind,
-      counted: stickerPlateStock.counted,
-      countedAt: stickerPlateStock.countedAt,
-      used: sql<number>`(select count(*)::int from ${stickerPlateLog}
-        where ${stickerPlateLog.createdAt} > ${stickerPlateStock.countedAt}
-          and coalesce(${stickerPlateLog.plateClass}::text, 'sticker') = ${stickerPlateStock.kind})`,
-    })
-    .from(stickerPlateStock);
-  return ENTRY_KINDS.flatMap((kind) => rows.filter((row) => row.kind === kind));
-}
-
+// Each kind the shop keeps in stock (any of its numbers ever on hand), in
+// the log's order: how many are on hand, and the next to hand out (the
+// first of them added, as the shop's sheet lists them).
 export async function getStickerStock(shopId: string): Promise<StockLevel[]> {
-  return withShop(shopId, readStock);
+  const rows = await withShop(shopId, (tx) =>
+    tx
+      .select({
+        plateClass: stickerPlateLog.plateClass,
+        onHand: sql<number>`count(*) filter (where ${stickerPlateLog.customerId} is null)::int`,
+        next: sql<string | null>`(array_agg(${stickerPlateLog.stickerNumber} order by ${stickerPlateLog.createdAt}, ${stickerPlateLog.id})
+          filter (where ${stickerPlateLog.customerId} is null))[1]`,
+      })
+      .from(stickerPlateLog)
+      .where(isNotNull(stickerPlateLog.receivedAt))
+      .groupBy(stickerPlateLog.plateClass),
+  );
+  return ENTRY_KINDS.flatMap((kind) =>
+    rows.filter((row) => kindOf(row.plateClass) === kind).map((row) => ({ kind, onHand: row.onHand, next: row.next })),
+  );
 }
 
-// Records stock: a delivery received (added to what's on hand, the count's
-// date kept, so what's been logged since still comes off) or a count of
-// what's on the shelf now (replacing the count, from now). Says what's left
-// after it, and audits it with what the app had before.
-export async function updateStickerStock(
+// Adds a delivery to stock, on hand: one number, or a run from the first
+// to the last, in that order (so the first is handed out first). A number
+// already in the log is left as it is, and counted.
+export async function addStock(
   actor: CurrentUser,
-  input: { kind: unknown; mode: unknown; quantity: unknown },
-): Promise<{ left: number; message: string } | { error: string }> {
-  const checked = checkStockUpdate(input);
-  if ("error" in checked) return checked;
-  const { kind, mode, quantity } = checked.update;
+  input: { kind: unknown; from: unknown; to: unknown },
+): Promise<{ added: number; already: number; message: string } | { error: string }> {
+  const kind = parseKindFilter(input.kind);
+  if (!kind) return { error: "Pick what they are: stickers, or Class 1 or Class 2 plates." };
+  const range = stockRange(input.from, input.to);
+  if ("error" in range) return range;
+  const plateClass = classOf(kind);
+  const { numbers } = range;
   return withShop(actor.shop.id, async (tx) => {
-    // Held to the end, so what's left before and after is this change's alone.
-    await tx.select({ kind: stickerPlateStock.kind }).from(stickerPlateStock).where(eq(stickerPlateStock.kind, kind)).for("update");
-    const before = (await readStock(tx)).find((level) => level.kind === kind);
-    const was = before ? stockLeft(before) : null;
-    if (mode === "received" && before && before.counted + quantity > MAX_STOCK) {
-      return { error: `That would be more than ${MAX_STOCK.toLocaleString("en-US")} on hand. Count what's on the shelf instead.` };
+    const rows = await tx
+      .insert(stickerPlateLog)
+      .values(
+        numbers.map((stickerNumber, index) => ({
+          shopId: actor.shop.id,
+          customerId: null,
+          stickerNumber,
+          plateClass,
+          receivedAt: sql`now()`,
+          createdByUserId: actor.id,
+          // A microsecond apart, in order.
+          createdAt: sql`now() + ${index} * interval '1 microsecond'`,
+        })),
+      )
+      .onConflictDoNothing()
+      .returning({ id: stickerPlateLog.id });
+    const added = rows.length;
+    const already = numbers.length - added;
+    if (added > 0) {
+      await audit(tx, actor, "stickers.stocked", randomUUID(), {
+        plateClass,
+        from: numbers[0],
+        to: numbers[numbers.length - 1],
+        added,
+        already,
+      });
     }
-    // The first delivery of a kind nobody has counted starts its count.
-    const set =
-      mode === "received"
-        ? { counted: sql`${stickerPlateStock.counted} + ${quantity}`, updatedByUserId: actor.id, updatedAt: sql`now()` }
-        : { counted: quantity, countedAt: sql`now()`, updatedByUserId: actor.id, updatedAt: sql`now()` };
-    await tx
-      .insert(stickerPlateStock)
-      .values({ shopId: actor.shop.id, kind, counted: quantity, updatedByUserId: actor.id })
-      .onConflictDoUpdate({ target: [stickerPlateStock.shopId, stickerPlateStock.kind], set });
-    const after = (await readStock(tx)).find((level) => level.kind === kind);
-    const left = after ? stockLeft(after) : quantity;
-    await tx.insert(auditLog).values({
-      shopId: actor.shop.id,
-      actorUserId: actor.id,
-      action: mode === "received" ? "sticker_stock.received" : "sticker_stock.counted",
-      targetType: "sticker_stock",
-      targetId: kind,
-      details: { kind, quantity, left, was },
-    });
-    const what = mode === "received" ? `Added ${stockWords(kind, quantity)}` : `Counted ${stockWords(kind, quantity)} on hand`;
-    return { left, message: mode === "received" ? `${what}: ${left.toLocaleString("en-US")} left.` : `${what}.` };
+    const message =
+      added === 0
+        ? `${numbers.length === 1 ? `${numbers[0]} is` : "Those are all"} in the log already: nothing added.`
+        : `Added ${stockWords(kind, added)} to stock${already > 0 ? ` (${already.toLocaleString("en-US")} in the log already, left as ${already === 1 ? "it is" : "they are"})` : ""}.`;
+    return { added, already, message };
   });
 }
 
@@ -402,17 +464,19 @@ const rowOf = (entry: unknown) => {
 };
 
 // Saves one batch of an imported Sticker & Plate log, each sticker and
-// plate checked as the form checks it. A number already in the log is left
-// as it is (and said so when the log has it for someone else, or as
-// something else), so importing the same file again adds nothing. Each
-// one's customer is
-// found on Customers by name, either way round ("Rudd, Benjamin" finds
-// Benjamin Rudd), and by phone number when the file has one, the way the
-// customer import finds them; anyone not there is added as written, once
-// however many stickers they have. A name that several customers share,
-// with nothing in the file to say which, is left out with a note: that
-// sticker is logged on the form, picking them. Stickers are logged in the
-// file's order, so the log (newest first) lists the file's last row first.
+// plate checked as the form checks it. One without a customer is on hand:
+// added to stock. A number already in the log is left as it is (and said
+// so when the log has it for someone else, or as something else), so
+// importing the same file again adds nothing; but one on hand in the log
+// that the file now names a customer for is handed out to them. Each
+// one's customer is found on Customers by name, either way round ("Rudd,
+// Benjamin" finds Benjamin Rudd), and by phone number when the file has
+// one, the way the customer import finds them; anyone not there is added
+// as written, once however many stickers they have. A name that several
+// customers share, with nothing in the file to say which, is left out with
+// a note: that sticker is logged on the form, picking them. Stickers are
+// logged in the file's order, so the log (newest first) lists the file's
+// last row first, and the first of a list on hand is handed out first.
 // One import at a time per shop (a lock to the end of the batch); the batch
 // is recorded in audit_log as stickers.imported, with its counts.
 export async function importStickers(
@@ -430,20 +494,23 @@ export async function importStickers(
 
   return withShop(actor.shop.id, async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext('sticker-import'), hashtext(${actor.shop.id}))`);
-    // The batch's stickers that are in the log already, and whose they are.
+    // The batch's stickers that are in the log already, and whose they are
+    // (null: on hand).
     const numbers = [...new Set(valid.map((entry) => entry.stickerNumber))];
     const logged = numbers.length
       ? await tx
-          .select({ stickerNumber: stickerPlateLog.stickerNumber, plateClass: stickerPlateLog.plateClass, customerName: customers.name })
+          .select({ id: stickerPlateLog.id, stickerNumber: stickerPlateLog.stickerNumber, plateClass: stickerPlateLog.plateClass, customerName: customers.name })
           .from(stickerPlateLog)
-          .innerJoin(customers, eq(customers.id, stickerPlateLog.customerId))
+          .leftJoin(customers, eq(customers.id, stickerPlateLog.customerId))
           .where(inArray(stickerPlateLog.stickerNumber, numbers))
       : [];
-    const inLog = new Map(logged.map((entry) => [entry.stickerNumber, entry]));
+    const inLog = new Map<string, { id: string | null; plateClass: PlateClass | null; customerName: string | null }>(
+      logged.map((entry) => [entry.stickerNumber, entry]),
+    );
     // Customers on file by name either way round, worked out by Postgres on
     // both sides, then matched by personKey; oldest first, so the same file
     // finds the same one.
-    const names = [...new Set(valid.map((entry) => entry.customer.name))];
+    const names = [...new Set(valid.flatMap((entry) => (entry.customer ? [entry.customer.name] : [])))];
     const onFile: Person[] = names.length
       ? await tx
           .select({ id: customers.id, name: customers.name, phone: customers.phone, email: customers.email })
@@ -458,27 +525,11 @@ export async function importStickers(
       : [];
     const byName = new Map<string, Person[]>();
     for (const person of onFile) byName.set(personKey(person.name), [...(byName.get(personKey(person.name)) ?? []), person]);
-
-    const outcomes: StickerImportOutcome[] = [];
     const newCustomers: (typeof customers.$inferInsert & { id: string })[] = [];
-    const newStickers: { customerId: string; stickerNumber: string; plateClass: PlateClass | null; outcome: StickerImportOutcome }[] = [];
-    for (const { row, entry } of checked) {
-      if ("error" in entry) {
-        outcomes.push({ row, result: "failed", customer: null, message: entry.error });
-        continue;
-      }
-      const { stickerNumber, plateClass, customer } = entry.entry;
-      const already = inLog.get(stickerNumber);
-      if (already) {
-        const same = personKey(already.customerName) === personKey(customer.name) && already.plateClass === plateClass;
-        outcomes.push({
-          row,
-          result: "already",
-          customer: null,
-          message: same ? null : `${stickerNumber} is in the log already, as a ${entryWords(already.plateClass)} for ${already.customerName}: left as it is.`,
-        });
-        continue;
-      }
+
+    // The customer on file for an entry, or one to add; a message when
+    // several share the name and nothing says which.
+    const personFor = (customer: NonNullable<StickerImportEntry["customer"]>): Person | { ambiguous: number } => {
       const key = personKey(customer.name);
       const people = byName.get(key) ?? [];
       // Matched under the one name, however each is written.
@@ -486,57 +537,104 @@ export async function importStickers(
         people.map((person) => ({ ...person, name: key })),
         { name: key, phone: customer.phone, email: null },
       );
-      if (!found.match && found.ambiguous > 1) {
+      if (!found.match && found.ambiguous > 1) return { ambiguous: found.ambiguous };
+      if (found.match) return found.match;
+      const person = { id: randomUUID(), name: customer.name, phone: customer.phone, email: null };
+      byName.set(key, [...people, person]);
+      newCustomers.push({ id: person.id, shopId: actor.shop.id, name: customer.name, phone: customer.phone, createdByUserId: actor.id });
+      return person;
+    };
+
+    const outcomes: StickerImportOutcome[] = [];
+    // What to save, each at its place in the file (seq), so the log keeps
+    // the file's order: a new entry, or one on hand handed out (id).
+    type Saving = { id: string | null; customerId: string | null; stickerNumber: string; plateClass: PlateClass | null; seq: number; outcome: StickerImportOutcome };
+    const saving: Saving[] = [];
+    checked.forEach(({ row, entry }, seq) => {
+      if ("error" in entry) {
+        outcomes.push({ row, result: "failed", customer: null, message: entry.error });
+        return;
+      }
+      const { stickerNumber, plateClass, customer } = entry.entry;
+      const already = inLog.get(stickerNumber);
+      // On hand in the log, and the file says whom it went to: handed out.
+      const handOut = already && already.id !== null && already.customerName === null && customer !== null && already.plateClass === plateClass;
+      if (already && !handOut) {
+        const samePerson =
+          already.customerName === null ? customer === null : customer !== null && personKey(already.customerName) === personKey(customer.name);
         outcomes.push({
           row,
-          result: "failed",
+          result: "already",
           customer: null,
-          message: `${found.ambiguous} customers are called ${customer.name}, and nothing in the file says which: log ${entryWords(plateClass)} ${stickerNumber} on the log's form, picking them.`,
+          message:
+            samePerson && already.plateClass === plateClass
+              ? null
+              : `${stickerNumber} is in the log already, as a ${entryWords(already.plateClass)} ${already.customerName === null ? "on hand" : `for ${already.customerName}`}: left as it is.`,
         });
-        continue;
+        return;
       }
-      let person = found.match;
-      if (!person) {
-        person = { id: randomUUID(), name: customer.name, phone: customer.phone, email: null };
-        byName.set(key, [...people, person]);
-        newCustomers.push({ id: person.id, shopId: actor.shop.id, name: customer.name, phone: customer.phone, createdByUserId: actor.id });
+      let customerId: string | null = null;
+      if (customer) {
+        const person = personFor(customer);
+        if ("ambiguous" in person) {
+          outcomes.push({
+            row,
+            result: "failed",
+            customer: null,
+            message: `${person.ambiguous} customers are called ${customer.name}, and nothing in the file says which: log ${entryWords(plateClass)} ${stickerNumber} on the log's form, picking them.`,
+          });
+          return;
+        }
+        customerId = person.id;
       }
-      inLog.set(stickerNumber, { stickerNumber, plateClass, customerName: customer.name });
-      const outcome: StickerImportOutcome = { row, result: "logged", customer: null, message: null };
-      newStickers.push({ customerId: person.id, stickerNumber, plateClass, outcome });
+      inLog.set(stickerNumber, { id: null, plateClass, customerName: customer?.name ?? null });
+      const outcome: StickerImportOutcome = { row, result: customer ? "logged" : "stocked", customer: null, message: null };
+      saving.push({ id: handOut ? already.id : null, customerId, stickerNumber, plateClass, seq, outcome });
       outcomes.push(outcome);
-    }
+    });
 
     if (newCustomers.length > 0) await tx.insert(customers).values(newCustomers);
     // A sticker logged on the form while this ran is left as it is.
     const saved = new Set<string>();
-    if (newStickers.length > 0) {
+    const adding = saving.filter((each) => each.id === null);
+    if (adding.length > 0) {
       const rows = await tx
         .insert(stickerPlateLog)
         .values(
-          newStickers.map(({ customerId, stickerNumber, plateClass }, index) => ({
+          adding.map(({ customerId, stickerNumber, plateClass, seq }) => ({
             shopId: actor.shop.id,
             customerId,
             stickerNumber,
             plateClass,
+            receivedAt: customerId === null ? sql`now()` : null,
             createdByUserId: actor.id,
             // A microsecond apart, in the file's order.
-            createdAt: sql`now() + ${index} * interval '1 microsecond'`,
+            createdAt: sql`now() + ${seq} * interval '1 microsecond'`,
           })),
         )
         .onConflictDoNothing()
         .returning({ stickerNumber: stickerPlateLog.stickerNumber });
       for (const { stickerNumber } of rows) saved.add(stickerNumber);
     }
+    for (const { id, customerId, stickerNumber, seq } of saving) {
+      if (id === null || customerId === null) continue;
+      const [handed] = await tx
+        .update(stickerPlateLog)
+        .set({ customerId, createdAt: sql`now() + ${seq} * interval '1 microsecond'`, createdByUserId: actor.id })
+        .where(and(eq(stickerPlateLog.id, id), isNull(stickerPlateLog.customerId)))
+        .returning({ stickerNumber: stickerPlateLog.stickerNumber });
+      if (handed) saved.add(stickerNumber);
+    }
     // Each customer added is counted on the first sticker of theirs logged;
     // one added only for a sticker that wasn't is taken off again.
     const added = new Set(newCustomers.map((customer) => customer.id));
     const credited = new Set<string>();
-    for (const { customerId, stickerNumber, outcome } of newStickers) {
+    for (const { customerId, stickerNumber, outcome } of saving) {
       if (!saved.has(stickerNumber)) {
         Object.assign(outcome, { result: "already", message: `${stickerNumber} was logged on the form while this import ran: left as it is.` });
         continue;
       }
+      if (customerId === null) continue;
       const isNew = added.has(customerId) && !credited.has(customerId);
       if (isNew) credited.add(customerId);
       outcome.customer = isNew ? "added" : "found";
@@ -548,6 +646,7 @@ export async function importStickers(
     await audit(tx, actor, "stickers.imported", String(input.importId), {
       fileName,
       logged: count("logged"),
+      stocked: count("stocked"),
       already: count("already"),
       customersAdded: credited.size,
       failed: count("failed"),

@@ -15,7 +15,7 @@ import { after, before, describe, test } from "node:test";
 import { and, eq, sql } from "drizzle-orm";
 
 import { systemDb, withShop } from "../src/db";
-import { auditLog, customers, shops, stickerPlateLog, stickerPlateStock, users } from "../src/db/schema";
+import { auditLog, customers, shops, stickerPlateLog, users } from "../src/db/schema";
 import { parseCsv } from "../src/lib/csv";
 import { detectDelimiter, pastedDelimiter, readSpreadsheet } from "../src/lib/customer-import-rules";
 import { createCustomer, removeCustomer } from "../src/lib/customers";
@@ -34,6 +34,7 @@ import {
   type StickerImportRow,
 } from "../src/lib/sticker-import-rules";
 import {
+  addStock,
   exportStickerLog,
   getStickerEntry,
   getStickerStock,
@@ -44,18 +45,17 @@ import {
   searchCustomersForLog,
   stickersForCustomer,
   updateSticker,
-  updateStickerStock,
 } from "../src/lib/sticker-log";
 import {
   checkStickerEntry,
-  checkStockUpdate,
   entryLabel,
   isLowStock,
   lowStockMessage,
   normalizeSticker,
   parseKindFilter,
+  parseOnHandFilter,
   stickerLogCsv,
-  stockLeft,
+  stockRange,
   type EntryKind,
   type StockLevel,
 } from "../src/lib/sticker-log-rules";
@@ -135,34 +135,35 @@ const SHEET = [
 ].join("\n");
 
 describe("the rules for stock on hand", () => {
-  test("stock is received (added) or counted (what's on the shelf), a whole number of stickers or one class of plates", () => {
-    assert.deepEqual(checkStockUpdate({ kind: "sticker", mode: "received", quantity: " 1,000 " }), { update: { kind: "sticker", mode: "received", quantity: 1000 } });
-    assert.deepEqual(checkStockUpdate({ kind: "2", mode: "counted", quantity: "0" }), { update: { kind: "2", mode: "counted", quantity: 0 } });
-    // A delivery of none is a mistake; a count of none is an empty shelf.
-    assert.deepEqual(checkStockUpdate({ kind: "1", mode: "received", quantity: "0" }), { error: "Enter how many were received." });
-    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "" }));
-    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "-3" }));
-    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "2.5" }));
-    assert.ok("error" in checkStockUpdate({ kind: "1", mode: "counted", quantity: "100001" }));
-    assert.ok("error" in checkStockUpdate({ kind: "3", mode: "counted", quantity: "5" }));
-    assert.ok("error" in checkStockUpdate({ kind: "sticker", mode: "used", quantity: "5" }));
-  });
-
-  test("under 10 left is getting low, and says what's left of each", () => {
-    const level = (kind: EntryKind, counted: number, used: number): StockLevel => ({ kind, counted, used, countedAt: new Date() });
-    assert.equal(isLowStock(level("sticker", 20, 10)), false);
-    assert.equal(isLowStock(level("sticker", 20, 11)), true);
-    assert.equal(stockLeft(level("sticker", 20, 11)), 9);
-    // More logged than counted is none left, not fewer than none.
-    assert.equal(stockLeft(level("2", 3, 5)), 0);
+  test("under 10 on hand is getting low, and says how many of each are left", () => {
+    const level = (kind: EntryKind, onHand: number): StockLevel => ({ kind, onHand, next: null });
+    assert.equal(isLowStock(level("sticker", 10)), false);
+    assert.equal(isLowStock(level("sticker", 9)), true);
     assert.equal(lowStockMessage([]), null);
-    assert.equal(lowStockMessage([level("sticker", 50, 2), level("1", 10, 0)]), null);
-    assert.equal(lowStockMessage([level("sticker", 20, 11)]), "Getting low: 9 stickers left.");
-    // In the log's order, whatever order they come in.
+    assert.equal(lowStockMessage([level("sticker", 48), level("1", 10)]), null);
+    assert.equal(lowStockMessage([level("sticker", 9)]), "Getting low: 9 stickers left.");
+    // In the log's order, whatever order they come in; none left is low too.
     assert.equal(
-      lowStockMessage([level("2", 3, 5), level("1", 1, 0), level("sticker", 7, 0)]),
+      lowStockMessage([level("2", 0), level("1", 1), level("sticker", 7)]),
       "Getting low: 7 stickers, 1 Class 1 plate and 0 Class 2 plates left.",
     );
+    assert.equal(parseOnHandFilter("on-hand"), true);
+    assert.equal(parseOnHandFilter(undefined), false);
+  });
+
+  test("a delivery is one number, or a run from the first to the last", () => {
+    assert.deepEqual(stockRange(" t280400 ", ""), { numbers: ["T280400"] });
+    assert.deepEqual(stockRange("T280408", "t280411"), { numbers: ["T280408", "T280409", "T280410", "T280411"] });
+    // Leading zeros stay; everything before the digits at the end stays.
+    assert.deepEqual(stockRange("PA-0098", "PA-0101"), { numbers: ["PA-0098", "PA-0099", "PA-0100", "PA-0101"] });
+    assert.deepEqual(stockRange("90W8", "90W11"), { numbers: ["90W8", "90W9", "90W10", "90W11"] });
+    assert.deepEqual(stockRange("90W14", "90W14"), { numbers: ["90W14"] });
+    assert.deepEqual(stockRange("", "T1"), { error: "Enter the first number." });
+    assert.deepEqual(stockRange("T280411", "T280408"), { error: "T280408 comes before T280411." });
+    assert.deepEqual(stockRange("90W14", "93Y20"), { error: "90W14 and 93Y20 don't start the same, so they aren't one run." });
+    assert.ok("error" in stockRange("ABC", "ABD"), "nothing to count up");
+    assert.ok("error" in stockRange("T1", "T501"), "more than 500 at a time");
+    assert.ok("error" in stockRange("=1", ""));
   });
 });
 
@@ -252,12 +253,13 @@ describe("importing a log: the rules", () => {
     assert.deepEqual(plan.stickers, [
       { row: 3, stickerNumber: "T-1001", customerName: "Dana Whitfield", phone: "(814) 555-0199", plateClass: null },
       { row: 5, stickerNumber: "T-1002", customerName: "Rhett Carver", phone: null, plateClass: null },
+      // No customer beside it: one on hand.
+      { row: 7, stickerNumber: "T-1003", customerName: null, phone: null, plateClass: null },
       { row: 11, stickerNumber: "T-1006", customerName: "Walt Ostrowski", phone: null, plateClass: null },
     ]);
     assert.deepEqual(plan.notes, [
       { row: 4, message: "Sticker T-1001 is on row 3 too: logged once." },
       { row: 5, message: "Phone “call his wife” left out: A phone number is digits, with spaces, dashes or brackets if you like." },
-      { row: 7, message: "No Customer Name for sticker T-1003: left out." },
       { row: 8, message: "No Sticker # for “Walt Ostrowski”: left out." },
       { row: 9, message: "Sticker “=1+1”: A sticker or plate number is letters and digits (dashes, dots and slashes are fine). Left out." },
       { row: 10, message: "T-1001 is also on row 3, as a sticker for Dana Whitfield: only that one is logged." },
@@ -275,10 +277,11 @@ describe("importing a log: the rules", () => {
       plan.stickers.map((entry) => [entry.row, entry.stickerNumber, entry.customerName, entry.plateClass]),
       [
         [2, "90W14", "Elkin, Tyler", 1],
+        [3, "90W15", null, 1],
         [4, "90W16", "Henry, Ashley", 1],
       ],
     );
-    assert.deepEqual(plan.notes, [{ row: 3, message: "No Customer Name for Class 1 plate 90W15: left out." }]);
+    assert.deepEqual(plan.notes, []);
     // A Type column says for each row; what's picked is for rows without one.
     const typed = pasted(["Sticker / Plate #\tCustomer Name\tType", "A1\tDana Whitfield\tSticker", "A2\tDana Whitfield\tClass 2 plate", "A3\tDana Whitfield\t", "A4\tDana Whitfield\tClass 3"]);
     const typedPlan = planStickerImport(typed, 0, stickerColumns(typed[0]), { kind: "1" });
@@ -309,6 +312,7 @@ describe("importing a log: the rules", () => {
       { stickerNumber: "T280377", customerName: "Henry, Michael", plateClass: null, createdAt: new Date("2026-10-30T15:00:00Z"), createdBy: "Sam" },
       { stickerNumber: "90W14", customerName: "Elkin, Tyler", plateClass: 1, createdAt: new Date("2026-10-30T16:00:00Z"), createdBy: null },
       { stickerNumber: "93Y67", customerName: "Austin, Matt", plateClass: 2, createdAt: new Date("2026-10-30T17:00:00Z"), createdBy: null },
+      { stickerNumber: "93Y68", customerName: null, plateClass: 2, createdAt: new Date("2026-10-30T17:00:00Z"), createdBy: null },
     ]);
     const read = await readSpreadsheet("sticker-plate-log-2026-10-30.csv", new TextEncoder().encode(csv));
     assert.ok("sheets" in read, JSON.stringify(read));
@@ -320,6 +324,7 @@ describe("importing a log: the rules", () => {
         ["T280377", "Henry, Michael", null],
         ["90W14", "Elkin, Tyler", 1],
         ["93Y67", "Austin, Matt", 2],
+        ["93Y68", null, 2],
       ],
     );
     assert.deepEqual(plan.notes, []);
@@ -329,12 +334,14 @@ describe("importing a log: the rules", () => {
     const checked = checkStickerImport({ stickerNumber: " #pa-7 ", customerName: " Dana  Whitfield ", phone: "8145550199", plateClass: 2 });
     assert.ok("entry" in checked, JSON.stringify(checked));
     assert.deepEqual(
-      [checked.entry.stickerNumber, checked.entry.plateClass, checked.entry.customer.name, checked.entry.customer.phone],
+      [checked.entry.stickerNumber, checked.entry.plateClass, checked.entry.customer?.name, checked.entry.customer?.phone],
       ["PA-7", 2, "Dana Whitfield", "(814) 555-0199"],
     );
     const sticker = checkStickerImport({ stickerNumber: "T280377", customerName: "Henry, Michael", plateClass: null });
     assert.ok("entry" in sticker && sticker.entry.plateClass === null);
-    assert.ok("error" in checkStickerImport({ stickerNumber: "PA-8", customerName: "", plateClass: 1 }));
+    // No name: on hand.
+    assert.deepEqual(checkStickerImport({ stickerNumber: "PA-8", customerName: null, plateClass: 1 }), { entry: { stickerNumber: "PA-8", plateClass: 1, customer: null } });
+    assert.deepEqual(checkStickerImport({ stickerNumber: "PA-8", customerName: "", plateClass: 1 }), { entry: { stickerNumber: "PA-8", plateClass: 1, customer: null } });
     assert.ok("error" in checkStickerImport({ stickerNumber: "PA-8", customerName: "Dana Whitfield", plateClass: 3 }));
     assert.ok("error" in checkStickerImport({ stickerNumber: "PA-8", customerName: "Dana Whitfield", phone: "call me", plateClass: 1 }));
     assert.ok("error" in checkStickerImport(null));
@@ -506,77 +513,148 @@ describe("the log", () => {
     assert.ok(count >= 6);
   });
 
-  test("stock: counted, then each one logged after comes off; deliveries add to it; under 10 is low", async () => {
+  test("stock: numbers on hand (no customer) are handed out by logging them; under 10 on hand is low", async () => {
     const shop = await createWriter(`st${suffix}`);
-    const someone = await customer(shop, "Gus Novak");
-    const left = async () => Object.fromEntries((await getStickerStock(shop.shop.id)).map((level) => [level.kind, stockLeft(level)]));
-    const log = async (stickerNumber: string, plateClass: string) => {
-      const logged = await logSticker(shop, { stickerNumber, plateClass, customerId: someone });
-      assert.ok("id" in logged, JSON.stringify(logged));
-      return logged.id;
-    };
-    // Logged before anything is counted: nothing is tracked, so nothing warns.
-    await log("S-100", "sticker");
+    const gus = await customer(shop, "Gus Novak");
+    const onHand = async () => Object.fromEntries((await getStickerStock(shop.shop.id)).map((level) => [level.kind, [level.onHand, level.next]]));
+    // Logged straight to a customer, nothing's in stock: nothing warns.
+    assert.ok("id" in (await logSticker(shop, { stickerNumber: "S-1", plateClass: "sticker", customerId: gus })));
     assert.deepEqual(await getStickerStock(shop.shop.id), []);
 
-    assert.deepEqual(await updateStickerStock(shop, { kind: "sticker", mode: "counted", quantity: "12" }), { left: 12, message: "Counted 12 stickers on hand." });
-    await log("S-101", "sticker");
-    await log("S-102", "sticker");
-    const third = await log("S-103", "sticker");
-    // A plate isn't a sticker, and plates aren't counted.
-    await log("P-1", "1");
-    assert.deepEqual(await left(), { sticker: 9 });
+    // A delivery: a run of numbers, on hand, the first of them next.
+    assert.deepEqual(await addStock(shop, { kind: "sticker", from: "t280400", to: "T280411" }), { added: 12, already: 0, message: "Added 12 stickers to stock." });
+    assert.deepEqual(await onHand(), { sticker: [12, "T280400"] });
+    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), null);
+    // Again, with one more: only the new one is added.
+    assert.deepEqual(await addStock(shop, { kind: "sticker", from: "T280411", to: "T280412" }), {
+      added: 1,
+      already: 1,
+      message: "Added 1 sticker to stock (1 in the log already, left as it is).",
+    });
+    assert.deepEqual(await addStock(shop, { kind: "sticker", from: "T280412", to: "" }), { added: 0, already: 1, message: "T280412 is in the log already: nothing added." });
+    assert.ok("error" in (await addStock(shop, { kind: "4", from: "T1", to: "" })));
+
+    // Logging one on hand hands it out: the same entry, now theirs, logged now by whoever logged it.
+    const [before] = await systemDb.select().from(stickerPlateLog).where(and(eq(stickerPlateLog.shopId, shop.shop.id), eq(stickerPlateLog.stickerNumber, "T280400")));
+    assert.equal(before.customerId, null);
+    const handed = await logSticker(shop, { stickerNumber: "t280400", plateClass: "sticker", customerId: gus });
+    assert.ok("id" in handed && handed.id === before.id && handed.fromStock, JSON.stringify(handed));
+    const [after] = await systemDb.select().from(stickerPlateLog).where(eq(stickerPlateLog.id, before.id));
+    assert.equal(after.customerId, gus);
+    assert.ok(after.createdAt > before.createdAt);
+    assert.ok(after.receivedAt);
+    const [handedAudit] = await systemDb.select().from(auditLog).where(and(eq(auditLog.targetId, before.id), eq(auditLog.action, "sticker.logged")));
+    assert.deepEqual(handedAudit.details, { stickerNumber: "T280400", plateClass: null, customerId: gus, fromStock: true });
+    // Not as something it isn't, and not twice.
+    assert.deepEqual(await logSticker(shop, { stickerNumber: "T280401", plateClass: "1", customerId: gus }), {
+      error: "T280401 is on hand as a sticker: pick Sticker.",
+    });
+    assert.deepEqual(await logSticker(shop, { stickerNumber: "T280400", plateClass: "sticker", customerId: gus }), {
+      error: "T280400 is already in the log, as a sticker for Gus Novak.",
+    });
+    for (const number of ["T280401", "T280402", "T280403"]) assert.ok("id" in (await logSticker(shop, { stickerNumber: number, plateClass: "sticker", customerId: gus })));
+    assert.deepEqual(await onHand(), { sticker: [9, "T280404"] });
     assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), "Getting low: 9 stickers left.");
 
-    // A delivery adds to what's on hand; what's logged since the count still comes off.
-    assert.deepEqual(await updateStickerStock(shop, { kind: "sticker", mode: "received", quantity: "50" }), { left: 59, message: "Added 50 stickers: 59 left." });
-    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), null);
-    // A sticker corrected to a plate, or removed, goes back on the shelf.
-    assert.ok("ok" in (await updateSticker(shop, third, { stickerNumber: "S-103", plateClass: "2", customerId: someone })));
-    assert.deepEqual(await left(), { sticker: 60 });
-    assert.ok("ok" in (await removeSticker(shop, third)));
-    assert.deepEqual(await left(), { sticker: 60 });
+    // The log lists what's handed out; the ones on hand are their own list, the next first.
+    assert.deepEqual((await listStickerLog(shop.shop.id)).items.map((entry) => entry.stickerNumber), ["T280403", "T280402", "T280401", "T280400", "S-1"]);
+    const stock = await listStickerLog(shop.shop.id, { onHand: true });
+    assert.equal(stock.total, 9);
+    assert.deepEqual([stock.items[0].stickerNumber, stock.items[0].customerName], ["T280404", null]);
+    assert.equal((await listStickerLog(shop.shop.id, { onHand: true, query: "t28041" })).total, 3);
+    // Download CSV: the ones on hand with no Customer Name, so they come back in on hand.
+    const exported = await exportStickerLog(shop.shop.id, { onHand: true });
+    assert.deepEqual([exported.length, exported[0].stickerNumber, exported[0].customerName], [9, "T280404", null]);
 
-    // The first delivery of plates starts their count; an import's entries come off too.
-    assert.deepEqual(await updateStickerStock(shop, { kind: "2", mode: "received", quantity: "3" }), { left: 3, message: "Added 3 Class 2 plates: 3 left." });
-    const imported = await importStickers(shop, { importId: randomUUID(), fileName: "log.csv", stickers: [{ row: 2, stickerNumber: "P2-1", customerName: "Gus Novak", phone: null, plateClass: 2 }] });
-    assert.ok("outcomes" in imported, JSON.stringify(imported));
-    assert.deepEqual(await left(), { sticker: 60, 2: 2 });
-    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), "Getting low: 2 Class 2 plates left.");
-
-    // A count replaces it all, from now.
-    assert.deepEqual(await updateStickerStock(shop, { kind: "sticker", mode: "counted", quantity: "5" }), { left: 5, message: "Counted 5 stickers on hand." });
-    const [stickers] = await getStickerStock(shop.shop.id);
-    assert.deepEqual([stickers.kind, stickers.counted, stickers.used], ["sticker", 5, 0]);
-    assert.ok("error" in (await updateStickerStock(shop, { kind: "sticker", mode: "received", quantity: "0" })));
-    assert.ok("error" in (await updateStickerStock(shop, { kind: "sticker", mode: "received", quantity: "99999" })));
-
-    const history = await systemDb
-      .select({ action: auditLog.action, targetType: auditLog.targetType, details: auditLog.details })
+    // One on hand, corrected, stays on hand; picking a customer on its page hands it out.
+    const spare = stock.items.at(-1)!;
+    assert.deepEqual(await updateSticker(shop, spare.id, { stickerNumber: "T280499", plateClass: "sticker" }), { ok: true });
+    assert.equal((await getStickerEntry(shop.shop.id, spare.id))?.customerId, null);
+    assert.deepEqual(await updateSticker(shop, spare.id, { stickerNumber: "T280499", plateClass: "sticker", customerId: gus }), { ok: true });
+    assert.equal((await getStickerEntry(shop.shop.id, spare.id))?.customerName, "Gus Novak");
+    // One handed out stays someone's.
+    assert.deepEqual(await updateSticker(shop, spare.id, { stickerNumber: "T280499", plateClass: "sticker" }), { error: "Pick the customer it went to, or add them." });
+    // Removing one on hand (damaged, void) takes it out of stock.
+    assert.ok("ok" in (await removeSticker(shop, stock.items[1].id)));
+    assert.deepEqual(await onHand(), { sticker: [7, "T280404"] });
+    const actions = await systemDb
+      .select({ action: auditLog.action })
       .from(auditLog)
-      .where(and(eq(auditLog.shopId, shop.shop.id), eq(auditLog.targetType, "sticker_stock")))
+      .where(and(eq(auditLog.shopId, shop.shop.id), eq(auditLog.targetType, "sticker")))
       .orderBy(auditLog.seq);
-    assert.deepEqual(history, [
-      { action: "sticker_stock.counted", targetType: "sticker_stock", details: { kind: "sticker", quantity: 12, left: 12, was: null } },
-      { action: "sticker_stock.received", targetType: "sticker_stock", details: { kind: "sticker", quantity: 50, left: 59, was: 9 } },
-      { action: "sticker_stock.received", targetType: "sticker_stock", details: { kind: "2", quantity: 3, left: 3, was: null } },
-      { action: "sticker_stock.counted", targetType: "sticker_stock", details: { kind: "sticker", quantity: 5, left: 5, was: 60 } },
-    ]);
+    assert.deepEqual(
+      actions.map((row) => row.action).filter((action) => action !== "sticker.logged"),
+      ["stickers.stocked", "stickers.stocked", "sticker.updated", "sticker.removed"],
+    );
 
-    // Another shop sees none of it, and its counts are its own.
+    // Another shop sees none of it.
     assert.deepEqual(await getStickerStock(other.shop.id), []);
-    assert.ok("left" in (await updateStickerStock(other, { kind: "sticker", mode: "counted", quantity: "2" })));
-    assert.deepEqual(await left(), { sticker: 5, 2: 2 });
-    // A row never changes shop or what it counts, and isn't removed.
-    await assert.rejects(
-      withShop(shop.shop.id, (tx) => tx.update(stickerPlateStock).set({ kind: "1" }).where(eq(stickerPlateStock.kind, "sticker"))),
-      (error: unknown) => /permission denied/.test(String((error as { cause?: unknown }).cause)),
+    assert.equal((await listStickerLog(other.shop.id, { onHand: true })).total, 0);
+    // The database won't hold one with no customer that never came into stock.
+    await assert.rejects(withShop(shop.shop.id, (tx) => tx.insert(stickerPlateLog).values({ shopId: shop.shop.id, customerId: null, stickerNumber: "X-1", plateClass: null })));
+  });
+
+  test("an import brings the numbers with no customer in on hand, and hands out ones on hand the sheet names", async () => {
+    const shop = await createWriter(`si${suffix}`);
+    const sheet = pasted([
+      "Sticker #\tCustomer Name\t\tClass 2 Plate\tCustomer Name",
+      "T280377\tHenry, Michael\t\t93Y67\tAustin, Matt",
+      "T280378\t\t\t93Y68\t",
+      "T280379\t\t\t93Y69\tvoid",
+      "T280380\t\t\t\t",
+    ]);
+    const header = findStickerHeader(sheet);
+    const plan = planStickerImport(sheet, header, stickerColumns(sheet[header]));
+    assert.deepEqual(
+      plan.stickers.map((entry) => [entry.stickerNumber, entry.customerName, entry.plateClass]),
+      [
+        ["T280377", "Henry, Michael", null],
+        ["T280378", null, null],
+        ["T280379", null, null],
+        ["T280380", null, null],
+        ["93Y67", "Austin, Matt", 2],
+        ["93Y68", null, 2],
+      ],
     );
-    await assert.rejects(
-      withShop(shop.shop.id, (tx) => tx.delete(stickerPlateStock)),
-      (error: unknown) => /permission denied/.test(String((error as { cause?: unknown }).cause)),
+    assert.deepEqual(plan.notes, [{ row: 4, message: "Class 2 plate 93Y69 is marked returned: left out." }]);
+    const first = await importStickers(shop, { importId: randomUUID(), fileName: "sheet.xlsx", stickers: plan.stickers });
+    assert.ok("outcomes" in first, JSON.stringify(first));
+    assert.deepEqual(first.outcomes.map((outcome) => outcome.result), ["logged", "stocked", "stocked", "stocked", "logged", "stocked"]);
+    assert.deepEqual(await getStickerStock(shop.shop.id), [
+      { kind: "sticker", onHand: 3, next: "T280378" },
+      { kind: "2", onHand: 1, next: "93Y68" },
+    ]);
+    assert.equal(lowStockMessage(await getStickerStock(shop.shop.id)), "Getting low: 3 stickers and 1 Class 2 plate left.");
+    const [imported] = await systemDb.select().from(auditLog).where(and(eq(auditLog.shopId, shop.shop.id), eq(auditLog.action, "stickers.imported")));
+    assert.deepEqual(imported.details, { fileName: "sheet.xlsx", logged: 2, stocked: 4, already: 0, customersAdded: 2, failed: 0 });
+
+    // The sheet again, a week on: T280378 has gone to a customer. It's handed out; the rest is as it was.
+    const later = plan.stickers.map((entry) => (entry.stickerNumber === "T280378" ? { ...entry, customerName: "Walt Ostrowski" } : entry));
+    const second = await importStickers(shop, { importId: randomUUID(), fileName: "sheet.xlsx", stickers: later });
+    assert.ok("outcomes" in second, JSON.stringify(second));
+    assert.deepEqual(
+      second.outcomes.map((outcome) => [outcome.result, outcome.customer, outcome.message]),
+      [
+        ["already", null, null],
+        ["logged", "added", null],
+        ["already", null, null],
+        ["already", null, null],
+        ["already", null, null],
+        ["already", null, null],
+      ],
     );
-    await assert.rejects(withShop(shop.shop.id, (tx) => tx.insert(stickerPlateStock).values({ shopId: other.shop.id, kind: "1", counted: 4 })));
+    const walt = await listStickerLog(shop.shop.id, { query: "T280378" });
+    assert.deepEqual([walt.total, walt.items[0].customerName], [1, "Walt Ostrowski"]);
+    assert.deepEqual((await getStickerStock(shop.shop.id)).map((level) => [level.kind, level.onHand, level.next]), [
+      ["sticker", 2, "T280379"],
+      ["2", 1, "93Y68"],
+    ]);
+    // An old sheet that still has a number on hand the log has handed out leaves the log as it is, and says so.
+    const old = await importStickers(shop, { importId: randomUUID(), fileName: "old.xlsx", stickers: plan.stickers.slice(1, 2) });
+    assert.ok("outcomes" in old);
+    assert.deepEqual(old.outcomes, [
+      { row: 3, result: "already", customer: null, message: "T280378 is in the log already, as a sticker for Walt Ostrowski: left as it is." },
+    ]);
   });
 
   const row = (n: number, stickerNumber: string, customerName: string, plateClass: 1 | 2 | null, phone: string | null = null): StickerImportRow => ({
@@ -627,7 +705,7 @@ describe("the log", () => {
     const [entry] = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, importId));
     assert.deepEqual(
       [entry.action, entry.targetType, entry.details],
-      ["stickers.imported", "sticker", { fileName: "old sticker log.xlsx", logged: 3, already: 2, customersAdded: 1, failed: 1 }],
+      ["stickers.imported", "sticker", { fileName: "old sticker log.xlsx", logged: 3, stocked: 0, already: 2, customersAdded: 1, failed: 1 }],
     );
     // The same file again logs and adds nothing.
     const again = await importStickers(writer, { importId: randomUUID(), fileName: "old sticker log.xlsx", stickers: batch });
@@ -777,7 +855,7 @@ describe("the log", () => {
     assert.equal((await named(writer.shop.id, "Austin, Matt")).length, 1);
     assert.deepEqual(await named(writer.shop.id, "Benanti, Anthony - returned"), []);
     const [entry] = await systemDb.select().from(auditLog).where(eq(auditLog.targetId, importId));
-    assert.deepEqual(entry.details, { fileName: "Sticker & Plate log.xlsx", logged: 9, already: 0, customersAdded: 7, failed: 0 });
+    assert.deepEqual(entry.details, { fileName: "Sticker & Plate log.xlsx", logged: 9, stocked: 0, already: 0, customersAdded: 7, failed: 0 });
   });
 
   test("an import batch that can't be read is refused", async () => {

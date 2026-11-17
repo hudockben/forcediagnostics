@@ -41,7 +41,7 @@ import { LOC_LIMITS, MAX_LOC_YEAR, MIN_LOC_YEAR } from "../lib/loc-rules";
 import { PAGE_FACTS_STATUSES, type PageFacts, type PageFactsStatus } from "../lib/manual-facts-rules";
 import { MAX_AMOUNT_CENTS, UNIT_CONDITIONS, UNIT_TYPES, type UnitCondition, type UnitType } from "../lib/nusr-rules";
 import { MATCH_HOWS, REBATE_COLUMNS, type MatchHow, type RebateColumn } from "../lib/rebate-rules";
-import { ENTRY_KINDS, MAX_STOCK, PLATE_CLASSES, type EntryKind, type PlateClass } from "../lib/sticker-log-rules";
+import { PLATE_CLASSES, type PlateClass } from "../lib/sticker-log-rules";
 import { MANUAL_STATUSES, type ManualStatus } from "../lib/manual-rules";
 import { ROLES, type Role } from "../lib/roles";
 
@@ -852,11 +852,11 @@ export const customerVehicles = pgTable(
 );
 
 // The Sticker & Plate log tab: each registration sticker and plate the
-// shop hands out, with its number and the customer it went to; see
-// src/lib/sticker-log.ts. A plate is Class 1 or Class 2 (plate_class); a
-// sticker has no class (null). A number is logged once per shop, and a
-// customer with stickers or plates logged can't be removed: the log is the
-// shop's record of them.
+// shop hands out, with its number and the customer it went to, and the
+// ones it has on hand (no customer yet); see src/lib/sticker-log.ts. A
+// plate is Class 1 or Class 2 (plate_class); a sticker has no class (null).
+// A number is logged once per shop, and a customer with stickers or plates
+// logged can't be removed: the log is the shop's record of them.
 export const stickerPlateLog = pgTable(
   "sticker_plate_log",
   {
@@ -864,12 +864,18 @@ export const stickerPlateLog = pgTable(
     shopId: uuid("shop_id")
       .notNull()
       .references(() => shops.id, { onDelete: "cascade" }),
-    customerId: uuid("customer_id").notNull(),
+    // Null while it's on hand: a number the shop has, not handed out yet.
+    customerId: uuid("customer_id"),
     // Upper-cased, with spaces tidied (see normalizeSticker in
     // src/lib/sticker-log-rules.ts).
     stickerNumber: text("sticker_number").notNull(),
     // 1 or 2 for a Class 1 or Class 2 plate; null for a sticker.
     plateClass: integer("plate_class").$type<PlateClass>(),
+    // When it came into stock, on hand; null for one logged straight to a
+    // customer, never on hand here.
+    receivedAt: timestamp("received_at", { withTimezone: true }),
+    // Who logged it and when: to its customer, or into stock while it's on
+    // hand (handing it out logs it again, then).
     createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -884,45 +890,16 @@ export const stickerPlateLog = pgTable(
     }),
     index("sticker_plate_log_customer").on(t.customerId),
     index("sticker_plate_log_shop_created").on(t.shopId, t.createdAt),
+    // What's on hand, and which kinds the shop keeps in stock (the tab's
+    // badge reads it on every page).
+    index("sticker_plate_log_stock").on(t.shopId, t.plateClass, t.createdAt).where(sql`${t.receivedAt} is not null`),
     check("sticker_plate_log_plate_class", sql`${t.plateClass} in (${sql.raw(PLATE_CLASSES.join(", "))})`),
     check("sticker_plate_log_sticker_number", sql`length(${t.stickerNumber}) between 1 and 40`),
+    // One without a customer is on hand, so it came into stock.
+    check("sticker_plate_log_on_hand", sql`${t.customerId} is not null or ${t.receivedAt} is not null`),
     // Which columns can change is set by the grant in
     // drizzle/0031_sticker_plate_log_grants.sql.
     pgPolicy("sticker_plate_log_own_shop", {
-      for: "all",
-      to: appUser,
-      using: sql`${t.shopId} = ${currentShopId}`,
-      withCheck: sql`${t.shopId} = ${currentShopId}`,
-    }),
-  ],
-);
-
-// The Sticker & Plate log's stock: how many stickers, and Class 1 and
-// Class 2 plates, the shop had on hand when it last counted them (plus any
-// received since). What's left is that less each one logged after
-// counted_at, worked out as it's read, so a correction or a removal in the
-// log counts by itself. One row per kind a shop has counted; see
-// getStickerStock in src/lib/sticker-log.ts.
-export const stickerPlateStock = pgTable(
-  "sticker_plate_stock",
-  {
-    shopId: uuid("shop_id")
-      .notNull()
-      .references(() => shops.id, { onDelete: "cascade" }),
-    // "sticker", "1" or "2", as the log's filter names them.
-    kind: text("kind").$type<EntryKind>().notNull(),
-    counted: integer("counted").notNull(),
-    countedAt: timestamp("counted_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
-    updatedAt: updatedAt(),
-  },
-  (t) => [
-    primaryKey({ name: "sticker_plate_stock_pk", columns: [t.shopId, t.kind] }),
-    check("sticker_plate_stock_kind", sql`${t.kind} in (${sql.raw(ENTRY_KINDS.map((kind) => `'${kind}'`).join(", "))})`),
-    check("sticker_plate_stock_counted", sql`${t.counted} between 0 and ${sql.raw(String(MAX_STOCK))}`),
-    // Which columns can change is set by the grant in
-    // drizzle/0052_sticker_plate_stock_grants.sql.
-    pgPolicy("sticker_plate_stock_own_shop", {
       for: "all",
       to: appUser,
       using: sql`${t.shopId} = ${currentShopId}`,

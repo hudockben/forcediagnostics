@@ -208,7 +208,9 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
 
       // Sticker & Plate log
       case "sticker.logged":
-        return `Logged ${stickerOrPlate(d.plateClass)} ${str(d.stickerNumber)}`;
+        return d.fromStock
+          ? `Handed out ${stickerOrPlate(d.plateClass)} ${str(d.stickerNumber)} from stock`
+          : `Logged ${stickerOrPlate(d.plateClass)} ${str(d.stickerNumber)}`;
       case "sticker.updated": {
         const fields = fieldsInWords(d.fields, STICKER_FIELD_WORDS);
         const was = str(d.was);
@@ -218,10 +220,16 @@ export function describeAuditEntry(entry: Pick<AuditLogEntry, "action" | "target
         return `Removed ${stickerOrPlate(d.plateClass)} ${str(d.stickerNumber)} from the log`;
       case "stickers.imported":
         fact("Logged", num(d.logged));
+        if (num(d.stocked) > 0) fact("On hand", num(d.stocked));
         fact("Already in the log", num(d.already));
         if (num(d.customersAdded) > 0) fact("Customers added", num(d.customersAdded));
         if (num(d.failed) > 0) fact("Left out", num(d.failed));
         return `Imported stickers and plates from ${str(d.fileName) || "a file"}`;
+      case "stickers.stocked":
+        fact("Numbers", str(d.from) === str(d.to) ? str(d.from) : `${str(d.from)} to ${str(d.to)}`);
+        if (num(d.already) > 0) fact("Already in the log", num(d.already));
+        return `Added ${stockOf(d.plateClass === 1 || d.plateClass === 2 ? String(d.plateClass) : "sticker", d.added)} to stock`;
+      // The counted stock the log kept for a while, before its numbers on hand.
       case "sticker_stock.received":
         fact("Left after", num(d.left));
         return `Added ${stockOf(d.kind, d.quantity)} to the stock`;
